@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python -c \"import shap; print\\(shap.__version__\\)\")",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(python -m streamlit --version)",
+      "Bash(where python:*)",
+      "Bash(python -c \"import shap; print\\(''shap OK'', shap.__version__\\)\")",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Bash(python -c \"import modeling; print\\(''modeling.py OK''\\)\")",
+      "Bash(python -c \"from config import AppConfig, get_model_params; print\\(''config OK''\\); print\\(''Models:'', list\\(get_model_params.__module__ for _ in [''LR'']\\)\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''app.py'', doraise=True\\); print\\(''app.py syntax OK''\\)\")",
+      "Bash(python -c \"from modeling import clean_features, train_and_select_model; print\\(''OK''\\)\")",
+      "WebSearch"
+    ]
+  }
+}
