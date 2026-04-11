@@ -591,30 +591,6 @@ def render_run_report_compact(report: RunReport, *, tr=None) -> None:
             if step.status == STATUS_ERROR:
                 st.error(f"**{step.name}** — {step.summary}")
 
-    # Compact top-of-page failed-cases panel — STS Score only.
-    # Surfaces per-patient STS Score incidents without forcing the user
-    # to scroll to the bottom of the Overview tab.  Collapsed by default
-    # so it never visually dominates the page.  The comprehensive audit
-    # view is still rendered at the bottom by ``render_run_report``.
-    for step in report.steps:
-        if step.name != "STS Score execution":
-            continue
-        if step.status == STATUS_OK or not step.incidents:
-            continue
-        import pandas as pd
-        header = _t(
-            f"STS Score failed cases — details ({len(step.incidents)})",
-            f"STS Score — casos com falha ({len(step.incidents)})",
-        )
-        with st.expander(header, expanded=False):
-            st.dataframe(
-                pd.DataFrame(step.incidents),
-                hide_index=True,
-                width="stretch",
-            )
-        break
-
-
 def render_run_report(report: RunReport, *, tr=None, title: Optional[str] = None) -> None:
     """Render a ``RunReport`` inside the Streamlit page.
 

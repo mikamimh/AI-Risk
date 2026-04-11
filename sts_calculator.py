@@ -767,7 +767,7 @@ def calculate_sts(
         sts_input,
         patient_id=patient_id,
         fetch_func=_sts_fetch_once,
-        max_retries=2,
+        max_retries=4,
     )
     calculate_sts.last_execution_log.append(record)
     return record.result
@@ -1022,7 +1022,7 @@ def calculate_sts_batch(
             chunk = local_pairs[chunk_start:chunk_end]
             try:
                 chunk_results = _run_async(
-                    _calculate_sts_chunk_async(chunk, failure_log=inner_failure_log)
+                    _calculate_sts_chunk_async(chunk, max_retries=4, failure_log=inner_failure_log)
                 )
                 for local_i, result in chunk_results.items():
                     fetched[local_i] = result or {}
