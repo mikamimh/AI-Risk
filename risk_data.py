@@ -17,9 +17,9 @@ Example:
 import re
 import sqlite3
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -441,7 +441,10 @@ def _apply_clinical_plausibility(
     out: pd.DataFrame,
     raw_df: pd.DataFrame,
     report_warnings: List["ColumnAction"],
-) -> None:
+    *,
+    ambiguous_by_col: Optional[Dict[str, Dict[Any, str]]] = None,
+    correction_records: Optional[List["CorrectionRecord"]] = None,
+) -> Dict[str, set]:
     """Apply column-specific plausibility correction to ``out`` in place.
 
     For every column listed in :data:`_CLINICAL_PLAUSIBILITY_RANGES`
@@ -453,13 +456,40 @@ def _apply_clinical_plausibility(
        and attempt one reinterpretation via
        :func:`_reinterpret_as_decimal`.
     3. If the reinterpretation lies inside the range, overwrite the
-       parsed value and append a ``corrected_plausibility`` warning.
+       parsed value.  Corrected rows whose raw token was previously
+       flagged as ambiguous by :func:`parse_number` (i.e. a comma-
+       thousands reading such as ``69,227``) are emitted as a single
+       **consolidated** warning that names both the ambiguity AND the
+       plausibility rescue in one line.  Other corrected rows keep the
+       regular ``corrected_plausibility`` warning.
     4. Otherwise, set the cell to NaN and append a
        ``cleared_implausible`` warning.
 
     Values already inside the range (or already NaN) are left
     untouched, guaranteeing that valid inputs are never modified.
+
+    Parameters
+    ----------
+    ambiguous_by_col : dict, optional
+        ``{column: {row_index: raw_text}}`` tracking tokens that
+        :func:`parse_number` flagged as EN-thousands-ambiguous during
+        the numeric conversion step.  Used to produce the consolidated
+        warning described above.
+    correction_records : list, optional
+        If provided, one :class:`CorrectionRecord` is appended per
+        corrected or cleared row for the exportable audit table.
+
+    Returns
+    -------
+    dict
+        ``{column: set of row indices}`` listing the ambiguous rows
+        that were successfully rescued by plausibility correction.
+        The caller uses this to avoid emitting a redundant generic
+        ``flagged_ambiguous`` warning for those rows.
     """
+    ambiguous_by_col = ambiguous_by_col or {}
+    covered_ambiguous_by_col: Dict[str, set] = {}
+
     for col, (lo, hi) in _CLINICAL_PLAUSIBILITY_RANGES.items():
         if col not in out.columns:
             continue
@@ -471,10 +501,15 @@ def _apply_clinical_plausibility(
         if not out_of_range_mask.any():
             continue
 
-        corrected_examples: List[str] = []
+        col_ambiguous = ambiguous_by_col.get(col, {})
+
+        consolidated_examples: List[str] = []
+        plain_corrected_examples: List[str] = []
         cleared_examples: List[str] = []
-        n_corrected = 0
+        n_consolidated = 0
+        n_plain_corrected = 0
         n_cleared = 0
+        covered_ambiguous_idxs: set = set()
 
         for idx in out.index[out_of_range_mask]:
             parsed = float(parsed_series.loc[idx])
@@ -483,6 +518,7 @@ def _apply_clinical_plausibility(
                 if (col in raw_df.columns and idx in raw_df.index)
                 else parsed
             )
+            raw_str = "" if raw_val is None else str(raw_val)
             reinterpreted = _reinterpret_as_decimal(raw_val)
 
             if (
@@ -491,12 +527,43 @@ def _apply_clinical_plausibility(
                 and lo <= reinterpreted <= hi
             ):
                 out.at[idx, col] = reinterpreted
-                n_corrected += 1
-                if len(corrected_examples) < 5:
-                    corrected_examples.append(
-                        f"raw={raw_val!r} parsed={parsed:g} "
-                        f"-> corrected={reinterpreted:g}"
+                was_ambiguous = idx in col_ambiguous
+                if was_ambiguous:
+                    covered_ambiguous_idxs.add(idx)
+                    n_consolidated += 1
+                    if len(consolidated_examples) < 5:
+                        consolidated_examples.append(
+                            f"raw {raw_val!r} parsed as {parsed:g} and "
+                            f"corrected to {reinterpreted:g} by clinical plausibility"
+                        )
+                    action_name = "consolidated_ambiguity_correction"
+                    reason = (
+                        f"ambiguous raw value parsed as EN thousands, then "
+                        f"reinterpreted as decimal within plausible range "
+                        f"[{lo:g}, {hi:g}]"
                     )
+                else:
+                    n_plain_corrected += 1
+                    if len(plain_corrected_examples) < 5:
+                        plain_corrected_examples.append(
+                            f"raw={raw_val!r} parsed={parsed:g} "
+                            f"-> corrected={reinterpreted:g}"
+                        )
+                    action_name = "corrected_plausibility"
+                    reason = (
+                        f"value outside plausible range [{lo:g}, {hi:g}]; "
+                        f"reinterpreted as decimal"
+                    )
+                if correction_records is not None:
+                    correction_records.append(CorrectionRecord(
+                        column=col,
+                        row_index=idx,
+                        raw_value=raw_str,
+                        parsed_value=parsed,
+                        action=action_name,
+                        final_value=float(reinterpreted),
+                        reason=reason,
+                    ))
             else:
                 out.at[idx, col] = np.nan
                 n_cleared += 1
@@ -504,17 +571,44 @@ def _apply_clinical_plausibility(
                     cleared_examples.append(
                         f"raw={raw_val!r} parsed={parsed:g} -> NaN"
                     )
+                if correction_records is not None:
+                    correction_records.append(CorrectionRecord(
+                        column=col,
+                        row_index=idx,
+                        raw_value=raw_str,
+                        parsed_value=parsed,
+                        action="cleared_implausible",
+                        final_value=None,
+                        reason=(
+                            f"value outside plausible range [{lo:g}, {hi:g}] "
+                            "and no safe reinterpretation; set to NaN"
+                        ),
+                    ))
 
-        if n_corrected > 0:
+        if covered_ambiguous_idxs:
+            covered_ambiguous_by_col[col] = covered_ambiguous_idxs
+
+        if n_consolidated > 0:
+            report_warnings.append(ColumnAction(
+                column=col,
+                action="consolidated_ambiguity_correction",
+                detail=(
+                    f"{n_consolidated} ambiguous value(s) corrected by "
+                    f"clinical plausibility [range {lo:g}, {hi:g}]: "
+                    + "; ".join(consolidated_examples)
+                ),
+                count=n_consolidated,
+            ))
+        if n_plain_corrected > 0:
             report_warnings.append(ColumnAction(
                 column=col,
                 action="corrected_plausibility",
                 detail=(
-                    f"{n_corrected} value(s) outside clinical range "
+                    f"{n_plain_corrected} value(s) outside clinical range "
                     f"[{lo:g}, {hi:g}] reinterpreted as decimal: "
-                    + "; ".join(corrected_examples)
+                    + "; ".join(plain_corrected_examples)
                 ),
-                count=n_corrected,
+                count=n_plain_corrected,
             ))
         if n_cleared > 0:
             report_warnings.append(ColumnAction(
@@ -528,6 +622,8 @@ def _apply_clinical_plausibility(
                 ),
                 count=n_cleared,
             ))
+
+    return covered_ambiguous_by_col
 
 
 def is_missing(value: object, column: str | None = None) -> bool:
@@ -777,6 +873,25 @@ class ColumnAction:
 
 
 @dataclass
+class CorrectionRecord:
+    """Per-row normalization action for the exportable audit table.
+
+    One record is appended for every value that the plausibility layer
+    either corrected (via decimal reinterpretation) or cleared (set to
+    NaN because no safe interpretation exists).  Records are aggregated
+    into :attr:`IngestionReport.correction_records` and can be rendered
+    as a DataFrame via :meth:`IngestionReport.audit_dataframe`.
+    """
+    column: str
+    row_index: Any                       # DataFrame index label (patient ID when set as index)
+    raw_value: str
+    parsed_value: Optional[float]
+    action: str                          # corrected_plausibility | consolidated_ambiguity_correction | cleared_implausible
+    final_value: Optional[float]
+    reason: str
+
+
+@dataclass
 class IngestionReport:
     """Structured report of all normalization actions applied during ingestion."""
     columns_converted: List[ColumnAction]
@@ -788,6 +903,7 @@ class IngestionReport:
     n_rows_output: int
     n_columns_input: int
     n_columns_output: int
+    correction_records: List[CorrectionRecord] = field(default_factory=list)
 
     def has_errors(self) -> bool:
         """True if any required columns are missing."""
@@ -807,6 +923,33 @@ class IngestionReport:
         for a in self.warnings:
             lines.append(f"[WARNING] {a.column}: {a.detail}")
         return lines
+
+    def audit_dataframe(self) -> pd.DataFrame:
+        """Exportable per-row audit table of every normalization action.
+
+        Columns: ``column``, ``row_index``, ``raw_value``, ``parsed_value``,
+        ``action``, ``final_value``, ``reason``.  Empty DataFrame (with the
+        correct schema) when no corrections were applied.
+        """
+        cols = [
+            "column", "row_index", "raw_value", "parsed_value",
+            "action", "final_value", "reason",
+        ]
+        if not self.correction_records:
+            return pd.DataFrame(columns=cols)
+        rows = [
+            {
+                "column": r.column,
+                "row_index": r.row_index,
+                "raw_value": r.raw_value,
+                "parsed_value": r.parsed_value,
+                "action": r.action,
+                "final_value": r.final_value,
+                "reason": r.reason,
+            }
+            for r in self.correction_records
+        ]
+        return pd.DataFrame(rows, columns=cols)
 
 
 @dataclass
@@ -896,6 +1039,12 @@ def normalize_dataframe(
     cols_dropped: List[ColumnAction] = []
     required_failures: List[ColumnAction] = []
     report_warnings: List[ColumnAction] = []
+    correction_records: List[CorrectionRecord] = []
+    # Per-column map of row indices whose raw token was flagged as
+    # EN-thousands-ambiguous by parse_number.  Passed into
+    # _apply_clinical_plausibility so it can merge ambiguity +
+    # successful plausibility correction into a single warning.
+    ambiguous_by_col: Dict[str, Dict[Any, str]] = {}
 
     # ── 1. Missing-token normalization ──────────────────────────────
     for col in out.columns:
@@ -923,11 +1072,18 @@ def normalize_dataframe(
         if non_null.empty:
             continue
 
-        ambiguous: list = []
-        converted = non_null.map(
-            lambda v: parse_number(v, _warn_ambiguous=ambiguous, strict=True)
-        )
-        n_parsed = int(converted.notna().sum())
+        # Per-row scan: capture ambiguous tokens with their row index
+        # so they can later be merged with plausibility corrections.
+        parsed_values: Dict[Any, float] = {}
+        col_ambiguous: Dict[Any, str] = {}
+        for idx, v in non_null.items():
+            local_ambig: list = []
+            parsed_values[idx] = parse_number(
+                v, _warn_ambiguous=local_ambig, strict=True
+            )
+            if local_ambig:
+                col_ambiguous[idx] = local_ambig[0]
+        n_parsed = sum(1 for x in parsed_values.values() if pd.notna(x))
         pct = n_parsed / len(non_null)
 
         if col in _force or pct >= 0.6:
@@ -940,24 +1096,42 @@ def normalize_dataframe(
                 detail=f"{n_parsed}/{len(non_null)} non-null values parsed ({pct:.0%})",
                 count=n_parsed,
             ))
-            if ambiguous:
-                report_warnings.append(ColumnAction(
-                    column=col,
-                    action="flagged_ambiguous",
-                    detail=(
-                        f"Ambiguous values treated as EN thousands: "
-                        f"{ambiguous[:5]}"
-                    ),
-                    count=len(ambiguous),
-                ))
+            if col_ambiguous:
+                ambiguous_by_col[col] = col_ambiguous
 
     # ── 2b. Clinical plausibility correction (narrow, column-specific) ──
     # Runs ONLY for the clinical columns listed in
     # _CLINICAL_PLAUSIBILITY_RANGES.  Values already inside the
     # plausible range (or NaN) are untouched; out-of-range values get
     # one reinterpretation attempt (comma → decimal point) and are
-    # otherwise set to NaN.  Every action is logged via report_warnings.
-    _apply_clinical_plausibility(out, df, report_warnings)
+    # otherwise set to NaN.  Every action is logged via report_warnings
+    # and, per-row, into ``correction_records`` for the audit table.
+    covered_ambiguous_by_col = _apply_clinical_plausibility(
+        out,
+        df,
+        report_warnings,
+        ambiguous_by_col=ambiguous_by_col,
+        correction_records=correction_records,
+    )
+
+    # ── 2c. Emit generic ambiguity warnings ONLY for tokens not already
+    # consolidated by a successful plausibility correction.  This avoids
+    # the redundant "flagged_ambiguous + corrected_plausibility" pair
+    # that previously described the same value twice.
+    for col, idx_to_raw in ambiguous_by_col.items():
+        covered = covered_ambiguous_by_col.get(col, set())
+        uncovered = {i: t for i, t in idx_to_raw.items() if i not in covered}
+        if not uncovered:
+            continue
+        examples = list(uncovered.values())[:5]
+        report_warnings.append(ColumnAction(
+            column=col,
+            action="flagged_ambiguous",
+            detail=(
+                f"Ambiguous values treated as EN thousands: {examples}"
+            ),
+            count=len(uncovered),
+        ))
 
     # ── 3. Sparsity / constant-column analysis (report only) ──────
     for col in out.columns:
@@ -999,6 +1173,7 @@ def normalize_dataframe(
         n_rows_output=n_rows,
         n_columns_input=len(df.columns),
         n_columns_output=len(out.columns),
+        correction_records=correction_records,
     )
     return out, report
 

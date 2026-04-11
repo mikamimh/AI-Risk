@@ -10,7 +10,7 @@ The system reads structured clinical data from hospital electronic records, buil
 |:--|:--|:--|
 | **AI Risk** | Machine learning model trained on the local dataset | Computed locally |
 | **EuroSCORE II** | Published logistic equation (Nashef et al., 2012) | Computed locally from coefficients |
-| **STS PROM** | STS Adult Cardiac Surgery Risk Calculator | Obtained via automated queries to the official web calculator |
+| **STS Score** | STS Adult Cardiac Surgery Risk Calculator (Predicted Risk of Mortality) | Obtained via automated queries to the official web calculator |
 
 The app then compares the three scores statistically and provides explainability tools for research and clinical discussion.
 
@@ -24,11 +24,11 @@ This application is designed to support academic research in risk stratification
 
 - Trained on preoperative data only (clinical, laboratory, echocardiographic)
 - Postoperative complications are never used as predictors
-- Multiple candidate algorithms: LogisticRegression, RandomForest, XGBoost, LightGBM, CatBoost, MLP, StackingEnsemble
-- Validated via StratifiedGroupKFold cross-validation (same patient never in both train and test)
-- Best model selected by AUC on calibrated out-of-fold predictions
-- Tree-based models calibrated via Platt scaling (sigmoid); calibration applied inside each CV fold for honest OOF evaluation
-- Only numerical-stability epsilon clipping (1e-6) — the calibrated probability is the clinical output
+- Candidate algorithms compared in each run: LogisticRegression, RandomForest, XGBoost, LightGBM, CatBoost, StackingEnsemble
+- Validated via StratifiedGroupKFold cross-validation (same patient never appears in both train and test folds)
+- Candidate models are compared by cross-validated, calibrated out-of-fold performance (discrimination and calibration). Automatic selection applies explicit clinical-usability guardrails to the calibrated OOF distribution — the auto-selected default must (a) produce at least some predictions below the 8% clinical threshold, (b) have AUC above a minimum floor, (c) have a Brier score lower than the prevalence baseline, and (d) have a non-degenerate dynamic range. Models that fail any guardrail remain visible in the leaderboard and can still be force-selected manually.
+- The current operationally appropriate default is **RandomForest**: its calibrated OOF probabilities cross below 8%, its calibration intercept is near zero and slope near one, and it behaves as a high-sensitivity triage rule at the fixed 8% threshold
+- Calibration is applied inside each CV fold for honest OOF evaluation, using a per-model strategy: RandomForest uses sigmoid (Platt scaling) with inner cv≤5; LightGBM and CatBoost use isotonic with inner cv≤5; XGBoost uses isotonic with inner cv≤3. LogisticRegression and StackingEnsemble are used uncalibrated. Only a numerical-stability epsilon clip (1e-6) is applied; the calibrated probability is the clinical output
 - Numeric variables: median imputation + StandardScaler
 - Valve severity variables: OrdinalEncoder with clinical order (None < Trivial < Mild < Moderate < Severe) — "None" means no disease, not missing data
 - Other categorical variables: mode imputation + TargetEncoder (smooth="auto")
@@ -39,9 +39,9 @@ This application is designed to support academic research in risk stratification
 - Reference: Nashef et al., *Eur J Cardiothorac Surg*, 2012
 - Variables mapped from the available dataset; some approximations are documented in the Analysis Guide tab
 
-### STS Predicted Risk of Mortality (STS PROM)
+### STS Score (STS Predicted Risk of Mortality)
 
-The STS score is obtained by **automated interaction with the official STS Risk Calculator web application** hosted at `acsdriskcalc.research.sts.org`. This is done by:
+The STS Score is obtained by **automated interaction with the official STS Risk Calculator web application** hosted at `acsdriskcalc.research.sts.org`. This is done by:
 
 1. Mapping patient variables to the STS input format
 2. Establishing a WebSocket connection to the STS Risk Calculator's Shiny server
@@ -130,14 +130,16 @@ A single table with all variables. Must include a `morte_30d` or `Death` column 
 
 ## Decision threshold
 
-The default decision threshold is **8%**. This is a conservative threshold chosen for the cardiac surgery context:
+The **operational clinical threshold remains fixed at 8%**. This is the default used throughout the app for classification, clinical comparison, and temporal validation.
 
 - **Asymmetric cost of errors:** In cardiac surgery, the cost of missing a high-risk patient (false negative) far outweighs the cost of an unnecessary alert (false positive). A missed at-risk patient may die without adequate team preparation; an unnecessary alert only means the team prepares more carefully — causing no harm.
 - **Clinical consistency:** The average mortality rate in cardiac surgery ranges from 3–8% globally. The 8% threshold sits just above this range, meaning it does not flag most patients as high-risk, but is low enough to capture patients at real risk before it becomes clinically obvious.
 - **Aligned with established scores:** This is consistent with EuroSCORE II stratification thresholds (low risk <3%, intermediate 3–8%, high risk >8%).
-- **Sensitivity-oriented:** The threshold favors higher sensitivity (detecting more at-risk patients) at the cost of more false positives — the safer posture in surgical risk stratification.
+- **Operationally a high-sensitivity triage rule:** At 8% the current AI Risk configuration (RandomForest) behaves as a high-sensitivity triage threshold — it favors detecting at-risk patients at the cost of more false positives, which is the safer posture in surgical risk stratification.
 
-The threshold is user-adjustable in the app via a slider. AUC, AUPRC, and Brier score are not affected by the threshold — they evaluate the full probability distribution.
+The app additionally computes and displays a **per-model Youden threshold** (the OOF-optimal J cutoff) in the leaderboard as a complementary, model-specific reference. Youden is shown for auditability and balanced-classifier comparison; **it is not the default operational threshold**. In the Statistical Comparison tab the user can switch between the fixed 8% clinical mode and the stored Youden mode, but the fixed 8% remains the default.
+
+The threshold slider and the Youden switch never modify the model, the calibrated probabilities, or any discrimination/calibration metric — AUC, AUPRC, and Brier score evaluate the full probability distribution and are unaffected by any threshold choice.
 
 ## Methodological transparency
 
@@ -145,7 +147,11 @@ This app follows TRIPOD/TRIPOD-AI reporting principles. Key methodological decis
 - Internal validation only (cross-validation); no external validation yet
 - Single-center data; generalizability not established
 - Some EuroSCORE II variables are approximated from available fields
-- STS obtained via web calculator automation, not a proprietary formula replication
-- Post-hoc calibration (Platt scaling) is applied inside each outer CV fold; however, the inner calibration CV uses StratifiedKFold and does not enforce patient grouping (sklearn limitation — risk is minor because calibration fits only 2 parameters)
+- STS Score obtained via web calculator automation, not a proprietary formula replication
+- Post-hoc calibration is applied inside each outer CV fold using a per-model strategy (see the AI Risk section above for the exact method per model); the inner calibration CV uses StratifiedKFold and does not enforce patient grouping (sklearn limitation — risk is minor because the inner fits are 1- or 2-parameter)
+- Automatic best-model selection applies explicit clinical-usability guardrails to the calibrated OOF distribution; models that fail any guardrail remain in the leaderboard and can still be force-selected manually
+- Discrimination (AUC, AUPRC) and calibration (Brier, intercept, slope) are both reported and used jointly
+- The operational clinical threshold is fixed at 8%; the per-model Youden threshold is shown as a complementary reference, not as the default
+- AI Risk is a complementary analytical/research tool — it is not a clinical decision-support system and must not be used for autonomous clinical decision-making
 - NRI and IDI are reported as complementary reclassification metrics, not as primary evidence of model superiority
 - Risk of bias should be assessed across PROBAST domains

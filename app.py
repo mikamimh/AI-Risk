@@ -260,7 +260,10 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
     # Phase 3: ingestion + cohort eligibility steps. A required-column
     # failure is a hard stop; the report is attached to the raised error
     # so the caller can render it before aborting.
-    _ingest_step = _obs.build_step_ingestion(getattr(prepared, "ingestion_report", None))
+    _ingest_step = _obs.build_step_ingestion(
+        getattr(prepared, "ingestion_report", None),
+        feature_columns=getattr(prepared, "feature_columns", None),
+    )
     run_report.add(_ingest_step)
     if _ingest_step is not None and _ingest_step.status == _obs.STATUS_ERROR:
         err = RuntimeError(
@@ -445,9 +448,9 @@ This app compares **three risk scores** for predicting in-hospital or 30-day mor
 |:--|:--|:--|
 | **AI Risk** | Machine learning model trained on your local data | This app |
 | **EuroSCORE II** | Published logistic equation (Nashef et al., 2012) | Calculated locally |
-| **STS** | STS Risk Calculator (automated web query) | Obtained via automated queries to the official web calculator |
+| **STS Score** | STS Risk Calculator (automated web query) | Obtained via automated queries to the official web calculator |
 
-The app evaluates discrimination, calibration, clinical utility, and reclassification — all from preoperative data only.
+The app evaluates **discrimination and calibration** jointly, together with clinical utility and reclassification — all from preoperative data only. The operational clinical threshold is fixed at **8%**; per-model Youden thresholds are shown in the leaderboard as a complementary reference, not as the default.
 """,
                 """
 Este app compara **três escores de risco** para predição de mortalidade hospitalar ou em 30 dias após cirurgia cardíaca:
@@ -456,9 +459,9 @@ Este app compara **três escores de risco** para predição de mortalidade hospi
 |:--|:--|:--|
 | **AI Risk** | Modelo de machine learning treinado nos seus dados locais | Este app |
 | **EuroSCORE II** | Equação logística publicada (Nashef et al., 2012) | Calculado localmente |
-| **STS** | STS Risk Calculator (consulta web automatizada) | Obtido via consultas automatizadas à calculadora web oficial |
+| **STS Score** | STS Risk Calculator (consulta web automatizada) | Obtido via consultas automatizadas à calculadora web oficial |
 
-O app avalia discriminação, calibração, utilidade clínica e reclassificação — tudo a partir de dados exclusivamente pré-operatórios.
+O app avalia **discriminação e calibração** conjuntamente, juntamente com utilidade clínica e reclassificação — tudo a partir de dados exclusivamente pré-operatórios. O limiar clínico operacional é fixo em **8%**; os limiares de Youden por modelo são exibidos no leaderboard como referência complementar, e não como limiar padrão.
 """,
             )
         )
@@ -508,7 +511,7 @@ O app avalia discriminação, calibração, utilidade clínica e reclassificaç�
 - Valve severity variables: OrdinalEncoder with clinically ordered categories (None < Trivial < Mild < Moderate < Severe) + median imputation + StandardScaler
 - Other categorical variables: most-frequent imputation + TargetEncoder (smooth="auto") + median post-imputation for encoded values
 
-**Calibration:** Tree-based models are calibrated via Platt scaling (sigmoid method). The calibrated probability is used directly as the clinical output, with only a minimal numerical-stability bound (1e-6).
+**Calibration:** Post-hoc calibration is applied inside each CV fold using a per-model strategy — RandomForest uses sigmoid (Platt scaling) with inner cv≤5; LightGBM and CatBoost use isotonic with inner cv≤5; XGBoost uses isotonic with inner cv≤3; LogisticRegression and StackingEnsemble are used uncalibrated. The calibrated probability is used directly as the clinical output, with only a minimal numerical-stability bound (1e-6).
 
 **Candidate models:** {', '.join(artifacts.leaderboard['Modelo'].tolist())}
 
@@ -517,9 +520,9 @@ O app avalia discriminação, calibração, utilidade clínica e reclassificaç�
 - Class balance (mortality rate) is preserved across folds
 - Out-of-fold (OOF) predictions — including calibration applied inside each fold — are used for all performance metrics
 
-**Model selection:** The model with the highest AUC on calibrated OOF predictions is selected as the best model. Current best: **{artifacts.best_model_name}**.
+**Model selection:** Candidate models are compared by cross-validated, calibrated OOF performance (discrimination and calibration). Automatic selection applies explicit clinical-usability guardrails to the calibrated OOF distribution — the auto-selected default must produce at least some predictions below the 8% clinical threshold, have AUC above a minimum floor, have a Brier score lower than the prevalence baseline, and have a non-degenerate dynamic range. Models that fail any guardrail stay visible in the leaderboard and can still be force-selected manually. Current operational default: **{artifacts.best_model_name}**.
 
-**Leaderboard threshold:** Sensitivity and specificity in the leaderboard are computed at the optimal Youden's J threshold for each model. The clinical decision threshold (default 8%) used in the triple comparison tab is independent.
+**Leaderboard thresholds vs. operational threshold:** The leaderboard reports sensitivity and specificity at each model's own Youden's J threshold (OOF-optimal), shown as a complementary per-model reference. The **operational clinical threshold is fixed at 8%** and is the default used in the Statistical Comparison and temporal validation tabs — Youden is not the app's default operational threshold.
 """,
                 f"""
 **Variáveis preditoras:** Apenas dados pré-operatórios (clínicos, laboratoriais, ecocardiográficos). Complicações pós-operatórias **nunca** são usadas como preditores, evitando vazamento temporal. Total: {prepared.info['n_features']} variáveis.
@@ -529,7 +532,7 @@ O app avalia discriminação, calibração, utilidade clínica e reclassificaç�
 - Variáveis de gravidade valvar: OrdinalEncoder com categorias clinicamente ordenadas (None < Trivial < Mild < Moderate < Severe) + imputação pela mediana + StandardScaler
 - Demais variáveis categóricas: imputação pela moda + TargetEncoder (smooth="auto") + imputação pela mediana pós-codificação
 
-**Calibração:** Modelos baseados em árvore são calibrados por Platt scaling (método sigmoid). A probabilidade calibrada é utilizada diretamente como saída clínica, com apenas um limite mínimo de estabilidade numérica (1e-6).
+**Calibração:** A calibração pós-hoc é aplicada dentro de cada fold de CV com estratégia por modelo — RandomForest usa sigmoid (Platt scaling) com cv interno ≤5; LightGBM e CatBoost usam isotonic com cv interno ≤5; XGBoost usa isotonic com cv interno ≤3; LogisticRegression e StackingEnsemble são usados sem calibração. A probabilidade calibrada é utilizada diretamente como saída clínica, com apenas um limite mínimo de estabilidade numérica (1e-6).
 
 **Modelos candidatos:** {', '.join(artifacts.leaderboard['Modelo'].tolist())}
 
@@ -538,9 +541,9 @@ O app avalia discriminação, calibração, utilidade clínica e reclassificaç�
 - O balanceamento de classes (taxa de mortalidade) é preservado entre os folds
 - Predições out-of-fold (OOF) — incluindo calibração aplicada dentro de cada fold — são usadas para todas as métricas de desempenho
 
-**Seleção do modelo:** O modelo com maior AUC nas predições OOF calibradas é selecionado como melhor. Atual: **{artifacts.best_model_name}**.
+**Seleção do modelo:** Os modelos candidatos são comparados por desempenho OOF calibrado por validação cruzada (discriminação e calibração). A seleção automática aplica guardrails explícitos de usabilidade clínica à distribuição OOF calibrada — o modelo padrão automaticamente selecionado precisa produzir ao menos algumas predições abaixo do limiar clínico de 8%, ter AUC acima de um piso mínimo, ter Brier menor que o baseline da prevalência e apresentar amplitude dinâmica não-degenerada. Modelos que falham em qualquer guardrail permanecem visíveis no leaderboard e ainda podem ser forçados manualmente. Padrão operacional atual: **{artifacts.best_model_name}**.
 
-**Limiar do leaderboard:** Sensibilidade e especificidade no leaderboard usam o limiar ótimo de Youden (J) de cada modelo. O limiar clínico de decisão (padrão 8%) usado na aba de comparação tripla é independente.
+**Limiares do leaderboard vs. limiar operacional:** O leaderboard reporta sensibilidade e especificidade no limiar de Youden (J) de cada modelo (ótimo OOF), exibido como referência complementar por modelo. O **limiar clínico operacional é fixo em 8%** e é o padrão usado nas abas de Comparação Estatística e de validação temporal — Youden não é o limiar operacional padrão do app.
 """,
             )
         )
@@ -660,7 +663,7 @@ O EuroSCORE II é calculado usando a **equação logística publicada** com 18 f
         st.markdown(
             tr(
                 """
-The STS Predicted Risk of Mortality is obtained via **automated interaction with the official STS Risk Calculator web application** (Society of Thoracic Surgeons) hosted at `acsdriskcalc.research.sts.org`. The STS does not publish a documented public API; this implementation automates the same web calculator that clinicians use manually, via its WebSocket interface.
+The **STS Score** (STS Predicted Risk of Mortality) is obtained via **automated interaction with the official STS Risk Calculator web application** (Society of Thoracic Surgeons) hosted at `acsdriskcalc.research.sts.org`. The STS does not publish a documented public API; this implementation automates the same web calculator that clinicians use manually, via its WebSocket interface.
 
 **How it works:**
 1. For each patient, the app maps preoperative variables to the STS input format
@@ -692,7 +695,7 @@ The STS Predicted Risk of Mortality is obtained via **automated interaction with
 - Results may differ slightly from the web calculator due to field mapping approximations
 """,
                 """
-O STS Predicted Risk of Mortality é obtido via **interação automatizada com a calculadora web oficial do STS Risk Calculator** (Society of Thoracic Surgeons), hospedada em `acsdriskcalc.research.sts.org`. O STS não publica uma API pública documentada; esta implementação automatiza a mesma calculadora web que os clínicos usam manualmente, via sua interface WebSocket.
+O **STS Score** (STS Predicted Risk of Mortality) é obtido via **interação automatizada com a calculadora web oficial do STS Risk Calculator** (Society of Thoracic Surgeons), hospedada em `acsdriskcalc.research.sts.org`. O STS não publica uma API pública documentada; esta implementação automatiza a mesma calculadora web que os clínicos usam manualmente, via sua interface WebSocket.
 
 **Como funciona:**
 1. Para cada paciente, o app mapeia as variáveis pré-operatórias para o formato de entrada do STS
@@ -850,9 +853,9 @@ O app oferece múltiplas camadas de interpretabilidade:
 - **Single-center data:** AI Risk is trained on local data and may not generalize to other populations without external validation.
 - **Internal validation only:** OOF cross-validation reduces overfitting but does not replace validation on an independent cohort.
 - **EuroSCORE II approximations:** Some variables (poor mobility, critical preoperative state) may be approximated from available fields rather than captured exactly as in the original form.
-- **STS web calculator dependency:** STS calculation requires internet access and depends on the availability of the STS web calculator at acsdriskcalc.research.sts.org. The interface may change without notice. ~1–3% of patients may fail due to procedure mapping ambiguity.
+- **STS Score web calculator dependency:** STS Score calculation requires internet access and depends on the availability of the STS web calculator at acsdriskcalc.research.sts.org. The interface may change without notice. ~1–3% of patients may fail due to procedure mapping ambiguity.
 - **Small subgroups:** Results in subgroups with <50 patients or <10 events should be interpreted with caution — confidence intervals may be wide.
-- **Calibration slope <1 for OOF predictions:** Can occur with cross-validated predictions, especially in small samples. Tree-based models are calibrated via Platt scaling inside each CV fold, so the OOF calibration metrics reflect the same calibration strategy used in the final model. The final model (used for individual predictions) is refitted on all data and may show slightly different calibration.
+- **Calibration slope <1 for OOF predictions:** Can occur with cross-validated predictions, especially in small samples. Calibration is applied inside each CV fold using a per-model strategy (sigmoid for RandomForest, isotonic for XGBoost/LightGBM/CatBoost, none for LogisticRegression and StackingEnsemble), so the OOF calibration metrics reflect the same calibration strategy used in the final model. The final model (used for individual predictions) is refitted on all data and may show slightly different calibration.
 - **Missing data and imputation:** Missing variables are replaced by the training dataset median (numeric) or mode (categorical). The input completeness indicator classifies each prediction as complete, adequate, partially imputed, or heavily imputed — considering both the number and clinical relevance of missing variables. Predictions with heavily imputed data should be interpreted with greater caution.
 - **TRIPOD/PROBAST:** Methodological transparency follows TRIPOD/TRIPOD-AI principles. Risk of bias should be assessed across PROBAST domains (participants, predictors, outcome, analysis).
 """,
@@ -860,9 +863,9 @@ O app oferece múltiplas camadas de interpretabilidade:
 - **Dados de centro único:** O AI Risk é treinado em dados locais e pode não generalizar para outras populações sem validação externa.
 - **Validação interna apenas:** A validação cruzada OOF reduz o sobreajuste, mas não substitui a validação em uma coorte independente.
 - **Aproximações do EuroSCORE II:** Algumas variáveis (mobilidade reduzida, estado crítico pré-operatório) podem ser aproximadas a partir dos campos disponíveis, e não capturadas exatamente como no formulário original.
-- **Dependência da calculadora web do STS:** O cálculo do STS requer acesso à internet e depende da disponibilidade da calculadora web do STS em acsdriskcalc.research.sts.org. A interface pode mudar sem aviso. ~1–3% dos pacientes podem falhar por ambiguidade no mapeamento de procedimentos.
+- **Dependência da calculadora web do STS Score:** O cálculo do STS Score requer acesso à internet e depende da disponibilidade da calculadora web do STS em acsdriskcalc.research.sts.org. A interface pode mudar sem aviso. ~1–3% dos pacientes podem falhar por ambiguidade no mapeamento de procedimentos.
 - **Subgrupos pequenos:** Resultados em subgrupos com <50 pacientes ou <10 eventos devem ser interpretados com cautela — os intervalos de confiança podem ser amplos.
-- **Slope de calibração <1 nas predições OOF:** Pode ocorrer em predições de validação cruzada, especialmente em amostras pequenas. Modelos baseados em árvore são calibrados via Platt scaling dentro de cada fold do CV, portanto as métricas de calibração OOF refletem a mesma estratégia de calibração do modelo final. O modelo final (usado para predições individuais) é reajustado em todos os dados e pode ter calibração ligeiramente diferente.
+- **Slope de calibração <1 nas predições OOF:** Pode ocorrer em predições de validação cruzada, especialmente em amostras pequenas. A calibração é aplicada dentro de cada fold do CV com estratégia por modelo (sigmoid para RandomForest, isotonic para XGBoost/LightGBM/CatBoost, nenhuma para LogisticRegression e StackingEnsemble), portanto as métricas de calibração OOF refletem a mesma estratégia de calibração do modelo final. O modelo final (usado para predições individuais) é reajustado em todos os dados e pode ter calibração ligeiramente diferente.
 - **Dados faltantes e imputação:** Variáveis ausentes são substituídas pela mediana (numéricas) ou moda (categóricas) do dataset de treinamento. O indicador de completude classifica cada predição como completa, adequada, parcialmente imputada ou muito imputada — considerando tanto o número quanto a relevância clínica das variáveis ausentes. Predições com dados muito imputados devem ser interpretadas com maior cautela.
 - **TRIPOD/PROBAST:** A transparência metodológica segue princípios do TRIPOD/TRIPOD-AI. O risco de viés deve ser avaliado nos domínios do PROBAST (participantes, preditores, desfecho, análise).
 """,
@@ -2852,14 +2855,14 @@ if _active_tab == 0:  # Overview
     )
     st.caption(
         tr(
-            "Sensitivity and specificity are shown at the optimal threshold (Youden's J) for each model, not at a fixed 0.50 cutoff.",
-            "Sensibilidade e especificidade são mostradas no limiar ótimo (Youden's J) de cada modelo, não em um corte fixo de 0,50.",
+            "Leaderboard sensitivity and specificity are shown at each model's own Youden's J threshold (a per-model reference), not at a fixed 0.50 cutoff and not at the 8% clinical default. The operational clinical threshold remains fixed at 8% in the Statistical Comparison and temporal validation tabs.",
+            "A sensibilidade e a especificidade do leaderboard são mostradas no limiar de Youden (J) de cada modelo (referência por modelo), não em um corte fixo de 0,50 e não no padrão clínico de 8%. O limiar clínico operacional permanece fixo em 8% nas abas de Comparação Estatística e de validação temporal.",
         )
     )
     st.caption(
         tr(
-            "AUC summarizes overall discrimination. AUPRC is especially useful when the event is uncommon. Sensitivity and specificity in this table use the optimal threshold (Youden's J) from out-of-fold predictions.",
-            "A AUC resume a discriminação global. A AUPRC é especialmente útil quando o evento é incomum. Sensibilidade e especificidade nesta tabela usam o limiar ótimo (Youden's J) das predições out-of-fold.",
+            "AUC and AUPRC summarize discrimination; Brier summarizes calibration. Models are compared by cross-validated, calibrated OOF performance. The per-model Youden threshold shown here is a complementary reference — it is not the app's default operational threshold.",
+            "AUC e AUPRC resumem a discriminação; Brier resume a calibração. Os modelos são comparados por desempenho OOF calibrado via validação cruzada. O limiar de Youden por modelo mostrado aqui é uma referência complementar — não é o limiar operacional padrão do app.",
         )
     )
     st.dataframe(artifacts.leaderboard, width="stretch", column_config=general_table_column_config("leaderboard"))
@@ -2872,7 +2875,7 @@ if _active_tab == 0:  # Overview
     st.subheader(tr("Available scores summary", "Resumo dos escores disponíveis"))
     summary = pd.DataFrame(
         {
-            tr("Score", "Escore"): ["AI Risk", "EuroSCORE II (app-calculated)", "STS (app-calculated)"],
+            tr("Score", "Escore"): ["AI Risk", "EuroSCORE II (app-calculated)", "STS Score (app-calculated)"],
             tr("Patients with value", "Pacientes com valor"): [
                 int(df["ia_risk_oof"].notna().sum()),
                 int(df["euroscore_calc"].notna().sum()),
@@ -2893,7 +2896,7 @@ if _active_tab == 0:  # Overview
 
 elif _active_tab == 1:  # Individual Prediction
     st.subheader(tr("Individual calculation", "Cálculo individual"))
-    st.caption(tr("Fill in fields in clinical order. The app calculates AI Risk, EuroSCORE II, and STS automatically.", "Preencha os campos em ordem clínica. O app calcula AI Risk, EuroSCORE II e STS automaticamente."))
+    st.caption(tr("Fill in fields in clinical order. The app calculates AI Risk, EuroSCORE II, and STS Score automatically.", "Preencha os campos em ordem clínica. O app calcula AI Risk, EuroSCORE II e STS Score automaticamente."))
 
     def yn_pt_to_en(v: str) -> str:
         return "Yes" if str(v).strip().lower() in {"sim", "yes"} else "No"
@@ -3441,7 +3444,7 @@ elif _active_tab == 1:  # Individual Prediction
                     """
 **Informed vs. imputed variables:** The model uses 61 predictor variables. In the individual form, some variables (detailed echocardiographic measurements, specific lab values) are not available as input fields — for these, the model uses the training dataset median. More imputed variables means less personalized prediction, but the core clinical variables (age, surgery type, renal function, LVEF) are always informed.
 
-**Interquartile risk range (IQR):** Shows the range between the 25th and 75th percentile of predictions across all 8 AI models. A narrow IQR means models agree; a wide IQR means disagreement.
+**Interquartile risk range (IQR):** Shows the range between the 25th and 75th percentile of predictions across the available AI Risk candidate models. A narrow IQR means models agree; a wide IQR means disagreement.
 
 | Agreement | IQR spread | Interpretation |
 |:--|:--|:--|
@@ -3449,12 +3452,12 @@ elif _active_tab == 1:  # Individual Prediction
 | **Moderate** | 4–10 percentage points | Some disagreement — consider the range, not just the point estimate |
 | **Low** | > 10 percentage points | Large disagreement — prediction is uncertain, clinical judgment should prevail |
 
-**Why do models disagree?** Tree-based models (CatBoost, XGBoost, LightGBM) capture non-linear interactions and may predict differently from linear models (Logistic Regression) or neural networks (MLP). For atypical patients, disagreement is more likely.
+**Why do models disagree?** Tree-based models (RandomForest, CatBoost, XGBoost, LightGBM) capture non-linear interactions and may predict differently from linear models (Logistic Regression) or from the StackingEnsemble meta-learner. For atypical patients, disagreement is more likely.
 """,
                     """
 **Variáveis informadas vs. imputadas:** O modelo usa 61 variáveis preditoras. No formulário individual, algumas variáveis (medidas ecocardiográficas detalhadas, exames laboratoriais específicos) não estão disponíveis como campos — para estas, o modelo usa a mediana do dataset de treinamento. Mais variáveis imputadas significa predição menos personalizada, mas as variáveis clínicas centrais (idade, tipo de cirurgia, função renal, FEVE) são sempre informadas.
 
-**Faixa interquartil de risco (IQR):** Mostra o intervalo entre o percentil 25 e o percentil 75 das predições dos 8 modelos de IA. IQR estreito significa que os modelos concordam; IQR largo significa discordância.
+**Faixa interquartil de risco (IQR):** Mostra o intervalo entre o percentil 25 e o percentil 75 das predições dos modelos candidatos do AI Risk disponíveis. IQR estreito significa que os modelos concordam; IQR largo significa discordância.
 
 | Concordância | Amplitude do IQR | Interpretação |
 |:--|:--|:--|
@@ -3462,15 +3465,15 @@ elif _active_tab == 1:  # Individual Prediction
 | **Moderada** | 4–10 pontos percentuais | Alguma discordância — considere a faixa, não apenas o valor pontual |
 | **Baixa** | > 10 pontos percentuais | Grande discordância — predição incerta, o julgamento clínico deve prevalecer |
 
-**Por que os modelos discordam?** Modelos baseados em árvore (CatBoost, XGBoost, LightGBM) capturam interações não-lineares e podem predizer diferente de modelos lineares (Regressão Logística) ou redes neurais (MLP). Para pacientes atípicos, a discordância é mais provável.
+**Por que os modelos discordam?** Modelos baseados em árvore (RandomForest, CatBoost, XGBoost, LightGBM) capturam interações não-lineares e podem predizer diferente de modelos lineares (Regressão Logística) ou do meta-aprendiz StackingEnsemble. Para pacientes atípicos, a discordância é mais provável.
 """,
                 )
             )
 
         st.caption(
             tr(
-                "Note: EuroSCORE II and STS are calculated automatically. For EuroSCORE II, variables not available in the spreadsheet (e.g., poor mobility, critical preoperative state) are entered manually in this form. STS is obtained via automated interaction with the STS web calculator.",
-                "Observação: EuroSCORE II e STS são calculados automaticamente. No EuroSCORE II, variáveis não presentes na planilha (ex.: mobilidade, estado crítico) são informadas manualmente neste formulário. O STS é obtido via interação automatizada com a calculadora web do STS.",
+                "Note: EuroSCORE II and STS Score are calculated automatically. For EuroSCORE II, variables not available in the spreadsheet (e.g., poor mobility, critical preoperative state) are entered manually in this form. STS Score is obtained via automated interaction with the STS web calculator.",
+                "Observação: EuroSCORE II e STS Score são calculados automaticamente. No EuroSCORE II, variáveis não presentes na planilha (ex.: mobilidade, estado crítico) são informadas manualmente neste formulário. O STS Score é obtido via interação automatizada com a calculadora web do STS.",
             )
         )
 
@@ -3879,9 +3882,11 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
     ):
         st.caption(tr(
             "Read-only inspection of AI Risk probability distributions and threshold behavior. "
-            "No threshold, model output, or methodology is changed by this panel.",
+            "This panel is for auditing only — it does not change the fixed 8% clinical threshold, "
+            "the model outputs, the ranking logic, or any methodology.",
             "Inspeção somente leitura das distribuições de probabilidade do AI Risk e do comportamento do limiar. "
-            "Nenhum limiar, saída de modelo ou metodologia é alterado por este painel.",
+            "Este painel serve apenas para auditoria — não altera o limiar clínico fixo de 8%, "
+            "as saídas do modelo, a lógica de ranqueamento ou qualquer aspecto metodológico.",
         ))
 
         def _describe_prob_array(arr) -> dict:
@@ -3937,8 +3942,8 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
             "**2. Probabilidades OOF brutas — por modelo (não calibradas, apenas auditoria)**",
         ))
         st.caption(tr(
-            "Source: `artifacts.oof_raw`. Comparing panel 1 vs panel 2 exposes the effect of Platt scaling on the distribution floor.",
-            "Origem: `artifacts.oof_raw`. Comparar os painéis 1 e 2 mostra o efeito do Platt scaling no piso da distribuição.",
+            "Source: `artifacts.oof_raw`. Comparing panel 1 vs panel 2 exposes the effect of post-hoc calibration (per-model strategy) on the distribution floor.",
+            "Origem: `artifacts.oof_raw`. Comparar os painéis 1 e 2 mostra o efeito da calibração pós-hoc (estratégia por modelo) no piso da distribuição.",
         ))
         _oof_raw = getattr(artifacts, "oof_raw", None)
         if _oof_raw:

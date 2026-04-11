@@ -68,6 +68,7 @@ class RunStep:
     counters: Dict[str, Any] = field(default_factory=dict)
     details: List[str] = field(default_factory=list)
     incidents: List[Dict[str, Any]] = field(default_factory=list)
+    audit_records: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -107,6 +108,7 @@ class RunReport:
                 counters=dict(s.get("counters", {})),
                 details=list(s.get("details", [])),
                 incidents=list(s.get("incidents", [])),
+                audit_records=list(s.get("audit_records", []) or []),
             )
             for s in steps_raw
         ]
@@ -118,7 +120,11 @@ class RunReport:
 # --------------------------------------------------------------------------- #
 
 
-def build_step_ingestion(ingestion_report: Any) -> Optional[RunStep]:
+def build_step_ingestion(
+    ingestion_report: Any,
+    *,
+    feature_columns: Optional[Sequence[str]] = None,
+) -> Optional[RunStep]:
     """Build a ``RunStep`` from a ``risk_data.IngestionReport``.
 
     Returns ``None`` if ``ingestion_report`` is falsy (e.g. legacy path that
@@ -126,6 +132,16 @@ def build_step_ingestion(ingestion_report: Any) -> Optional[RunStep]:
     independently and hard-stop the run before training if required columns
     are missing - this builder still returns a populated step in that case so
     the error is visible in the report.
+
+    Parameters
+    ----------
+    feature_columns : sequence of str, optional
+        The model's predictor columns.  When supplied, the detail sub-list
+        is partitioned into **predictor-relevant** warnings/flags and
+        **informational** warnings/flags about non-predictor columns
+        (e.g. postoperative sparsity notes), so the two groups do not
+        visually compete.  When omitted, all warnings/flags are shown in
+        a single list (legacy behaviour).
     """
     if ingestion_report is None:
         return None
@@ -135,6 +151,9 @@ def build_step_ingestion(ingestion_report: Any) -> Optional[RunStep]:
     missing_normalized = list(getattr(ingestion_report, "missing_normalized", []) or [])
     columns_dropped = list(getattr(ingestion_report, "columns_dropped", []) or [])
     warnings_list = list(getattr(ingestion_report, "warnings", []) or [])
+    correction_records_attr = list(
+        getattr(ingestion_report, "correction_records", []) or []
+    )
 
     total_missing_tokens = sum(int(getattr(a, "count", 0) or 0) for a in missing_normalized)
     total_values_parsed = sum(int(getattr(a, "count", 0) or 0) for a in columns_converted)
@@ -144,6 +163,19 @@ def build_step_ingestion(ingestion_report: Any) -> Optional[RunStep]:
     constant_count = sum(
         1 for a in columns_dropped if getattr(a, "action", "") == "dropped_constant"
     )
+
+    # Partition warnings and dropped-column flags by predictor membership.
+    feature_set: Optional[set] = set(feature_columns) if feature_columns else None
+
+    def _is_predictor(col: str) -> bool:
+        # When no feature list is supplied, everything is treated as
+        # predictor-relevant (preserves legacy single-list rendering).
+        return feature_set is None or col in feature_set
+
+    predictor_warnings = [a for a in warnings_list if _is_predictor(getattr(a, "column", ""))]
+    info_warnings = [a for a in warnings_list if not _is_predictor(getattr(a, "column", ""))]
+    predictor_dropped = [a for a in columns_dropped if _is_predictor(getattr(a, "column", ""))]
+    info_dropped = [a for a in columns_dropped if not _is_predictor(getattr(a, "column", ""))]
 
     counters: Dict[str, Any] = {
         "Rows in": int(getattr(ingestion_report, "n_rows_input", 0) or 0),
@@ -156,7 +188,9 @@ def build_step_ingestion(ingestion_report: Any) -> Optional[RunStep]:
         "Missing tokens replaced": total_missing_tokens,
         "Sparse columns flagged (>95% missing)": sparse_count,
         "Constant columns flagged": constant_count,
-        "Warnings": len(warnings_list),
+        "Warnings (predictor-relevant)": len(predictor_warnings),
+        "Warnings (informational / non-predictor)": len(info_warnings),
+        "Correction records": len(correction_records_attr),
     }
 
     details: List[str] = []
@@ -168,14 +202,49 @@ def build_step_ingestion(ingestion_report: Any) -> Optional[RunStep]:
         details.append(f"Missing tokens normalized: {a.column} ({a.detail})")
     if len(missing_normalized) > 10:
         details.append(f"... and {len(missing_normalized) - 10} more column(s) with missing tokens")
-    for a in columns_dropped[:10]:
-        details.append(f"Flagged: {a.column} ({a.detail})")
-    if len(columns_dropped) > 10:
-        details.append(f"... and {len(columns_dropped) - 10} more flagged column(s)")
-    for a in warnings_list[:10]:
-        details.append(f"Warning: {a.column} ({a.detail})")
-    if len(warnings_list) > 10:
-        details.append(f"... and {len(warnings_list) - 10} more warning(s)")
+
+    if feature_set is None:
+        # Legacy flat layout: single combined list of warnings + flags.
+        for a in warnings_list[:10]:
+            details.append(f"Warning: {a.column} ({a.detail})")
+        if len(warnings_list) > 10:
+            details.append(f"... and {len(warnings_list) - 10} more warning(s)")
+        for a in columns_dropped[:10]:
+            details.append(f"Flagged: {a.column} ({a.detail})")
+        if len(columns_dropped) > 10:
+            details.append(f"... and {len(columns_dropped) - 10} more flagged column(s)")
+    else:
+        # --- Predictor-relevant section ---------------------------------
+        if predictor_warnings or predictor_dropped:
+            details.append("── Predictor-relevant warnings ──")
+            for a in predictor_warnings[:10]:
+                details.append(f"Warning: {a.column} ({a.detail})")
+            if len(predictor_warnings) > 10:
+                details.append(
+                    f"... and {len(predictor_warnings) - 10} more predictor warning(s)"
+                )
+            for a in predictor_dropped[:10]:
+                details.append(f"Flagged: {a.column} ({a.detail})")
+            if len(predictor_dropped) > 10:
+                details.append(
+                    f"... and {len(predictor_dropped) - 10} more predictor column(s) flagged"
+                )
+
+        # --- Informational / non-predictor section ----------------------
+        if info_warnings or info_dropped:
+            details.append("── Informational flags (non-predictor columns) ──")
+            for a in info_warnings[:10]:
+                details.append(f"Warning: {a.column} ({a.detail})")
+            if len(info_warnings) > 10:
+                details.append(
+                    f"... and {len(info_warnings) - 10} more informational warning(s)"
+                )
+            for a in info_dropped[:10]:
+                details.append(f"Flagged: {a.column} ({a.detail})")
+            if len(info_dropped) > 10:
+                details.append(
+                    f"... and {len(info_dropped) - 10} more informational column(s) flagged"
+                )
 
     incidents: List[Dict[str, Any]] = []
     for a in required_failures:
@@ -185,16 +254,31 @@ def build_step_ingestion(ingestion_report: Any) -> Optional[RunStep]:
             "detail": getattr(a, "detail", ""),
         })
 
+    # Build the exportable per-row audit table as plain dicts (JSON-safe
+    # for joblib persistence).
+    audit_records: List[Dict[str, Any]] = []
+    for rec in correction_records_attr:
+        audit_records.append({
+            "column": getattr(rec, "column", ""),
+            "row_index": getattr(rec, "row_index", ""),
+            "raw_value": getattr(rec, "raw_value", ""),
+            "parsed_value": getattr(rec, "parsed_value", None),
+            "action": getattr(rec, "action", ""),
+            "final_value": getattr(rec, "final_value", None),
+            "reason": getattr(rec, "reason", ""),
+        })
+
     if required_failures:
         status = STATUS_ERROR
         summary = (
             f"Ingestion halted: {len(required_failures)} required column(s) missing. "
             "See incidents for details."
         )
-    elif warnings_list or sparse_count or constant_count:
+    elif predictor_warnings or info_warnings or sparse_count or constant_count:
         status = STATUS_WARNING
         summary = (
-            f"Ingestion completed with {len(warnings_list)} warning(s); "
+            f"Ingestion completed with {len(predictor_warnings)} predictor-relevant "
+            f"warning(s), {len(info_warnings)} informational warning(s); "
             f"{sparse_count} sparse and {constant_count} constant column(s) flagged."
         )
     else:
@@ -211,6 +295,7 @@ def build_step_ingestion(ingestion_report: Any) -> Optional[RunStep]:
         counters=counters,
         details=details,
         incidents=incidents,
+        audit_records=audit_records,
     )
 
 
@@ -468,6 +553,27 @@ def render_run_report(report: RunReport, *, tr=None, title: Optional[str] = None
             if step.incidents:
                 st.markdown(f"**{_t('Incidents', 'Incidentes')}**")
                 st.dataframe(pd.DataFrame(step.incidents), hide_index=True, width="stretch")
+            if getattr(step, "audit_records", None):
+                st.markdown(
+                    f"**{_t('Normalization audit table', 'Tabela de auditoria da normalização')}**"
+                )
+                audit_df = pd.DataFrame(step.audit_records)
+                st.dataframe(audit_df, hide_index=True, width="stretch")
+                try:
+                    csv_bytes = audit_df.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        label=_t(
+                            "Download audit table (CSV)",
+                            "Baixar tabela de auditoria (CSV)",
+                        ),
+                        data=csv_bytes,
+                        file_name="ingestion_audit_table.csv",
+                        mime="text/csv",
+                        key=f"audit_download_{step.name}",
+                    )
+                except Exception:
+                    # CSV export should never block the report from rendering.
+                    pass
 
 
 def render_sts_score_incidents(

@@ -160,7 +160,7 @@ def build_model_metadata(
             "leaderboard": "Youden's J (optimal per model, on calibrated OOF)",
             "clinical_default": "8%",
         },
-        "oof_used_in_leaderboard": "calibrated (Platt-scaled for tree models, raw for others)",
+        "oof_used_in_leaderboard": "calibrated per-model inside each CV fold (see calibration.oof_evaluation for per-model method); LogisticRegression and StackingEnsemble are used uncalibrated",
         "source_type": Path(xlsx_path).suffix.lstrip("."),
         "sts_method": "Automated query to the STS web calculator (acsdriskcalc.research.sts.org)" if sts_available else "Not available",
         "euroscore_method": "Published logistic equation (Nashef et al., 2012)",
