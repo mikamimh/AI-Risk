@@ -13,7 +13,7 @@ _il.reload(_sts_mod)
 import json
 from io import BytesIO
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 import re
 import shutil
 import sqlite3
@@ -2357,6 +2357,119 @@ def _align_input_to_training_schema(input_df: pd.DataFrame, reference_df: pd.Dat
                 # Force categorical
                 aligned[col] = aligned[col].astype(str)
     return aligned
+
+
+def _temporal_patient_identifier(row_dict: Dict[str, object], fallback_index: int) -> str:
+    """Best-effort patient identifier for temporal-validation incident reporting.
+
+    Looks for the same identifier columns the temporal-validation case-level
+    table uses (``Name``, ``Nome``, ``_patient_key``) and falls back to a
+    1-based row index when none are present.  Kept tiny and local — no new
+    schema, no overengineering.
+    """
+    for key in ("Name", "Nome", "_patient_key"):
+        val = row_dict.get(key)
+        if val is not None and not (isinstance(val, float) and pd.isna(val)):
+            text = str(val).strip()
+            if text:
+                return text
+    return f"row_{fallback_index + 1}"
+
+
+def apply_frozen_model_to_temporal_cohort(
+    *,
+    model_pipeline,
+    feature_columns,
+    reference_df: pd.DataFrame,
+    temporal_data: pd.DataFrame,
+    language: str = "English",
+    progress_callback=None,
+) -> dict:
+    """Apply the frozen AI Risk model to a prepared temporal cohort.
+
+    This is the single reusable entry point for temporal AI Risk inference.
+    Behaviour is intentionally identical to the previous in-line loop:
+
+    * inputs are routed through ``_build_input_row`` then aligned to the
+      training schema via ``_align_input_to_training_schema`` (the shared
+      numeric/categorical normalizer);
+    * the frozen pipeline (``model_pipeline.predict_proba``) is applied
+      exactly as saved — no retraining, no recalibration;
+    * per-row completeness is assessed with ``assess_input_completeness``.
+
+    The only behavioural addition is structured incident capture: when a
+    row fails inference, instead of silently producing ``NaN`` we still
+    record ``NaN`` in ``probabilities`` (so downstream metric code keeps
+    working) **and** append a per-patient incident dict that the UI layer
+    can surface alongside STS Score incidents.
+
+    Parameters
+    ----------
+    model_pipeline : sklearn-compatible pipeline
+        The frozen estimator (preprocessing + fitted estimator + calibration).
+    feature_columns : list[str]
+        The locked training feature schema.
+    reference_df : pd.DataFrame
+        Training-time feature dataframe used to drive numeric/categorical
+        coercion in ``_align_input_to_training_schema``.
+    temporal_data : pd.DataFrame
+        The prepared temporal cohort (already passed through
+        ``prepare_master_dataset``).
+    language : str
+        Forwarded to ``assess_input_completeness`` for label localisation.
+    progress_callback : callable, optional
+        ``progress_callback(i, n)`` invoked roughly every 5% of rows so the
+        caller can drive a Streamlit progress bar without this helper
+        importing Streamlit.
+
+    Returns
+    -------
+    dict
+        ``probabilities`` (list[float], NaN on failure),
+        ``completeness`` (list[str]),
+        ``incidents`` (list[dict] with ``patient_id`` / ``stage`` / ``reason``),
+        ``n_total`` (int), ``n_failed`` (int).
+    """
+    n_total = len(temporal_data)
+    probabilities: List[float] = []
+    completeness: List[str] = []
+    incidents: List[Dict[str, object]] = []
+
+    numeric_cols = _get_numeric_columns_from_pipeline(model_pipeline)
+    rows = temporal_data.to_dict(orient="records")
+
+    for idx, row_dict in enumerate(rows):
+        patient_id = _temporal_patient_identifier(row_dict, idx)
+        try:
+            input_row = _build_input_row(feature_columns, row_dict)
+            input_row = _align_input_to_training_schema(input_row, reference_df)
+            model_input = clean_features(input_row[feature_columns], numeric_columns=numeric_cols)
+            prob = float(model_pipeline.predict_proba(model_input)[:, 1][0])
+            comp = assess_input_completeness(feature_columns, input_row, language)
+            probabilities.append(prob)
+            completeness.append(comp["level"])
+        except Exception as exc:  # noqa: BLE001 - surfaced in incidents
+            probabilities.append(np.nan)
+            completeness.append("error")
+            incidents.append({
+                "patient_id": patient_id,
+                "stage": "ai_risk_inference",
+                "reason": f"{type(exc).__name__}: {exc}",
+            })
+
+        if progress_callback is not None:
+            try:
+                progress_callback(idx + 1, n_total)
+            except Exception:
+                pass
+
+    return {
+        "probabilities": probabilities,
+        "completeness": completeness,
+        "incidents": incidents,
+        "n_total": n_total,
+        "n_failed": len(incidents),
+    }
 
 
 def _risk_badge(p: float) -> str:
@@ -5604,63 +5717,100 @@ elif _active_tab == 9:  # Temporal Validation
                     else:
                         st.info(msg)
 
+                # ── 4b. Methodological hard-stop ──
+                # Phase: temporal-validation hardening.  When the validation
+                # cohort is chronologically *before* the training cohort, the
+                # exercise is no longer temporal validation — it is retrograde
+                # validation and must not be allowed to run.  Previously this
+                # was only a visible warning; now we block the Run button so
+                # the user cannot accidentally publish retrograde results.
+                _tv_chrono_blocked = (sev == "error")
+
                 # ── 5. Run button ──
                 st.divider()
+                if _tv_chrono_blocked:
+                    st.error(tr(
+                        "Temporal validation execution is blocked: the validation cohort is "
+                        "chronologically before the training cohort. Upload a cohort that is "
+                        "after the training period.",
+                        "Execução da validação temporal bloqueada: a coorte de validação é "
+                        "cronologicamente anterior à coorte de treinamento. Faça upload de uma "
+                        "coorte posterior ao período de treinamento.",
+                    ))
                 _tv_run = st.button(
                     tr("Run temporal validation", "Executar validação temporal"),
                     type="primary",
                     use_container_width=True,
+                    disabled=_tv_chrono_blocked,
                 )
 
                 if _tv_run:
                     _tv_progress = st.progress(0, text=tr("Preparing...", "Preparando..."))
 
                     # ── 5.1 Apply frozen AI Risk model ──
+                    # Phase: temporal-validation hardening.  The per-row
+                    # inference loop now lives in a single reusable helper
+                    # (``apply_frozen_model_to_temporal_cohort``).  Behaviour
+                    # is identical — the helper still routes inputs through
+                    # ``_build_input_row`` + ``_align_input_to_training_schema``
+                    # + ``clean_features`` and applies the frozen pipeline as
+                    # saved.  The residual ad hoc numeric coercion that used
+                    # to live inline (``str.replace(',', '.')`` per column)
+                    # was removed because ``_align_input_to_training_schema``
+                    # already performs that exact normalization on the
+                    # training-schema reference frame.
                     _tv_progress.progress(0.05, text=tr("Applying frozen AI Risk model...", "Aplicando modelo AI Risk congelado..."))
 
                     _tv_ref_df = prepared.data[prepared.feature_columns]
-                    _tv_num_cols = _get_numeric_columns_from_pipeline(artifacts.fitted_models[forced_model])
-                    _tv_results = []
 
-                    for _tv_idx in range(_tv_n):
-                        _tv_row_data = _tv_data.iloc[[_tv_idx]]
-                        try:
-                            _tv_form = _tv_row_data.to_dict(orient="records")[0]
-                            _tv_input = _build_input_row(artifacts.feature_columns, _tv_form)
-                            _tv_input = _align_input_to_training_schema(_tv_input, _tv_ref_df)
-                            _tv_model_input = clean_features(_tv_input[artifacts.feature_columns], numeric_columns=_tv_num_cols)
-
-                            # Force numeric columns that are still object
-                            for _c in _tv_model_input.columns:
-                                if _tv_model_input[_c].dtype == object and _c in _tv_ref_df.columns and pd.api.types.is_numeric_dtype(_tv_ref_df[_c]):
-                                    _tv_model_input[_c] = pd.to_numeric(
-                                        _tv_model_input[_c].astype(str).str.replace(',', '.', regex=False),
-                                        errors="coerce",
-                                    )
-
-                            _tv_ia_prob = float(artifacts.fitted_models[forced_model].predict_proba(_tv_model_input)[:, 1][0])
-
-                            # Completeness
-                            _tv_comp = assess_input_completeness(artifacts.feature_columns, _tv_input, language)
-
-                            _tv_results.append({
-                                "ia_risk": _tv_ia_prob,
-                                "completeness": _tv_comp["level"],
-                            })
-                        except Exception:
-                            _tv_results.append({"ia_risk": np.nan, "completeness": "error"})
-
-                        if (_tv_idx + 1) % max(1, _tv_n // 20) == 0:
+                    def _tv_progress_cb(_done, _total):
+                        # Throttle updates to ~5% increments to avoid
+                        # hammering the Streamlit progress widget.
+                        if _total <= 0:
+                            return
+                        _step = max(1, _total // 20)
+                        if _done % _step == 0 or _done == _total:
                             _tv_progress.progress(
-                                0.05 + 0.35 * (_tv_idx + 1) / _tv_n,
+                                0.05 + 0.35 * _done / _total,
                                 text=tr(
-                                    f"AI Risk: {_tv_idx + 1}/{_tv_n}",
-                                    f"AI Risk: {_tv_idx + 1}/{_tv_n}",
+                                    f"AI Risk: {_done}/{_total}",
+                                    f"AI Risk: {_done}/{_total}",
                                 ),
                             )
 
-                    _tv_data["ia_risk"] = [r["ia_risk"] for r in _tv_results]
-                    _tv_data["_completeness"] = [r["completeness"] for r in _tv_results]
+                    _tv_inference = apply_frozen_model_to_temporal_cohort(
+                        model_pipeline=artifacts.fitted_models[forced_model],
+                        feature_columns=artifacts.feature_columns,
+                        reference_df=_tv_ref_df,
+                        temporal_data=_tv_data,
+                        language=language,
+                        progress_callback=_tv_progress_cb,
+                    )
+
+                    _tv_data["ia_risk"] = _tv_inference["probabilities"]
+                    _tv_data["_completeness"] = _tv_inference["completeness"]
+                    _tv_ai_incidents = _tv_inference["incidents"]
+
+                    # Phase: AI Risk incident transparency.  Mirror the STS
+                    # Score incident UI so per-patient inference failures
+                    # are not silently reduced to NaN.
+                    if _tv_ai_incidents:
+                        st.warning(tr(
+                            f"AI Risk inference incidents (temporal validation): {len(_tv_ai_incidents)} patient(s) failed.",
+                            f"Incidentes de inferência do AI Risk (validação temporal): {len(_tv_ai_incidents)} paciente(s) falharam.",
+                        ))
+                        with st.expander(
+                            tr(
+                                f"AI Risk per-patient incidents (temporal validation) ({len(_tv_ai_incidents)})",
+                                f"Incidentes por paciente do AI Risk (validação temporal) ({len(_tv_ai_incidents)})",
+                            ),
+                            expanded=False,
+                        ):
+                            st.dataframe(
+                                pd.DataFrame(_tv_ai_incidents),
+                                width="stretch",
+                                hide_index=True,
+                            )
 
                     # ── 5.2 EuroSCORE II ──
                     _tv_progress.progress(0.42, text=tr("Computing EuroSCORE II...", "Calculando EuroSCORE II..."))
@@ -5745,7 +5895,9 @@ elif _active_tab == 9:  # Temporal Validation
                     _tv_rename = {"ia_risk": "AI Risk", "euroscore_calc": "EuroSCORE II"}
                     if _tv_sts_ok:
                         _tv_score_cols.append("sts_score")
-                        _tv_rename["sts_score"] = "STS"
+                        # Phase: nomenclature consistency — always use the
+                        # full term "STS Score" in the temporal-validation UI.
+                        _tv_rename["sts_score"] = "STS Score"
 
                     # ── 6. Metrics ──
                     # 6.1 Performance table
@@ -6058,20 +6210,21 @@ elif _active_tab == 9:  # Temporal Validation
 
                     _tv_case_df = _tv_data[_tv_case_cols].copy()
                     # Rename for display
+                    # Phase: nomenclature consistency — "STS Score" everywhere.
                     _tv_case_rename = {
                         "morte_30d": tr("Outcome", "Desfecho"),
                         "ia_risk": "AI Risk",
                         "euroscore_calc": "EuroSCORE II",
-                        "sts_score": "STS",
+                        "sts_score": "STS Score",
                         "class_ia": tr("AI Risk class", "Classe AI Risk"),
                         "class_euro": tr("EuroSCORE II class", "Classe EuroSCORE II"),
-                        "class_sts": tr("STS class", "Classe STS"),
+                        "class_sts": tr("STS Score class", "Classe STS Score"),
                         "_completeness": tr("Completeness", "Completude"),
                     }
                     _tv_case_df = _tv_case_df.rename(columns=_tv_case_rename)
 
                     # Format probabilities as percentages
-                    for _pc in ["AI Risk", "EuroSCORE II", "STS"]:
+                    for _pc in ["AI Risk", "EuroSCORE II", "STS Score"]:
                         if _pc in _tv_case_df.columns:
                             _tv_case_df[_pc] = _tv_case_df[_pc].map(
                                 lambda v: f"{v*100:.2f}%" if pd.notna(v) else "—"
