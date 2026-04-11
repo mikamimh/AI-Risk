@@ -459,12 +459,30 @@ def build_step_sts_score(execution_log: Optional[Sequence[Any]]) -> Optional[Run
 
     n_failed = counters["Failed"]
     n_stale = counters["Stale fallback"]
-    if n_failed > 0:
+    # Usable = anything that returned a result, including stale fallbacks
+    # (fresh + cached + refreshed + stale_fallback = total - failed).
+    n_usable = total - n_failed
+    fail_ratio = (n_failed / total) if total else 0.0
+
+    # Severity rule:
+    # * ERROR only when STS Score is effectively unavailable — zero usable
+    #   results, or the majority of cases failed.
+    # * Partial failures (a small/medium subset failed while most cases
+    #   still returned a usable result) are non-blocking WARNINGS so the
+    #   app does not present itself as broken for a 0.5-10% failure rate.
+    if n_failed > 0 and (n_usable == 0 or fail_ratio >= 0.5):
         status = STATUS_ERROR
         summary = (
-            f"STS Score: {n_failed} failure(s), {n_stale} stale fallback(s) "
-            f"(total {total})."
+            f"STS Score unavailable for {n_failed}/{total} patients "
+            f"({fail_ratio * 100:.0f}%) — STS-dependent analyses are not reliable."
         )
+    elif n_failed > 0:
+        stale_fragment = f" ({n_stale} stale fallback)" if n_stale else ""
+        summary = (
+            f"STS Score partial failure: {n_failed}/{total} cases failed; "
+            f"analysis continues with available STS results{stale_fragment}."
+        )
+        status = STATUS_WARNING
     elif n_stale > 0:
         status = STATUS_WARNING
         summary = (
@@ -573,6 +591,29 @@ def render_run_report_compact(report: RunReport, *, tr=None) -> None:
             if step.status == STATUS_ERROR:
                 st.error(f"**{step.name}** — {step.summary}")
 
+    # Compact top-of-page failed-cases panel — STS Score only.
+    # Surfaces per-patient STS Score incidents without forcing the user
+    # to scroll to the bottom of the Overview tab.  Collapsed by default
+    # so it never visually dominates the page.  The comprehensive audit
+    # view is still rendered at the bottom by ``render_run_report``.
+    for step in report.steps:
+        if step.name != "STS Score execution":
+            continue
+        if step.status == STATUS_OK or not step.incidents:
+            continue
+        import pandas as pd
+        header = _t(
+            f"STS Score failed cases — details ({len(step.incidents)})",
+            f"STS Score — casos com falha ({len(step.incidents)})",
+        )
+        with st.expander(header, expanded=False):
+            st.dataframe(
+                pd.DataFrame(step.incidents),
+                hide_index=True,
+                width="stretch",
+            )
+        break
+
 
 def render_run_report(report: RunReport, *, tr=None, title: Optional[str] = None) -> None:
     """Render a ``RunReport`` inside the Streamlit page.
@@ -624,11 +665,17 @@ def render_run_report(report: RunReport, *, tr=None, title: Optional[str] = None
         expanded = step.status == STATUS_ERROR
         with st.expander(header, expanded=expanded):
             if step.counters:
-                rows = [
-                    {_t("Metric", "Métrica"): k, _t("Value", "Valor"): v}
-                    for k, v in step.counters.items()
-                ]
-                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+                metric_col = _t("Metric", "Métrica")
+                value_col = _t("Value", "Valor")
+                counters_df = pd.DataFrame(
+                    [{metric_col: k, value_col: v} for k, v in step.counters.items()]
+                )
+                # Counters mix ints (row counts) with formatted strings
+                # ("14.98%", "RandomForest"); cast to str so pyarrow does
+                # not try int64 inference on a heterogeneous object column
+                # and spam the terminal with ArrowInvalid tracebacks.
+                counters_df[value_col] = counters_df[value_col].astype(str)
+                st.dataframe(counters_df, hide_index=True, width="stretch")
             if step.details:
                 st.markdown("\n".join(f"- {d}" for d in step.details))
             if step.incidents:

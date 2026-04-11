@@ -3731,6 +3731,11 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
             "as saídas do modelo, a lógica de ranqueamento ou qualquer aspecto metodológico.",
         ))
 
+        # Collected as each panel renders; used at the end of the
+        # expander to build a single multi-sheet XLSX download bundling
+        # the whole diagnostics area.
+        _diag_sheets: dict[str, pd.DataFrame] = {}
+
         def _describe_prob_array(arr) -> dict:
             a = np.asarray(arr, dtype=float)
             a = a[~np.isnan(a)]
@@ -3774,6 +3779,7 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
                  "p75", "p95", "p99", "max", "frac<0.08", "youden"]
             ]
             st.dataframe(_cal_diag_df, width="stretch", hide_index=True)
+            _diag_sheets["1_OOF_calibrated"] = _cal_diag_df
         else:
             st.info(tr("No calibrated OOF predictions available.",
                        "Sem predições OOF calibradas disponíveis."))
@@ -3801,6 +3807,7 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
                      "p75", "p95", "p99", "max", "frac<0.08"]
                 ]
                 st.dataframe(_raw_diag_df, width="stretch", hide_index=True)
+                _diag_sheets["2_OOF_raw"] = _raw_diag_df
             else:
                 st.info(tr("Raw OOF dict is empty.", "Dicionário OOF bruto vazio."))
         else:
@@ -3857,6 +3864,9 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
                 {"metric": "min >= 0.08 ?", "value": _min_above_8},
             ])
             st.dataframe(_active_summary, width="stretch", hide_index=True)
+            _diag_sheets[f"3_active_{forced_model}"[:31]] = _active_summary.assign(
+                model=forced_model
+            )
 
             # Panel 4 — calibration intercept/slope on the same series
             st.markdown(tr(
@@ -3873,6 +3883,7 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
                 {"metric": "Calibration slope", "value": _cis["Calibration slope"]},
             ])
             st.dataframe(_cis_df, width="stretch", hide_index=True)
+            _diag_sheets["4_calibration_int_slope"] = _cis_df.assign(model=forced_model)
 
             # Panel 5 — side-by-side threshold comparison
             st.markdown(tr(
@@ -3911,11 +3922,37 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
                 })
             _thr_df = pd.DataFrame(_thr_rows)
             st.dataframe(_thr_df, width="stretch", hide_index=True)
+            _diag_sheets["5_threshold_comparison"] = _thr_df.assign(model=forced_model)
         else:
             st.info(tr(
                 "Active AI Risk OOF series is empty or has only one outcome class — cannot diagnose.",
                 "Série OOF do AI Risk ativa está vazia ou tem apenas uma classe — não é possível diagnosticar.",
             ))
+
+        # ── Single-click download of the entire diagnostics area ──────
+        if _diag_sheets:
+            _diag_xlsx_buf = BytesIO()
+            try:
+                with pd.ExcelWriter(_diag_xlsx_buf, engine="openpyxl") as _writer:
+                    for _sheet_name, _sheet_df in _diag_sheets.items():
+                        _sheet_df.to_excel(
+                            _writer, sheet_name=_sheet_name[:31], index=False
+                        )
+                st.download_button(
+                    label=tr(
+                        "Download all diagnostics (XLSX)",
+                        "Baixar todos os diagnósticos (XLSX)",
+                    ),
+                    data=_diag_xlsx_buf.getvalue(),
+                    file_name="probability_distribution_diagnostics.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_prob_diag_all",
+                )
+            except Exception as _diag_dl_err:
+                st.caption(tr(
+                    f"Diagnostics bundle unavailable: {_diag_dl_err}",
+                    f"Pacote de diagnósticos indisponível: {_diag_dl_err}",
+                ))
 
     st.markdown(tr("**Pairwise comparisons (larger sample)**", "**Comparações por pares (amostra maior)**"))
     st.caption(

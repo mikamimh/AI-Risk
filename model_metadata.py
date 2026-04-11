@@ -215,7 +215,17 @@ def format_metadata_for_display(metadata: dict, language: str = "English") -> pd
         (_tr("STS method", "Método STS"), metadata.get("sts_method", "N/A")),
         (_tr("EuroSCORE II method", "Método EuroSCORE II"), metadata.get("euroscore_method", "N/A")),
     ]
-    return pd.DataFrame(rows, columns=[_tr("Property", "Propriedade"), _tr("Value", "Valor")])
+    value_col = _tr("Value", "Valor")
+    out = pd.DataFrame(rows, columns=[_tr("Property", "Propriedade"), value_col])
+    # Force the Value column to string dtype.  Rows mix Python types
+    # (ints, floats, strings such as "14.98%", "RandomForest", "N/A"),
+    # and pyarrow's object-column type inference inside Streamlit picks
+    # int64 from early numeric rows and then raises ArrowInvalid on the
+    # later string rows ("Could not convert '14.98%' ... to int64").
+    # The column is rendered as plain text anyway — casting to str keeps
+    # the display identical while making Arrow serialization deterministic.
+    out[value_col] = out[value_col].astype(str)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1113,7 +1123,16 @@ def format_locked_model_for_display(
         (_tr("Locked clinical threshold", "Limiar clínico bloqueado"), f"{locked_thr:.0%}"),
         (_tr("Lock status", "Status de bloqueio"), _tr("Locked — no retraining allowed", "Bloqueado — sem retreinamento")),
     ]
-    return pd.DataFrame(rows, columns=[_tr("Property", "Propriedade"), _tr("Value", "Valor")])
+    value_col = _tr("Value", "Valor")
+    out = pd.DataFrame(rows, columns=[_tr("Property", "Propriedade"), value_col])
+    # Force the Value column to string dtype — same rationale as
+    # format_metadata_for_display above: rows mix Python types (ints,
+    # strings like "RandomForest", formatted percentages like "14.98%"),
+    # and pyarrow's object-column type inference inside Streamlit picks
+    # int64 from early numeric rows and then raises ArrowInvalid on the
+    # string rows.  The column is rendered as plain text anyway.
+    out[value_col] = out[value_col].astype(str)
+    return out
 
 
 def build_temporal_validation_summary(
