@@ -27,10 +27,81 @@ from typing import Callable, List
 import numpy as np
 import pandas as pd
 
-from risk_data import parse_number, split_surgery_procedures
+from risk_data import (
+    THORACIC_AORTA_PROCEDURES,
+    parse_number,
+    split_surgery_procedures,
+)
 from stats_compare import bootstrap_metrics_ci, evaluate_scores_with_threshold
 
 TrFn = Callable[[str, str], str]
+
+
+def surgery_descriptive_group(text: object, tr: TrFn) -> str:
+    """Clinical descriptive grouping used by the Overview cohort table.
+
+    Returns one of 14 clinically meaningful categories. Reuses
+    :func:`split_surgery_procedures` for parsing (minor procedures
+    filtered, separators normalized, lowercased) and
+    :data:`THORACIC_AORTA_PROCEDURES` for the aorta priority rule. This
+    is descriptive only — no model, score, or threshold logic depends
+    on it.
+
+    Priority order (first match wins):
+
+    1. Named rare procedures (Heart transplant, Ross, Pulmonary
+       homograft, Aortic homograft) — override combined logic.
+    2. Thoracic aorta surgery (any thoracic aorta procedure).
+    3. Isolated single core procedure (CABG/OPCAB, AVR, MVR, MV Repair).
+    4. Valve + CABG pairings (exactly two core procedures).
+    5. Any other combined row.
+    6. ``Other`` fallback (empty parts or unmatched single procedure).
+    """
+    parts = set(split_surgery_procedures(text))
+    if not parts:
+        return tr("Other", "Outras")
+
+    # Priority 1 — named rare procedures
+    if "heart transplant" in parts:
+        return tr("Heart transplant", "Transplante cardíaco")
+    if "ross" in parts:
+        return tr("Ross procedure", "Cirurgia de Ross")
+    if "pulmonary homograft implantation" in parts:
+        return tr("Pulmonary homograft", "Homoenxerto pulmonar")
+    if "aortic homograft implantation" in parts:
+        return tr("Aortic homograft", "Homoenxerto aórtico")
+
+    # Priority 2 — thoracic aorta (any)
+    if parts & THORACIC_AORTA_PROCEDURES:
+        return tr("Thoracic aorta surgery", "Cirurgia de aorta torácica")
+
+    coronary = bool(parts & {"cabg", "opcab"})
+
+    # Priority 3 — isolated single-procedure rows
+    if len(parts) == 1:
+        if coronary:
+            return tr("Isolated CABG", "CABG isolada")
+        if "avr" in parts:
+            return tr("Isolated AVR", "Troca valvar aórtica isolada")
+        if "mvr" in parts:
+            return tr("Isolated MVR", "Troca valvar mitral isolada")
+        if "mv repair" in parts:
+            return tr("Isolated MV Repair", "Plastia mitral isolada")
+
+    # Priority 4 — valve + CABG pairings
+    if coronary and len(parts) == 2:
+        if "avr" in parts:
+            return tr("AVR + CABG", "Troca valvar aórtica + CABG")
+        if "mvr" in parts:
+            return tr("MVR + CABG", "Troca valvar mitral + CABG")
+        if "mv repair" in parts:
+            return tr("MV Repair + CABG", "Plastia mitral + CABG")
+
+    # Priority 5 — any other combined
+    if len(parts) >= 2:
+        return tr("Other combined surgeries", "Outras cirurgias combinadas")
+
+    return tr("Other", "Outras")
 
 
 def surgery_family(text: object, tr: TrFn) -> str:

@@ -1876,6 +1876,50 @@ def general_table_column_config(kind: str) -> dict:
                 format="%d",
             ),
         }
+    if kind == "surgery_profile":
+        return {
+            tr("Surgery group", "Grupo cirúrgico"): st.column_config.TextColumn(
+                tr("Surgery group", "Grupo cirúrgico"),
+                help=tr("Grouped surgery category (descriptive, not model-oriented).", "Categoria cirúrgica agrupada (descritiva, não orientada ao modelo)."),
+            ),
+            tr("N", "N"): st.column_config.NumberColumn(
+                tr("N", "N"),
+                help=tr("Number of patients in the group.", "Número de pacientes no grupo."),
+                format="%d",
+            ),
+            tr("Deaths", "Óbitos"): st.column_config.NumberColumn(
+                tr("Deaths", "Óbitos"),
+                help=tr("Number of deaths (primary outcome: morte_30d).", "Número de óbitos (desfecho primário: morte_30d)."),
+                format="%d",
+            ),
+            tr("Mortality rate (%)", "Mortalidade (%)"): st.column_config.NumberColumn(
+                tr("Mortality rate (%)", "Mortalidade (%)"),
+                help=tr("Observed mortality rate in the group.", "Taxa de mortalidade observada no grupo."),
+                format="%.1f",
+            ),
+        }
+    if kind == "surgery_profile_raw":
+        return {
+            tr("Surgery (raw)", "Cirurgia (bruta)"): st.column_config.TextColumn(
+                tr("Surgery (raw)", "Cirurgia (bruta)"),
+                help=tr("Raw free-text surgery description from the source dataset.", "Descrição livre da cirurgia, conforme o arquivo fonte."),
+            ),
+            tr("N", "N"): st.column_config.NumberColumn(
+                tr("N", "N"),
+                help=tr("Number of patients with this exact surgery string.", "Número de pacientes com esta descrição exata."),
+                format="%d",
+            ),
+            tr("Deaths", "Óbitos"): st.column_config.NumberColumn(
+                tr("Deaths", "Óbitos"),
+                help=tr("Number of deaths (primary outcome: morte_30d).", "Número de óbitos (desfecho primário: morte_30d)."),
+                format="%d",
+            ),
+            tr("Mortality rate (%)", "Mortalidade (%)"): st.column_config.NumberColumn(
+                tr("Mortality rate (%)", "Mortalidade (%)"),
+                help=tr("Observed mortality rate for this raw surgery string.", "Taxa de mortalidade observada para esta descrição bruta."),
+                format="%.1f",
+            ),
+        }
     if kind == "available_scores":
         return {
             tr("Score", "Escore"): st.column_config.TextColumn(
@@ -2160,6 +2204,7 @@ def _plot_dca(curve_df: pd.DataFrame):
 from subgroups import (
     surgery_family as _surgery_family_impl,
     surgery_type_group as _surgery_type_group_impl,
+    surgery_descriptive_group as _surgery_descriptive_group_impl,
     lvef_group as _lvef_group_impl,
     renal_group as _renal_group_impl,
 )
@@ -2171,6 +2216,10 @@ def _surgery_family(text: object) -> str:
 
 def _surgery_type_group(text: object) -> str:
     return _surgery_type_group_impl(text, tr)
+
+
+def _surgery_descriptive_group(text: object) -> str:
+    return _surgery_descriptive_group_impl(text, tr)
 
 
 def _lvef_group(value: object, fallback: object = None) -> str:
@@ -2625,15 +2674,38 @@ _tab_labels = [
     tr("Dictionary", "Dicionário"),
     tr("Temporal Validation", "Validação Temporal"),
 ]
+# Visual order shown in the segmented control. The dispatch below still
+# uses `_tab_labels` indices, so reordering the display list never moves
+# any tab body. Label strings must match `_tab_labels` exactly so the
+# round-trip `_tab_labels.index(...)` below resolves to the correct
+# canonical dispatch index.
+_tab_display_order = [
+    tr("Overview", "Visão Geral"),
+    tr("Prediction", "Predição"),
+    tr("Batch", "Lote"),
+    tr("Comparison", "Comparação"),
+    tr("Temporal Validation", "Validação Temporal"),
+    tr("Data Quality", "Qualidade"),
+    tr("Models", "Modelos"),
+    tr("Subgroups", "Subgrupos"),
+    tr("Guide", "Guia"),
+    tr("Dictionary", "Dicionário"),
+]
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = 0
 if st.session_state.active_tab >= len(_tab_labels):
     st.session_state.active_tab = 0
 
+_canonical_active = st.session_state.active_tab
+_current_label = _tab_labels[_canonical_active]
+_default_display_label = (
+    _current_label if _current_label in _tab_display_order else _tab_display_order[0]
+)
+
 _selected_tab_label = st.segmented_control(
     "nav",
-    _tab_labels,
-    default=_tab_labels[st.session_state.active_tab],
+    _tab_display_order,
+    default=_default_display_label,
     selection_mode="single",
     label_visibility="collapsed",
     key="_tab_nav",
@@ -2650,6 +2722,90 @@ if _active_tab == 0:  # Overview
     st.caption(tr(f"Best training model: {best_model_name}", f"Melhor modelo automático no treino: {best_model_name}"))
     st.caption(tr(f"Last action: {bundle_source}", f"Última ação: {bundle_source}"))
     st.caption(tr(f"Model version: {MODEL_VERSION}", f"Versão do modelo: {MODEL_VERSION}"))
+
+    # ── Surgery profile (descriptive cohort breakdown) ──
+    st.subheader(tr("Surgery profile", "Perfil cirúrgico"))
+    _surg_group_col_label = tr("Surgery group", "Grupo cirúrgico")
+    _n_col_label = tr("N", "N")
+    _deaths_col_label = tr("Deaths", "Óbitos")
+    _mort_col_label = tr("Mortality rate (%)", "Mortalidade (%)")
+
+    _category_order = [
+        tr("Isolated CABG", "CABG isolada"),
+        tr("Isolated AVR", "Troca valvar aórtica isolada"),
+        tr("Isolated MVR", "Troca valvar mitral isolada"),
+        tr("Isolated MV Repair", "Plastia mitral isolada"),
+        tr("AVR + CABG", "Troca valvar aórtica + CABG"),
+        tr("MVR + CABG", "Troca valvar mitral + CABG"),
+        tr("MV Repair + CABG", "Plastia mitral + CABG"),
+        tr("Thoracic aorta surgery", "Cirurgia de aorta torácica"),
+        tr("Heart transplant", "Transplante cardíaco"),
+        tr("Ross procedure", "Cirurgia de Ross"),
+        tr("Pulmonary homograft", "Homoenxerto pulmonar"),
+        tr("Aortic homograft", "Homoenxerto aórtico"),
+        tr("Other combined surgeries", "Outras cirurgias combinadas"),
+        tr("Other", "Outras"),
+    ]
+
+    _surg_profile_src = pd.DataFrame({
+        _surg_group_col_label: df["Surgery"].map(_surgery_descriptive_group),
+        "_death": pd.to_numeric(df["morte_30d"], errors="coerce").fillna(0).astype(int),
+    })
+    _surg_profile = (
+        _surg_profile_src.groupby(_surg_group_col_label, dropna=False)
+        .agg(**{_n_col_label: ("_death", "size"), _deaths_col_label: ("_death", "sum")})
+        .reset_index()
+    )
+    _surg_profile = _surg_profile[_surg_profile[_n_col_label] > 0].copy()
+    _surg_profile[_mort_col_label] = 100.0 * _surg_profile[_deaths_col_label] / _surg_profile[_n_col_label]
+    _surg_profile = _surg_profile[[
+        _surg_group_col_label, _n_col_label, _deaths_col_label, _mort_col_label,
+    ]]
+    _surg_profile[_surg_group_col_label] = pd.Categorical(
+        _surg_profile[_surg_group_col_label],
+        categories=_category_order,
+        ordered=True,
+    )
+    _surg_profile = _surg_profile.sort_values(_surg_group_col_label).reset_index(drop=True)
+
+    st.dataframe(
+        _surg_profile,
+        width="stretch",
+        hide_index=True,
+        column_config=general_table_column_config("surgery_profile"),
+    )
+    st.caption(tr(
+        "Descriptive breakdown by grouped surgery category on the current cohort. "
+        "Mortality uses the app's primary outcome (`morte_30d`). No inferential tests.",
+        "Resumo descritivo por grupo cirúrgico na coorte atual. "
+        "A mortalidade usa o desfecho primário do app (`morte_30d`). Sem testes inferenciais.",
+    ))
+
+    with st.expander(
+        tr("Show raw surgery strings (optional)", "Mostrar descrições brutas de cirurgia (opcional)"),
+        expanded=False,
+    ):
+        _raw_col_label = tr("Surgery (raw)", "Cirurgia (bruta)")
+        _raw_profile_src = pd.DataFrame({
+            _raw_col_label: df["Surgery"].astype(str),
+            "_death": pd.to_numeric(df["morte_30d"], errors="coerce").fillna(0).astype(int),
+        })
+        _raw_profile = (
+            _raw_profile_src.groupby(_raw_col_label, dropna=False)
+            .agg(**{_n_col_label: ("_death", "size"), _deaths_col_label: ("_death", "sum")})
+            .reset_index()
+        )
+        _raw_profile[_mort_col_label] = 100.0 * _raw_profile[_deaths_col_label] / _raw_profile[_n_col_label]
+        _raw_profile = _raw_profile[[
+            _raw_col_label, _n_col_label, _deaths_col_label, _mort_col_label,
+        ]]
+        _raw_profile = _raw_profile.sort_values(_n_col_label, ascending=False).reset_index(drop=True)
+        st.dataframe(
+            _raw_profile,
+            width="stretch",
+            hide_index=True,
+            column_config=general_table_column_config("surgery_profile_raw"),
+        )
 
     # Model metadata panel
     _model_meta = build_model_metadata(
@@ -3522,21 +3678,13 @@ elif _active_tab == 2:  # Statistical Comparison
 
     if _use_youden:
         st.info(tr(
-            f"**Active threshold: Best model Youden = {_slider_default*100:.1f}%** (probability {_slider_default:.4f}). "
-            f"Learned from training OOF predictions — not recomputed on this data.",
-            f"**Limiar ativo: Youden do melhor modelo = {_slider_default*100:.1f}%** (probabilidade {_slider_default:.4f}). "
-            f"Aprendido das predições OOF de treino — não recalculado nestes dados.",
+            f"**Active threshold: Best model Youden = {_slider_default*100:.1f}%** (probability {_slider_default:.4f})",
+            f"**Limiar ativo: Youden do melhor modelo = {_slider_default*100:.1f}%** (probabilidade {_slider_default:.4f})",
         ))
     else:
         st.info(tr(
-            f"**Active threshold: Fixed clinical = {_default_threshold*100:.1f}%** (probability {_default_threshold:.4f})  \n"
-            f"Aligned with the EuroSCORE II high-risk boundary (>8%) and chosen conservatively — in cardiac surgery, "
-            f"missing a high-risk patient (false negative) is much more costly than an unnecessary alert (false positive). "
-            f"See the expander below for the full rationale.",
-            f"**Limiar ativo: Clínico fixo = {_default_threshold*100:.1f}%** (probabilidade {_default_threshold:.4f})  \n"
-            f"Alinhado com a fronteira de alto risco do EuroSCORE II (>8%) e escolhido de forma conservadora — em cirurgia cardíaca, "
-            f"não identificar um paciente de alto risco (falso negativo) é muito mais custoso do que um alerta desnecessário (falso positivo). "
-            f"Veja o expansor abaixo para a justificativa completa.",
+            f"**Active threshold: Fixed clinical = {_default_threshold*100:.1f}%** (probability {_default_threshold:.4f})",
+            f"**Limiar ativo: Clínico fixo = {_default_threshold*100:.1f}%** (probabilidade {_default_threshold:.4f})",
         ))
 
     decision_threshold = st.slider(
@@ -3546,54 +3694,35 @@ elif _active_tab == 2:  # Statistical Comparison
         value=_slider_default,
         step=0.01,
     )
-    with st.expander(tr("What is the decision threshold?", "O que é o limiar de decisão?"), expanded=False):
+    with st.expander(tr("How to read this section", "Como ler esta seção"), expanded=False):
         st.markdown(
             tr(
                 f"""
-The decision threshold converts a predicted probability into a binary decision: **positive** (high risk) or **negative** (low risk).
+**Decision threshold**
 
-- If the predicted risk is **>= {decision_threshold:.0%}**, the patient is classified as **positive** (high risk).
-- If the predicted risk is **< {decision_threshold:.0%}**, the patient is classified as **negative** (low risk).
+The decision threshold converts a predicted probability into a binary decision: **positive** (high risk) if the predicted risk is ≥ {decision_threshold:.0%}, **negative** (low risk) otherwise. A lower threshold increases sensitivity at the cost of specificity; a higher threshold does the opposite. AUC, AUPRC, and Brier score are **not affected** by the threshold — they evaluate the full probability distribution.
 
-**How it affects the metrics:**
+The default value ({_default_threshold:.0%}) is conservative for cardiac surgery: it sits just above the average mortality rate (3–8% globally) and is aligned with EuroSCORE II stratification (low <3%, intermediate 3–8%, high >8%). Missing a high-risk patient (false negative) is much more costly than an unnecessary alert (false positive), and the conservative choice reflects that asymmetry.
 
-| Lower threshold | Higher threshold |
-|:-|:-|
-| More patients classified as positive | Fewer patients classified as positive |
-| Higher sensitivity (catches more events) | Lower sensitivity (misses more events) |
-| Lower specificity (more false alarms) | Higher specificity (fewer false alarms) |
+**Analysis layout**
 
-The default value ({_default_threshold:.0%}) is a **conservative** threshold for cardiac surgery — it favors higher sensitivity (detecting more at-risk patients) at the cost of more false positives. You can adjust it using the slider. AUC, AUPRC, and Brier score are **not affected** by the threshold — they evaluate the full probability distribution.
-
-**Why {_default_threshold:.0%}?** In cardiac surgery, the cost of missing a high-risk patient (false negative) far outweighs the cost of an unnecessary alert (false positive). A missed at-risk patient may die without adequate preparation; an unnecessary alert only means the team prepares more carefully — causing no harm. The {_default_threshold:.0%} value sits just above the average mortality rate in cardiac surgery (3–8% globally), which means it does not classify most patients as high-risk, but is low enough to capture patients at real risk before it becomes clinically obvious. This is consistent with EuroSCORE II risk stratification thresholds (low <3%, intermediate 3–8%, high >8%).
+The main analysis is the three-way head-to-head, where AI Risk, EuroSCORE II, and STS are evaluated in the same patients (matched cohort). All-pairs comparisons are complementary and use larger samples when one of the three scores is unavailable. Threshold-dependent metrics (sensitivity, specificity, PPV, NPV) change with the decision threshold; calibration metrics evaluate agreement between predicted and observed risk; DCA evaluates clinical usefulness across thresholds.
 """,
                 f"""
-O limiar de decisão converte uma probabilidade predita em uma decisão binária: **positivo** (alto risco) ou **negativo** (baixo risco).
+**Limiar de decisão**
 
-- Se o risco predito é **>= {decision_threshold:.0%}**, o paciente é classificado como **positivo** (alto risco).
-- Se o risco predito é **< {decision_threshold:.0%}**, o paciente é classificado como **negativo** (baixo risco).
+O limiar de decisão converte uma probabilidade predita em uma decisão binária: **positivo** (alto risco) se o risco predito for ≥ {decision_threshold:.0%}, **negativo** (baixo risco) caso contrário. Um limiar mais baixo aumenta a sensibilidade ao custo da especificidade; um limiar mais alto faz o oposto. AUC, AUPRC e Brier score **não são afetados** pelo limiar — eles avaliam a distribuição completa de probabilidades.
 
-**Como o limiar afeta as métricas:**
+O valor padrão ({_default_threshold:.0%}) é conservador para cirurgia cardíaca: está logo acima da mortalidade média (3–8% mundialmente) e alinhado com a estratificação do EuroSCORE II (baixo <3%, intermediário 3–8%, alto >8%). Não identificar um paciente de alto risco (falso negativo) é muito mais custoso do que um alerta desnecessário (falso positivo), e a escolha conservadora reflete essa assimetria.
 
-| Limiar mais baixo | Limiar mais alto |
-|:-|:-|
-| Mais pacientes classificados como positivos | Menos pacientes classificados como positivos |
-| Maior sensibilidade (detecta mais eventos) | Menor sensibilidade (perde mais eventos) |
-| Menor especificidade (mais falsos alarmes) | Maior especificidade (menos falsos alarmes) |
+**Layout da análise**
 
-O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cirurgia cardíaca — favorece maior sensibilidade (detectar mais pacientes em risco) ao custo de mais falsos positivos. AUC, AUPRC e Brier score **não são afetados** pelo limiar — eles avaliam a distribuição completa de probabilidades.
-
-**Por que {_default_threshold:.0%}?** Em cirurgia cardíaca, o custo de não identificar um paciente de alto risco (falso negativo) é muito maior que o custo de um alerta desnecessário (falso positivo). Um paciente em risco não identificado pode evoluir a óbito sem preparo adequado da equipe; um alerta desnecessário apenas faz a equipe se preparar mais — sem causar dano. O valor de {_default_threshold:.0%} está logo acima da mortalidade média em cirurgia cardíaca (3–8% mundialmente), o que significa que não classifica a maioria dos pacientes como alto risco, mas é baixo o suficiente para capturar pacientes em risco real antes que isso se torne clinicamente óbvio. Isso é consistente com a estratificação do EuroSCORE II (baixo <3%, intermediário 3–8%, alto >8%).
+A análise principal é a comparação tripla (head-to-head), em que AI Risk, EuroSCORE II e STS são avaliados nos mesmos pacientes (coorte pareada). Comparações com todas as amostras são complementares e usam amostras maiores quando um dos três escores está ausente. Métricas dependentes do limiar (sensibilidade, especificidade, PPV, NPV) mudam quando o limiar muda; métricas de calibração avaliam a concordância entre risco previsto e observado; a DCA avalia utilidade clínica ao longo dos limiares.
 """,
             )
         )
-    with st.expander(tr("How to read this section", "Como ler esta seção"), expanded=False):
-        st.write(
-            tr(
-                "The main analysis is the fair triple comparison, where AI Risk, EuroSCORE II, and STS are evaluated in the same patients. Pairwise comparisons are complementary and use larger samples when one of the three scores is unavailable. Threshold-dependent metrics (sensitivity, specificity, PPV, NPV) change when the decision threshold changes. Calibration metrics evaluate agreement between predicted and observed risk, whereas DCA evaluates clinical usefulness across thresholds.",
-                "A análise principal é a comparação tripla justa, em que AI Risk, EuroSCORE II e STS são avaliados nos mesmos pacientes. As comparações pareadas são complementares e usam amostras maiores quando um dos três escores está ausente. Métricas dependentes do limiar (sensibilidade, especificidade, PPV, NPV) mudam quando o limiar de decisão muda. Métricas de calibração avaliam a concordância entre risco previsto e observado, enquanto a DCA avalia utilidade clínica ao longo dos limiares.",
-            )
-        )
+
+    st.markdown(tr("#### Overall performance", "#### Desempenho geral"))
 
     metrics_all = evaluate_scores(
         df,
@@ -3613,7 +3742,7 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
     st.dataframe(metrics_all, width="stretch", column_config=stats_table_column_config("overall"))
 
     triple = df[["morte_30d", "ia_risk_oof", "euroscore_calc", "sts_score"]].dropna()
-    st.markdown(tr("**Fair triple comparison (same patients for all 3 scores)**", "**Comparação tripla justa (mesmos pacientes para os 3 escores)**"))
+    st.markdown(tr("**Three-way head-to-head (matched cohort)**", "**Comparação tripla (coorte pareada)**"))
     st.write(f"n = {len(triple)}")
     st.caption(
         tr(
@@ -3668,8 +3797,6 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
             triple_ci["Score"] = triple_ci["Score"].map(score_label_ci)
             st.dataframe(triple_ci, width="stretch", column_config=stats_table_column_config("overall"))
 
-            _csv_download_btn(triple_ci, "relatorio_ic95_modelos.csv", tr("Download 95% CI report (CSV)", "Baixar relatório IC95% (CSV)"))
-
         calib_rows = []
         for label, col in [("AI Risk", "ia_risk_oof"), ("EuroSCORE II", "euroscore_calc"), ("STS", "sts_score")]:
             ci_vals = calibration_intercept_slope(triple["morte_30d"].values, triple[col].values)
@@ -3703,11 +3830,15 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
             _plot_roc(scores_plot, triple["morte_30d"].values)
         with p2:
             _plot_calibration(scores_plot, triple["morte_30d"].values)
-        st.markdown(tr("**Boxplots of predicted probabilities by outcome**", "**Boxplots das probabilidades preditas por desfecho**"))
-        _plot_boxplots(box_df)
 
-        st.markdown(tr("**Boxplots for each AI model**", "**Boxplots de cada modelo de IA**"))
-        _plot_ia_model_boxplots(df["morte_30d"].values, artifacts.oof_predictions)
+        st.markdown(tr("#### Probability distributions", "#### Distribuições de probabilidade"))
+        _bx1, _bx2 = st.columns(2)
+        with _bx1:
+            st.markdown(tr("**By outcome (triple cohort)**", "**Por desfecho (coorte tripla)**"))
+            _plot_boxplots(box_df)
+        with _bx2:
+            st.markdown(tr("**Per AI model (OOF)**", "**Por modelo de IA (OOF)**"))
+            _plot_ia_model_boxplots(df["morte_30d"].values, artifacts.oof_predictions)
     else:
         st.warning(tr("Insufficient sample for complete triple comparison.", "Amostra insuficiente para comparação tripla completa."))
 
@@ -3954,7 +4085,9 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
                     f"Pacote de diagnósticos indisponível: {_diag_dl_err}",
                 ))
 
-    st.markdown(tr("**Pairwise comparisons (larger sample)**", "**Comparações por pares (amostra maior)**"))
+    st.markdown(tr("#### Pairwise comparisons", "#### Comparações pareadas"))
+
+    st.markdown(tr("**All-pairs comparison (full cohort)**", "**Comparação por pares (coorte completa)**"))
     st.caption(
         tr(
             "Pairwise analyses use more patients when one of the three scores is missing. They are complementary to the triple main analysis.",
@@ -3984,7 +4117,7 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
         )
     st.dataframe(pd.DataFrame(pair_rows), width="stretch", column_config=stats_table_column_config("comparison"))
 
-    st.markdown(tr("**Formal pairwise comparison (triple sample only, same cohort)**", "**Comparação formal por pares (apenas amostra tripla, mesma coorte)**"))
+    st.markdown(tr("**Pairwise bootstrap (matched cohort)**", "**Bootstrap por pares (coorte pareada)**"))
     st.caption(
         tr(
             "These comparisons are restricted to the same triple cohort, which is the correct setting for direct statistical comparison between models.",
@@ -4019,10 +4152,8 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
 
     formal_df = pd.DataFrame(formal_rows)
     st.dataframe(formal_df, width="stretch", column_config=stats_table_column_config("comparison"))
-    if not formal_df.empty:
-        _csv_download_btn(formal_df, "comparacao_formal_modelos.csv", tr("Download formal comparison (CSV)", "Baixar comparação formal (CSV)"))
 
-    st.markdown(tr("**DeLong test (same triple cohort)**", "**Teste de DeLong (mesma coorte tripla)**"))
+    st.markdown(tr("**DeLong test (matched cohort)**", "**Teste de DeLong (coorte pareada)**"))
     st.caption(
         tr(
             "DeLong formally compares correlated AUCs in the same patients. It complements the bootstrap-based delta AUC analysis.",
@@ -4045,6 +4176,8 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
             )
     delong_df = pd.DataFrame(delong_rows)
     st.dataframe(delong_df, width="stretch", column_config=stats_table_column_config("comparison"))
+
+    st.markdown(tr("#### Clinical utility", "#### Utilidade clínica"))
 
     st.markdown(tr("**Decision curve analysis (DCA)**", "**Decision curve analysis (DCA)**"))
     st.caption(
@@ -4128,132 +4261,139 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
     else:
         st.info(tr("NRI/IDI are unavailable because the triple comparison sample is insufficient.", "NRI/IDI não estão disponíveis porque a amostra da comparação tripla é insuficiente."))
 
-    st.markdown(tr("**Clinical interpretation**", "**Interpretação clínica**"))
-    if len(triple) >= 30 and triple["morte_30d"].nunique() > 1:
-        same_sample_rows = []
-        for label, col in [("AI Risk", "ia_risk_oof"), ("EuroSCORE II", "euroscore_calc"), ("STS", "sts_score")]:
-            y = triple["morte_30d"].values
-            p = triple[col].values
-            pred = (p >= decision_threshold).astype(int)
-            tp = int(((pred == 1) & (y == 1)).sum())
-            tn = int(((pred == 0) & (y == 0)).sum())
-            fp = int(((pred == 1) & (y == 0)).sum())
-            fn = int(((pred == 0) & (y == 1)).sum())
-            sens = float(tp / (tp + fn)) if (tp + fn) else np.nan
-            spec = float(tn / (tn + fp)) if (tn + fp) else np.nan
-            same_sample_rows.append({"Score": label, "Sensitivity": sens, "Specificity": spec})
+    st.markdown(tr("#### Interpretation & export", "#### Interpretação e exportação"))
 
-        same_sample_df = pd.DataFrame(same_sample_rows)
-        best_auc = triple_ci.sort_values("AUC", ascending=False).iloc[0]["Score"] if not triple_ci.empty else None
-        best_brier = triple_ci.sort_values("Brier", ascending=True).iloc[0]["Score"] if not triple_ci.empty else None
-        best_sens = same_sample_df.sort_values("Sensitivity", ascending=False).iloc[0]["Score"]
-        best_spec = same_sample_df.sort_values("Specificity", ascending=False).iloc[0]["Score"]
-        best_ppv = threshold_metrics.sort_values("PPV", ascending=False).iloc[0]["Score"] if not threshold_metrics.empty else None
-        best_npv = threshold_metrics.sort_values("NPV", ascending=False).iloc[0]["Score"] if not threshold_metrics.empty else None
+    with st.expander(tr("Clinical interpretation", "Interpretação clínica"), expanded=False):
+        if len(triple) >= 30 and triple["morte_30d"].nunique() > 1:
+            same_sample_rows = []
+            for label, col in [("AI Risk", "ia_risk_oof"), ("EuroSCORE II", "euroscore_calc"), ("STS", "sts_score")]:
+                y = triple["morte_30d"].values
+                p = triple[col].values
+                pred = (p >= decision_threshold).astype(int)
+                tp = int(((pred == 1) & (y == 1)).sum())
+                tn = int(((pred == 0) & (y == 0)).sum())
+                fp = int(((pred == 1) & (y == 0)).sum())
+                fn = int(((pred == 0) & (y == 1)).sum())
+                sens = float(tp / (tp + fn)) if (tp + fn) else np.nan
+                spec = float(tn / (tn + fp)) if (tn + fp) else np.nan
+                same_sample_rows.append({"Score": label, "Sensitivity": sens, "Specificity": spec})
 
-        interp_text = tr(
-            f"On the same comparable sample (triple cohort), the best discrimination (AUC) was observed for {best_auc}. "
-            f"The best calibration (Brier score) was observed for {best_brier}. "
-            f"At the selected threshold, the highest sensitivity was observed for {best_sens} and the highest specificity for {best_spec}. "
-            f"The highest PPV was observed for {best_ppv}, the highest NPV for {best_npv}, and the highest average net benefit (5–20%) for {dca_label}.",
-            f"Na mesma amostra comparável (coorte tripla), a melhor discriminação (AUC) foi observada em {best_auc}. "
-            f"A melhor calibração (Brier score) foi observada em {best_brier}. "
-            f"No limiar selecionado, a maior sensibilidade foi observada em {best_sens} e a maior especificidade em {best_spec}. "
-            f"O maior VPP foi observado em {best_ppv}, o maior VPN em {best_npv}, e o maior benefício líquido médio (5–20%) em {dca_label}."
-        )
-        st.info(interp_text)
-    else:
-        st.info(tr("Clinical interpretation is unavailable because the triple comparison sample is insufficient.", "A interpretação clínica não está disponível porque a amostra da comparação tripla é insuficiente."))
+            same_sample_df = pd.DataFrame(same_sample_rows)
+            best_auc = triple_ci.sort_values("AUC", ascending=False).iloc[0]["Score"] if not triple_ci.empty else None
+            best_brier = triple_ci.sort_values("Brier", ascending=True).iloc[0]["Score"] if not triple_ci.empty else None
+            best_sens = same_sample_df.sort_values("Sensitivity", ascending=False).iloc[0]["Score"]
+            best_spec = same_sample_df.sort_values("Specificity", ascending=False).iloc[0]["Score"]
+            best_ppv = threshold_metrics.sort_values("PPV", ascending=False).iloc[0]["Score"] if not threshold_metrics.empty else None
+            best_npv = threshold_metrics.sort_values("NPV", ascending=False).iloc[0]["Score"] if not threshold_metrics.empty else None
 
-    st.markdown(tr("**Results**", "**Resultados**"))
-    if not triple_ci.empty:
-        tri_sorted = triple_ci.sort_values("AUC", ascending=False).reset_index(drop=True)
-        top = tri_sorted.iloc[0]
-        ia_row = tri_sorted[tri_sorted["Score"] == "AI Risk"]
-        euro_row = tri_sorted[tri_sorted["Score"] == "EuroSCORE II"]
-        sts_row = tri_sorted[tri_sorted["Score"] == "STS"]
-
-        def _fmt_auc(r):
-            return f"{r['AUC']:.3f} (IC95% {r['AUC_IC95_inf']:.3f}-{r['AUC_IC95_sup']:.3f})"
-
-        auc_ia = _fmt_auc(ia_row.iloc[0]) if not ia_row.empty else "N/A"
-        auc_euro = _fmt_auc(euro_row.iloc[0]) if not euro_row.empty else "N/A"
-        auc_sts = _fmt_auc(sts_row.iloc[0]) if not sts_row.empty else "N/A"
-
-        sig_text = ""
-        if not formal_df.empty:
-            sig_parts = []
-            for _, r in formal_df.iterrows():
-                pval = r["p (bootstrap)"]
-                sig = tr("statistically significant difference", "diferença estatisticamente significativa") if pd.notna(pval) and pval < 0.05 else tr("no statistically significant difference", "sem diferença estatisticamente significativa")
-                comp_col = tr("Comparison", "Comparação")
-                ci_lo_col = tr("95% CI low", "IC95% inf")
-                ci_hi_col = tr("95% CI high", "IC95% sup")
-                sig_parts.append(
-                    tr(
-                        f"{r[comp_col]} showed ΔAUC={r['Delta AUC (A-B)']:.3f} (95% CI {r[ci_lo_col]:.3f}-{r[ci_hi_col]:.3f}; p={pval:.3f}), {sig}",
-                        f"{r[comp_col]} apresentou ΔAUC={r['Delta AUC (A-B)']:.3f} (IC95% {r[ci_lo_col]:.3f}-{r[ci_hi_col]:.3f}; p={pval:.3f}), {sig}",
-                    )
-                )
-            sig_text = "; ".join(sig_parts) + "."
-
-        formal_summary_text = sig_text if sig_text else tr("No statistically significant differences were observed in formal ROC comparison.", "Não foram observadas diferenças estatisticamente significativas na comparação formal das curvas ROC.")
-        reclass_summary_text = (
-            tr("Reclassification analyses were not available.", "As análises de reclassificação não estavam disponíveis.")
-            if reclass_df.empty
-            else tr(
-                f"The highest total NRI was observed for {reclass_df.sort_values('NRI total', ascending=False).iloc[0][tr('Comparison','Comparação')]} and the highest IDI for {reclass_df.sort_values('IDI', ascending=False).iloc[0][tr('Comparison','Comparação')]}",
-                f"O maior NRI total foi observado em {reclass_df.sort_values('NRI total', ascending=False).iloc[0][tr('Comparison','Comparação')]} e o maior IDI em {reclass_df.sort_values('IDI', ascending=False).iloc[0][tr('Comparison','Comparação')]}",
+            interp_text = tr(
+                f"On the same comparable sample (triple cohort), the best discrimination (AUC) was observed for {best_auc}. "
+                f"The best calibration (Brier score) was observed for {best_brier}. "
+                f"At the selected threshold, the highest sensitivity was observed for {best_sens} and the highest specificity for {best_spec}. "
+                f"The highest PPV was observed for {best_ppv}, the highest NPV for {best_npv}, and the highest average net benefit (5–20%) for {dca_label}.",
+                f"Na mesma amostra comparável (coorte tripla), a melhor discriminação (AUC) foi observada em {best_auc}. "
+                f"A melhor calibração (Brier score) foi observada em {best_brier}. "
+                f"No limiar selecionado, a maior sensibilidade foi observada em {best_sens} e a maior especificidade em {best_spec}. "
+                f"O maior VPP foi observado em {best_ppv}, o maior VPN em {best_npv}, e o maior benefício líquido médio (5–20%) em {dca_label}."
             )
-        )
+            st.info(interp_text)
+        else:
+            st.info(tr("Clinical interpretation is unavailable because the triple comparison sample is insufficient.", "A interpretação clínica não está disponível porque a amostra da comparação tripla é insuficiente."))
+            # Defaults so the narrative block can still run if the triple cohort is present
+            best_brier = None
+            best_sens = None
+            best_spec = None
+            best_ppv = None
+            best_npv = None
 
-        methods_mode = st.radio(
-            tr("Methods text format", "Formato do texto de métodos"),
-            [tr("Short", "Curto"), tr("Detailed", "Detalhado")],
-            horizontal=True,
-            key="methods_mode",
-        )
-        st.markdown(tr("**Statistical Methods**", "**Métodos estatísticos**"))
-        st.text_area(
-            tr("Methods for manuscript", "Texto para artigo - Métodos"),
-            value=build_methods_text(methods_mode),
-            height=220,
-        )
+    with st.expander(tr("Manuscript text (Methods & Results)", "Texto para manuscrito (Métodos e Resultados)"), expanded=False):
+        if not triple_ci.empty:
+            tri_sorted = triple_ci.sort_values("AUC", ascending=False).reset_index(drop=True)
+            top = tri_sorted.iloc[0]
+            ia_row = tri_sorted[tri_sorted["Score"] == "AI Risk"]
+            euro_row = tri_sorted[tri_sorted["Score"] == "EuroSCORE II"]
+            sts_row = tri_sorted[tri_sorted["Score"] == "STS"]
 
-        results_mode = st.radio(
-            tr("Results text format", "Formato do texto de resultados"),
-            [tr("Short", "Curto"), tr("Detailed", "Detalhado")],
-            horizontal=True,
-            key="results_mode",
-        )
+            def _fmt_auc(r):
+                return f"{r['AUC']:.3f} (IC95% {r['AUC_IC95_inf']:.3f}-{r['AUC_IC95_sup']:.3f})"
 
-        results_context = {
-            "n_triple": len(triple),
-            "threshold": decision_threshold,
-            "best_auc_model": top["Score"],
-            "best_auc": float(top["AUC"]),
-            "best_brier_model": best_brier,
-            "best_sens_model": best_sens,
-            "best_spec_model": best_spec,
-            "best_ppv_model": best_ppv,
-            "best_npv_model": best_npv,
-            "best_dca_model": dca_label,
-            "formal_summary": formal_summary_text,
-            "reclass_summary": reclass_summary_text,
-        }
+            auc_ia = _fmt_auc(ia_row.iloc[0]) if not ia_row.empty else "N/A"
+            auc_euro = _fmt_auc(euro_row.iloc[0]) if not euro_row.empty else "N/A"
+            auc_sts = _fmt_auc(sts_row.iloc[0]) if not sts_row.empty else "N/A"
 
-        resultados_txt = build_results_text(results_mode, results_context)
-        st.text_area(tr("Manuscript-ready text", "Texto para manuscrito"), value=resultados_txt, height=220)
-        _txt_download_btn(resultados_txt, "results_for_manuscript.txt", tr("Download Results text (.txt)", "Baixar texto de Resultados (.txt)"))
-    else:
-        st.info(tr("Triple sample size was insufficient to generate automatic results text with 95% CI.", "A amostra tripla foi insuficiente para gerar texto automático de resultados com IC95%."))
+            sig_text = ""
+            if not formal_df.empty:
+                sig_parts = []
+                for _, r in formal_df.iterrows():
+                    pval = r["p (bootstrap)"]
+                    sig = tr("statistically significant difference", "diferença estatisticamente significativa") if pd.notna(pval) and pval < 0.05 else tr("no statistically significant difference", "sem diferença estatisticamente significativa")
+                    comp_col = tr("Comparison", "Comparação")
+                    ci_lo_col = tr("95% CI low", "IC95% inf")
+                    ci_hi_col = tr("95% CI high", "IC95% sup")
+                    sig_parts.append(
+                        tr(
+                            f"{r[comp_col]} showed ΔAUC={r['Delta AUC (A-B)']:.3f} (95% CI {r[ci_lo_col]:.3f}-{r[ci_hi_col]:.3f}; p={pval:.3f}), {sig}",
+                            f"{r[comp_col]} apresentou ΔAUC={r['Delta AUC (A-B)']:.3f} (IC95% {r[ci_lo_col]:.3f}-{r[ci_hi_col]:.3f}; p={pval:.3f}), {sig}",
+                        )
+                    )
+                sig_text = "; ".join(sig_parts) + "."
 
-    # ── Statistical summary export (Task 10) ──
-    st.divider()
-    st.subheader(tr("Export full statistical summary", "Exportar resumo estatístico completo"))
+            formal_summary_text = sig_text if sig_text else tr("No statistically significant differences were observed in formal ROC comparison.", "Não foram observadas diferenças estatisticamente significativas na comparação formal das curvas ROC.")
+            reclass_summary_text = (
+                tr("Reclassification analyses were not available.", "As análises de reclassificação não estavam disponíveis.")
+                if reclass_df.empty
+                else tr(
+                    f"The highest total NRI was observed for {reclass_df.sort_values('NRI total', ascending=False).iloc[0][tr('Comparison','Comparação')]} and the highest IDI for {reclass_df.sort_values('IDI', ascending=False).iloc[0][tr('Comparison','Comparação')]}",
+                    f"O maior NRI total foi observado em {reclass_df.sort_values('NRI total', ascending=False).iloc[0][tr('Comparison','Comparação')]} e o maior IDI em {reclass_df.sort_values('IDI', ascending=False).iloc[0][tr('Comparison','Comparação')]}",
+                )
+            )
+
+            methods_mode = st.radio(
+                tr("Methods text format", "Formato do texto de métodos"),
+                [tr("Short", "Curto"), tr("Detailed", "Detalhado")],
+                horizontal=True,
+                key="methods_mode",
+            )
+            st.markdown(tr("**Statistical Methods**", "**Métodos estatísticos**"))
+            st.text_area(
+                tr("Methods for manuscript", "Texto para artigo - Métodos"),
+                value=build_methods_text(methods_mode),
+                height=220,
+            )
+
+            results_mode = st.radio(
+                tr("Results text format", "Formato do texto de resultados"),
+                [tr("Short", "Curto"), tr("Detailed", "Detalhado")],
+                horizontal=True,
+                key="results_mode",
+            )
+
+            results_context = {
+                "n_triple": len(triple),
+                "threshold": decision_threshold,
+                "best_auc_model": top["Score"],
+                "best_auc": float(top["AUC"]),
+                "best_brier_model": best_brier,
+                "best_sens_model": best_sens,
+                "best_spec_model": best_spec,
+                "best_ppv_model": best_ppv,
+                "best_npv_model": best_npv,
+                "best_dca_model": dca_label,
+                "formal_summary": formal_summary_text,
+                "reclass_summary": reclass_summary_text,
+            }
+
+            resultados_txt = build_results_text(results_mode, results_context)
+            st.text_area(tr("Manuscript-ready text", "Texto para manuscrito"), value=resultados_txt, height=220)
+            _txt_download_btn(resultados_txt, "results_for_manuscript.txt", tr("Download Results text (.txt)", "Baixar texto de Resultados (.txt)"))
+        else:
+            st.info(tr("Triple sample size was insufficient to generate automatic results text with 95% CI.", "A amostra tripla foi insuficiente para gerar texto automático de resultados com IC95%."))
+
+    # ── Statistical summary export ──
+    st.markdown(tr("**Download full statistical summary**", "**Baixar resumo estatístico completo**"))
     st.caption(tr(
-        "Generates a single Markdown document with all statistical tables (discrimination, calibration, DeLong, NRI/IDI).",
-        "Gera um documento Markdown único com todas as tabelas estatísticas (discriminação, calibração, DeLong, NRI/IDI).",
+        "Single Markdown document with all statistical tables (discrimination, calibration, DeLong, NRI/IDI).",
+        "Documento Markdown único com todas as tabelas estatísticas (discriminação, calibração, DeLong, NRI/IDI).",
     ))
     _stat_summary = build_statistical_summary(
         triple_ci=triple_ci,

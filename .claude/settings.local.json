@@ -14,7 +14,8 @@
       "Bash(python -c \":*)",
       "Bash(python -c \"import py_compile; py_compile.compile\\(''app.py'', doraise=True\\); print\\(''app.py syntax OK''\\)\")",
       "Bash(python -c \"from modeling import clean_features, train_and_select_model; print\\(''OK''\\)\")",
-      "WebSearch"
+      "WebSearch",
+      "Bash(python -c ':*)"
     ]
   }
 }

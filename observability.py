@@ -25,7 +25,7 @@ Used by
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 
 # --------------------------------------------------------------------------- #
@@ -517,7 +517,7 @@ def _record_field(rec: Any, key: str, default: Any) -> Any:
 # --------------------------------------------------------------------------- #
 
 
-_STATUS_ICON = {STATUS_OK: "[OK]", STATUS_WARNING: "[!]", STATUS_ERROR: "[ERR]"}
+_STATUS_ICON = {STATUS_OK: "✅", STATUS_WARNING: "⚠️", STATUS_ERROR: "❌"}
 
 
 def render_run_report_compact(report: RunReport, *, tr=None) -> None:
@@ -591,6 +591,54 @@ def render_run_report_compact(report: RunReport, *, tr=None) -> None:
             if step.status == STATUS_ERROR:
                 st.error(f"**{step.name}** — {step.summary}")
 
+def _compact_step_summary(step: "RunStep", tr_fn: Callable[[str, str], str]) -> str:
+    """Return a short one-line summary string from ``step.counters``.
+
+    Used by :func:`render_run_report` to render a compact caption inside
+    each step's expander body, so the expander header itself can stay
+    short.  Unknown step names return an empty string (no caption is
+    rendered by the caller).
+    """
+    c = step.counters or {}
+    name = step.name
+    if name == "Ingestion & normalization":
+        w = int(c.get("Warnings (predictor-relevant)", 0) or 0)
+        sp = int(c.get("Sparse columns flagged (>95% missing)", 0) or 0)
+        cst = int(c.get("Constant columns flagged", 0) or 0)
+        return tr_fn(
+            f"{w} relevant warning · {sp} sparse · {cst} constant",
+            f"{w} aviso relevante · {sp} esparsas · {cst} constantes",
+        )
+    if name == "Cohort eligibility":
+        n = int(c.get("Final cohort rows", 0) or 0)
+        p = int(c.get("Predictor variables", 0) or 0)
+        prev = c.get("Positive-class prevalence", "-")
+        return tr_fn(
+            f"{n} patients · {p} predictors · prevalence {prev}",
+            f"{n} pacientes · {p} preditores · prevalência {prev}",
+        )
+    if name == "Model training":
+        k = int(c.get("Candidate models evaluated", 0) or 0)
+        best = c.get("Best model (auto-selected)", "-")
+        return tr_fn(
+            f"{k} candidates · selected: {best}",
+            f"{k} candidatos · selecionado: {best}",
+        )
+    if name == "STS Score execution":
+        total = int(c.get("Total patients", 0) or 0)
+        failed = int(c.get("Failed", 0) or 0)
+        if failed == 0:
+            return tr_fn(
+                f"OK · {total} patients",
+                f"OK · {total} pacientes",
+            )
+        return tr_fn(
+            f"{failed}/{total} failed · analysis continued",
+            f"{failed}/{total} falharam · análise continuou",
+        )
+    return ""
+
+
 def render_run_report(report: RunReport, *, tr=None, title: Optional[str] = None) -> None:
     """Render a ``RunReport`` inside the Streamlit page.
 
@@ -627,19 +675,26 @@ def render_run_report(report: RunReport, *, tr=None, title: Optional[str] = None
         return
 
     heading = title or _t("Execution report", "Relatório de execução")
-    overall = report.overall_status()
-    overall_label = {
-        STATUS_OK: _t("all steps OK", "todas as etapas OK"),
-        STATUS_WARNING: _t("non-blocking warnings", "avisos não bloqueantes"),
-        STATUS_ERROR: _t("blocking errors", "erros bloqueantes"),
-    }[overall]
-    st.caption(f"{heading} — {overall_label}")
+    st.caption(heading)
+
+    # Short, localized per-step display names so expander headers stay
+    # compact.  Unknown step names fall back to ``step.name`` unchanged.
+    _short_names = {
+        "Ingestion & normalization": _t("Ingestion & normalization", "Ingestão e normalização"),
+        "Cohort eligibility":        _t("Cohort eligibility", "Elegibilidade da coorte"),
+        "Model training":            _t("Model training", "Treinamento de modelos"),
+        "STS Score execution":       _t("STS Score execution", "Execução do STS Score"),
+    }
 
     for step in report.steps:
         icon = _STATUS_ICON.get(step.status, "[?]")
-        header = f"{icon} {step.name} — {step.summary}"
+        short_name = _short_names.get(step.name, step.name)
+        header = f"{icon} {short_name}"
         expanded = step.status == STATUS_ERROR
         with st.expander(header, expanded=expanded):
+            summary_line = _compact_step_summary(step, _t)
+            if summary_line:
+                st.caption(summary_line)
             if step.counters:
                 metric_col = _t("Metric", "Métrica")
                 value_col = _t("Value", "Valor")

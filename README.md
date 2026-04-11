@@ -18,6 +18,23 @@ The app then compares the three scores statistically and provides explainability
 
 This application is designed to support academic research in risk stratification. It is **not** a clinical decision-support system and should not be used for autonomous clinical decision-making.
 
+## Interface flow
+
+The app is organised as ten tabs in the following order:
+
+| # | Tab | Role |
+|:--|:--|:--|
+| 1 | **Overview** | Cohort summary, grouped surgery profile (descriptive mortality by surgery category), input-completeness indicator, and execution report for the current run |
+| 2 | **Prediction** | Single-patient scoring: AI Risk, EuroSCORE II and STS for one case with per-variable contributions |
+| 3 | **Batch & Export** | Full dataset with all three scores plus OOF predictions; XLSX/CSV download |
+| 4 | **Statistical Comparison** | Head-to-head comparison of AI Risk, EuroSCORE II and STS with bootstrap 95% CI, DeLong, DCA, NRI/IDI |
+| 5 | **Temporal Validation** | Split by procedure date to evaluate stability over time at the fixed 8% threshold |
+| 6 | **Data Quality** | Missing-data audit, imputation tracking, valve-severity coverage |
+| 7 | **Models** | Leaderboard with calibrated OOF metrics and per-model Youden thresholds; force-select a candidate |
+| 8 | **Subgroups** | Performance stratified by clinically relevant subgroups |
+| 9 | **Analysis Guide** | Methodological notes, variable mapping, EuroSCORE II approximations |
+| 10 | **Variable Dictionary** | Structured dictionary of every variable consumed by the app |
+
 ## How each score is computed
 
 ### AI Risk (machine learning)
@@ -65,6 +82,13 @@ The STS Score is obtained by **automated interaction with the official STS Risk 
 - The web interface may change without notice, potentially breaking the automation
 - For the dissertation, this should be described as "automated querying of the STS web calculator" rather than "official API"
 
+**Robustness of the STS fetch path:**
+
+- **Cache:** every successful fetch is stored on disk keyed by the canonicalised patient payload, so reruns do not re-query the calculator for unchanged inputs
+- **Retries:** each fetch is retried up to 4 times with back-off before being marked as failed (transient WebSocket errors account for most failures)
+- **Stale fallback:** if a fresh fetch fails but a previously cached value exists for the same payload, that stale value is reused and flagged as `stale_fallback` in the execution record
+- **Severity classification:** partial failures (one or more patients fail but usable results remain) are reported as **warnings**; only `n_usable == 0` or `fail_ratio ≥ 0.5` are reported as **blocking errors**
+
 ## How to run
 
 1. Install dependencies:
@@ -101,6 +125,15 @@ Optional sheets/tables:
 
 A single table with all variables. Must include a `morte_30d` or `Death` column for the outcome.
 
+### Ingestion & normalization
+
+All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converge on a single normalization routine so that downstream code sees a consistent analytical dataset regardless of the input format:
+
+- **Numeric normalization** — Brazilian and English numeric conventions are both accepted. Strings like `"1,24%"`, `"1.24%"`, `"1,24"`, and `"1.24"` are normalised to the same float; trailing percent signs are stripped and the value is rescaled when appropriate.
+- **Valve severity** — valve variables accept the ordered set `None < Trivial < Mild < Moderate < Severe`. The literal value **"None" means *no disease*, not missing data** — it is treated as the lowest level of the ordinal scale, not as an NA.
+- **Column exclusion** — columns with **>95% missing** are dropped before modelling so that degenerate columns never reach the preprocessor or the leaderboard.
+- **Patient matching** — patient name and procedure date are used exclusively for cross-sheet matching and are never passed to the model as predictors.
+
 ## Clinical notes
 
 - Patient name and procedure date are used only for internal matching across sheets — never as predictors
@@ -127,6 +160,15 @@ A single table with all variables. Must include a `morte_30d` or `Death` column 
 | `model_metadata.py` | Model versioning, audit trail, individual reports, export (PDF/XLSX/CSV) |
 | `variable_dictionary.py` | Structured variable dictionary for documentation |
 | `config/` | Centralized configuration and hyperparameters |
+
+## Execution reporting
+
+Each run is instrumented with a structured execution report surfaced in two places:
+
+- **Top compact status row** (sidebar / header) — one chip per phase (ingestion & normalization, cohort eligibility, model training, STS Score execution) with a single-glyph status: ✅ OK, ⚠️ warning, ❌ blocking error. A blocking error also displays an inline banner at the top of the page.
+- **Bottom detailed expander** ("Execution report") — per-step expanders with short summaries, raw counters (rows in / out, imputed, excluded, failed), and the list of incidents (e.g., patients for which the STS fetch failed) so the user can audit what happened in the current run.
+
+Severity is classified independently of the Python exception layer: partial failures (e.g., some patients failing STS while usable results remain) are reported as **warnings** and do not block downstream analysis. Only `n_usable == 0` or `fail_ratio ≥ 0.5` is escalated to **blocking error**.
 
 ## Decision threshold
 
