@@ -502,8 +502,89 @@ def _record_field(rec: Any, key: str, default: Any) -> Any:
 _STATUS_ICON = {STATUS_OK: "[OK]", STATUS_WARNING: "[!]", STATUS_ERROR: "[ERR]"}
 
 
+def render_run_report_compact(report: RunReport, *, tr=None) -> None:
+    """Compact top-of-page status summary for a ``RunReport``.
+
+    Renders a single-line badge row (one chip per phase) so the user
+    can see at a glance whether every execution step was OK, produced
+    non-blocking warnings, or hit a blocking error.  The full report
+    with expandable details is rendered separately at the bottom of
+    the Overview tab via :func:`render_run_report`.
+
+    If any step is in ``STATUS_ERROR``, an ``st.error`` banner is also
+    shown immediately below the badge row so blocking failures remain
+    prominent near the top of the page.
+    """
+    import streamlit as st  # local import keeps module importable without streamlit
+
+    def _t(en: str, pt: Optional[str] = None) -> str:
+        if tr is None:
+            return en
+        try:
+            return tr(en, pt if pt is not None else en)
+        except Exception:
+            return en
+
+    if not report.steps:
+        return
+
+    overall = report.overall_status()
+    color_map = {
+        STATUS_OK: "#2e7d32",       # green
+        STATUS_WARNING: "#ed6c02",  # orange
+        STATUS_ERROR: "#c62828",    # red
+    }
+    overall_label = {
+        STATUS_OK: _t("OK", "OK"),
+        STATUS_WARNING: _t("warnings", "avisos"),
+        STATUS_ERROR: _t("blocking error", "erro bloqueante"),
+    }[overall]
+    step_label = {
+        STATUS_OK: _t("OK", "OK"),
+        STATUS_WARNING: _t("warning", "aviso"),
+        STATUS_ERROR: _t("error", "erro"),
+    }
+
+    chips = []
+    for step in report.steps:
+        color = color_map.get(step.status, "#616161")
+        label = step_label.get(step.status, step.status)
+        chips.append(
+            f"<span style='color:{color}; font-weight:600'>●</span>"
+            f" <span style='color:#555'>{step.name}:</span>"
+            f" <span style='color:{color}'>{label}</span>"
+        )
+    chip_sep = " &nbsp;&nbsp;·&nbsp;&nbsp; "
+    overall_color = color_map.get(overall, "#616161")
+    exec_label = _t("Execution status", "Status da execução")
+
+    st.markdown(
+        f"<div style='font-size:0.85em; padding:4px 0; line-height:1.6'>"
+        f"<b>{exec_label}:</b> "
+        f"<span style='color:{overall_color}; font-weight:600'>{overall_label}</span>"
+        f" &nbsp;—&nbsp; {chip_sep.join(chips)}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Surface blocking errors prominently near the top of the page.
+    if overall == STATUS_ERROR:
+        for step in report.steps:
+            if step.status == STATUS_ERROR:
+                st.error(f"**{step.name}** — {step.summary}")
+
+
 def render_run_report(report: RunReport, *, tr=None, title: Optional[str] = None) -> None:
     """Render a ``RunReport`` inside the Streamlit page.
+
+    Draws a lightweight heading line plus one expandable panel per
+    execution step.  Intended to be placed at the **bottom** of the
+    page — a compact top-of-page status summary is rendered separately
+    via :func:`render_run_report_compact`.
+
+    Only steps with ``STATUS_ERROR`` auto-expand; warnings are kept
+    collapsed so the report does not visually dominate the page when
+    the run completed with only non-blocking findings.
 
     Parameters
     ----------
@@ -528,19 +609,19 @@ def render_run_report(report: RunReport, *, tr=None, title: Optional[str] = None
     if not report.steps:
         return
 
-    heading = title or _t("Run observability report", "Relatório de observabilidade da execução")
+    heading = title or _t("Execution report", "Relatório de execução")
     overall = report.overall_status()
     overall_label = {
         STATUS_OK: _t("all steps OK", "todas as etapas OK"),
-        STATUS_WARNING: _t("with warnings", "com avisos"),
-        STATUS_ERROR: _t("with errors", "com erros"),
+        STATUS_WARNING: _t("non-blocking warnings", "avisos não bloqueantes"),
+        STATUS_ERROR: _t("blocking errors", "erros bloqueantes"),
     }[overall]
-    st.markdown(f"**{heading}** — {overall_label}")
+    st.caption(f"{heading} — {overall_label}")
 
     for step in report.steps:
         icon = _STATUS_ICON.get(step.status, "[?]")
         header = f"{icon} {step.name} — {step.summary}"
-        expanded = step.status != STATUS_OK
+        expanded = step.status == STATUS_ERROR
         with st.expander(header, expanded=expanded):
             if step.counters:
                 rows = [

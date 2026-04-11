@@ -992,7 +992,37 @@ def _normalize_flat_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _read_csv_auto(path: str, nrows: int | None = None) -> pd.DataFrame:
-    return pd.read_csv(path, sep=None, engine="python", nrows=nrows)
+    """Read a CSV with automatic separator sniffing and encoding fallback.
+
+    Brazilian data exported from Windows Excel is frequently saved as
+    CP1252 (aka Windows-1252), not UTF-8.  Passing such a file to
+    ``pd.read_csv`` with the default UTF-8 codec raises on the first
+    accented character (``ç``, ``á``, ``ã`` …).  We try a short
+    prioritized chain of encodings and return the first that succeeds:
+
+    1. ``utf-8-sig`` — modern default, also strips a BOM if present.
+    2. ``cp1252``   — Windows-1252, the most common Brazilian Excel export.
+    3. ``latin-1``  — last resort; accepts any single byte so it cannot
+       raise ``UnicodeDecodeError``, at the cost of slightly wrong
+       rendering for characters in the 0x80-0x9F range.
+
+    The separator is still sniffed by ``engine="python"`` / ``sep=None``
+    so comma and semicolon files both work unchanged.
+    """
+    last_err: Exception | None = None
+    for enc in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return pd.read_csv(
+                path, sep=None, engine="python", nrows=nrows, encoding=enc
+            )
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+    # Unreachable in practice (latin-1 accepts any byte), but re-raise the
+    # last real error so failures are still observable.
+    raise last_err if last_err is not None else RuntimeError(
+        f"Failed to read CSV with any known encoding: {path}"
+    )
 
 
 def normalize_dataframe(

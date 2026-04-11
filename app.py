@@ -322,15 +322,14 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
     }
 
 
-def _bundle_signature(xlsx_path: str) -> Dict[str, object]:
-    p = Path(xlsx_path)
-    stt = p.stat()
-    return {
-        "xlsx_path": str(p.resolve()),
-        "xlsx_mtime_ns": int(stt.st_mtime_ns),
-        "xlsx_size": int(stt.st_size),
-        "model_version": MODEL_VERSION,
-    }
+# Phase 4: bundle I/O helpers extracted to bundle_io.py.  The underscore-
+# prefixed aliases are kept so internal call sites inside this module
+# continue to work without touching their bodies.
+from bundle_io import (
+    bundle_signature as _bundle_signature,
+    serialize_bundle as _serialize_bundle,
+    deserialize_bundle as _deserialize_bundle,
+)
 
 
 def _google_sheet_export_url(url: str) -> str:
@@ -889,76 +888,8 @@ O app oferece múltiplas camadas de interpretabilidade:
     _txt_download_btn(build_methods_text(methods_mode), "methods_for_manuscript.txt", tr("Download Methods text (.txt)", "Baixar texto de Métodos (.txt)"))
 
 
-def _serialize_bundle(bundle: Dict[str, object]) -> Dict[str, object]:
-    """Convert dataclasses to plain dicts for pickle compatibility.
-
-    Streamlit may reload modules between runs, creating new class objects.
-    Pickle requires the exact same class reference, so we store plain dicts.
-    """
-    out = dict(bundle)
-    prepared = out["prepared"]
-    out["prepared"] = {
-        "data": prepared.data,
-        "feature_columns": prepared.feature_columns,
-        "info": prepared.info,
-    }
-    artifacts = out["artifacts"]
-    out["artifacts"] = {
-        "model": artifacts.model,
-        "leaderboard": artifacts.leaderboard,
-        "oof_predictions": artifacts.oof_predictions,       # calibrated OOF (primary)
-        "oof_raw": getattr(artifacts, "oof_raw", None),     # uncalibrated, audit only
-        "feature_columns": artifacts.feature_columns,
-        "fitted_models": artifacts.fitted_models,
-        "best_model_name": artifacts.best_model_name,
-        "calibration_method": getattr(artifacts, "calibration_method", "sigmoid"),
-        "youden_thresholds": getattr(artifacts, "youden_thresholds", None),
-        "best_youden_threshold": getattr(artifacts, "best_youden_threshold", None),
-    }
-    # Phase 3: persist the run report as a plain dict so module reloads
-    # don't break unpickling.
-    run_report = out.get("run_report")
-    if run_report is not None and hasattr(run_report, "to_dict"):
-        out["run_report"] = run_report.to_dict()
-    return out
-
-
-def _deserialize_bundle(bundle: Dict[str, object]) -> Dict[str, object]:
-    """Reconstruct dataclasses from plain dicts."""
-    import importlib
-    import modeling as _mod
-    importlib.reload(_mod)
-    TrainedArtifacts = _mod.TrainedArtifacts
-    out = dict(bundle)
-    p = out["prepared"]
-    if isinstance(p, dict):
-        out["prepared"] = PreparedData(
-            data=p["data"],
-            feature_columns=p["feature_columns"],
-            info=p["info"],
-        )
-    a = out["artifacts"]
-    if isinstance(a, dict):
-        out["artifacts"] = TrainedArtifacts(
-            model=a["model"],
-            leaderboard=a["leaderboard"],
-            oof_predictions=a["oof_predictions"],           # calibrated OOF
-            feature_columns=a["feature_columns"],
-            fitted_models=a["fitted_models"],
-            best_model_name=a["best_model_name"],
-            calibration_method=a.get("calibration_method", "sigmoid"),
-            oof_raw=a.get("oof_raw"),                       # may be None in old caches
-            youden_thresholds=a.get("youden_thresholds"),
-            best_youden_threshold=a.get("best_youden_threshold"),
-        )
-    # Phase 3: rebuild RunReport from persisted dict (legacy bundles without
-    # the key simply carry no report).
-    rr = out.get("run_report")
-    if isinstance(rr, dict):
-        import observability as _obs
-        importlib.reload(_obs)
-        out["run_report"] = _obs.RunReport.from_dict(rr)
-    return out
+# _serialize_bundle and _deserialize_bundle were extracted to bundle_io.py
+# in Phase 4; they are re-imported at the top of this module.
 
 
 def load_train_bundle(xlsx_path: str, force_retrain: bool = False, progress_callback=None) -> tuple[Dict[str, object], str, dict]:
@@ -2223,158 +2154,52 @@ def _plot_dca(curve_df: pd.DataFrame):
     _chart_download_buttons(display_df, png, "dca")
 
 
+# Phase 4: subgroup assignment helpers extracted to subgroups.py.  Thin
+# wrappers preserve the original call signatures (no ``tr`` argument) so
+# every existing call site keeps working unchanged.
+from subgroups import (
+    surgery_family as _surgery_family_impl,
+    surgery_type_group as _surgery_type_group_impl,
+    lvef_group as _lvef_group_impl,
+    renal_group as _renal_group_impl,
+)
+
+
 def _surgery_family(text: object) -> str:
-    parts = set(split_surgery_procedures(text))
-    coronary = bool(parts & {"cabg", "opcab"})
-    valve = bool(parts & {"avr", "av repair", "mv repair", "mvr", "tv repair", "tvr", "ross"})
-    if coronary and not valve:
-        return tr("Coronary", "Coronária")
-    if valve and not coronary:
-        return tr("Valve", "Valvar")
-    if coronary and valve:
-        return tr("Mixed", "Mista")
-    return tr("Other", "Outra")
+    return _surgery_family_impl(text, tr)
 
 
 def _surgery_type_group(text: object) -> str:
-    parts = set(split_surgery_procedures(text))
-    coronary = bool(parts & {"cabg", "opcab"})
-    valve = bool(parts & {"avr", "av repair", "mv repair", "mvr", "tv repair", "tvr", "ross"})
-    aorta = bool(parts & {"aortic aneurism repair", "aortic dissection repair", "bentall-de bono procedure", "valve sparing aortic root replacement (david procedure)"})
-    transplant = bool(parts & {"heart transplant"})
-    classes = [coronary, valve, aorta, transplant]
-    n_active = sum(classes)
-    if n_active > 1:
-        return tr("Mixed", "Mista")
-    if coronary:
-        return tr("Myocardial revascularization", "Revascularização do miocárdio")
-    if valve:
-        return tr("Valve surgery", "Cirurgia valvar")
-    if aorta:
-        return tr("Aortic surgery", "Cirurgia da aorta")
-    if transplant:
-        return tr("Transplant / assist device", "Transplante / assist device")
-    return tr("Other", "Outra")
+    return _surgery_type_group_impl(text, tr)
 
 
 def _lvef_group(value: object, fallback: object = None) -> str:
-    v = parse_number(value)
-    if pd.isna(v) and fallback is not None:
-        v = parse_number(fallback)
-    if pd.isna(v):
-        return tr("Unknown", "Desconhecida")
-    if v >= 50:
-        return tr("Preserved", "Preservada")
-    if v >= 41:
-        return tr("Mildly reduced", "Levemente reduzida")
-    return tr("Reduced", "Reduzida")
+    return _lvef_group_impl(value, fallback, tr)
+
 
 def _renal_group(clearance: object, dialysis: object,
                   creatinine: object = None, age: object = None,
                   weight: object = None, sex: object = None) -> str:
-    if str(dialysis).strip().lower() in {"yes", "sim", "1", "true"}:
-        return tr("Dialysis", "Diálise")
+    return _renal_group_impl(clearance, dialysis, creatinine, age, weight, sex, tr)
 
-    v = parse_number(clearance)
 
-    # Fallback: compute Cockcroft-Gault if clearance is missing but
-    # creatinine, age, weight, and sex are available
-    if pd.isna(v) and creatinine is not None:
-        scr = parse_number(creatinine)
-        a = parse_number(age)
-        w = parse_number(weight)
-        sx = str(sex).strip().upper()[:1] if pd.notna(sex) else ""
-        if not pd.isna(scr) and scr > 0 and not pd.isna(a) and not pd.isna(w) and sx in {"M", "F"}:
-            factor = 0.85 if sx == "F" else 1.0
-            v = ((140.0 - a) * w * factor) / (72.0 * scr)
-
-    if pd.isna(v):
-        return tr("Unknown", "Desconhecida")
-    if v > 85:
-        return ">85"
-    if v > 50:
-        return "51-85"
-    return "<=50"
+# Phase 4: text builders extracted to report_text.py; evaluate_subgroup
+# extracted to subgroups.py.  Thin wrappers preserve the original call
+# signatures (no ``language`` / ``tr`` argument) so every call site in
+# this module keeps working unchanged.
+from report_text import (
+    build_methods_text as _build_methods_text_impl,
+    build_results_text as _build_results_text_impl,
+)
+from subgroups import evaluate_subgroup
 
 
 def build_methods_text(mode: str) -> str:
-    detailed = mode == tr("Detailed", "Detalhado")
-    if language == "English":
-        if detailed:
-            return (
-                "A retrospective analytical study was performed using matched data from the Preoperative, Pre-Echocardiogram, and Postoperative sheets. "
-                "The primary endpoint was in-hospital or 30-day mortality, operationalized from the Postoperative Death field by considering Operative status and postoperative days 0 to 30 as events. "
-                "Only records with Surgery and Procedure Date available were eligible, and matching across sheets was performed using patient identity and procedure date; these identifiers were used exclusively for linkage and not as predictors. "
-                "AI Risk was trained exclusively with preoperative clinical, laboratory, echocardiographic, and procedural variables, excluding postoperative complications in order to avoid temporal leakage. Numeric variables were preprocessed with comma-decimal conversion (for Brazilian-format data), clinically impossible zeros treated as missing (e.g. BSA=0), median imputation, and StandardScaler normalization; valve severity variables were encoded ordinally (None < Trivial < Mild < Moderate < Severe); remaining categorical variables were encoded via TargetEncoder with automatic smoothing. Tree-based models (random forest, XGBoost, LightGBM, CatBoost) were post-hoc calibrated via Platt scaling (sigmoid method) to improve probability accuracy; calibration was applied inside each cross-validation fold so that calibrated out-of-fold predictions are free of information leakage. Candidate algorithms included logistic regression, random forest, multilayer perceptron, XGBoost, LightGBM, CatBoost, and a stacking ensemble. Model selection was based on stratified cross-validation grouped by patient, ensuring that the same patient never appeared simultaneously in training and testing folds. "
-                "EuroSCORE II was calculated from the published logistic equation, with operationalization of variables according to the available dataset. STS was obtained via automated interaction with the official STS Risk Calculator web application (https://acsdriskcalc.research.sts.org/), which does not offer a documented public API; preoperative data were mapped from the dataset and submitted via the calculator's WebSocket interface, for both batch analysis and individual prediction. "
-                "The primary comparative analysis was the triple-cohort analysis including patients with simultaneous availability of AI Risk, EuroSCORE II, and STS. Complementary analyses may be conducted in specific subsets according to score availability, with explicit acknowledgment of sample differences. Discrimination was assessed by AUC-ROC and AUPRC. In the model leaderboard (internal comparison), sensitivity and specificity were computed at the optimal threshold determined by Youden's J index (J = sensitivity + specificity − 1) for each model independently. In the triple-score comparison, a fixed clinical decision threshold (default 8%) was applied uniformly to all three scores. Calibration was assessed by visual calibration curve, calibration-in-the-large, calibration slope, Brier score, and the Hosmer-Lemeshow test (10 groups) as a complementary assessment. Formal ROC comparison included bootstrap-based delta AUC (2,000 resamples) with 95% confidence intervals and DeLong testing for correlated ROC curves. Clinical utility was assessed by decision curve analysis across risk thresholds from 5% to 20%, and reclassification was summarized by NRI (risk categories: low <5%, intermediate 5–15%, high >15%) and IDI as complementary analyses. Subgroup analyses were planned according to surgery type (valve, myocardial revascularization, aortic surgery, transplant/assist device, and mixed surgery) and clinical profile (age group, left ventricular ejection fraction category, renal function, and sex), with 95% confidence intervals by bootstrap."
-            )
-        return (
-            "A retrospective comparison of AI Risk, EuroSCORE II, and STS was performed for in-hospital or 30-day mortality after cardiac surgery. "
-            "AI Risk was validated by cross-validation grouped by patient, and model performance was evaluated through discrimination, calibration, formal ROC comparison, decision curve analysis, and reclassification metrics."
-        )
-    if detailed:
-        return (
-                "Foi realizada análise retrospectiva com dados pareados das abas Preoperative, Pre-Echocardiogram e Postoperative. "
-                "O desfecho primário foi mortalidade hospitalar ou em 30 dias, operacionalizada a partir do campo Death da aba Postoperative, considerando como evento os casos classificados como Operative ou com ocorrência entre os dias 0 e 30 de pós-operatório. "
-                "Foram elegíveis apenas registros com Surgery e Procedure Date preenchidos, sendo o pareamento entre as abas realizado por identidade do paciente e data do procedimento; esses identificadores foram utilizados exclusivamente para vinculação interna, sem participação como variáveis preditoras. "
-                "O AI Risk foi treinado exclusivamente com variáveis pré-operatórias clínicas, laboratoriais, ecocardiográficas e de procedimento, sem inclusão de complicações pós-operatórias, a fim de evitar vazamento temporal. Variáveis numéricas foram pré-processadas com conversão de vírgula decimal (para dados em formato brasileiro), zeros clinicamente impossíveis tratados como ausentes (ex: BSA=0), imputação pela mediana e normalização StandardScaler; variáveis de gravidade valvar foram codificadas ordinalmente (None < Trivial < Mild < Moderate < Severe); demais variáveis categóricas foram codificadas via TargetEncoder com suavização automática. Modelos baseados em árvore (random forest, XGBoost, LightGBM, CatBoost) foram calibrados por Platt scaling (método sigmoid) para melhorar a acurácia das probabilidades; a calibração foi aplicada dentro de cada fold da validação cruzada para que as predições out-of-fold calibradas sejam livres de vazamento de informação. Foram avaliados regressão logística, random forest, multilayer perceptron, XGBoost, LightGBM, CatBoost e ensemble por stacking. A seleção do melhor modelo foi baseada em validação cruzada estratificada e agrupada por paciente, garantindo que o mesmo paciente não estivesse simultaneamente em treino e teste. "
-                "O EuroSCORE II foi calculado pela equação logística publicada, com operacionalização das variáveis a partir da base disponível. O STS foi obtido via interação automatizada com a calculadora web oficial do STS Risk Calculator (https://acsdriskcalc.research.sts.org/), que não disponibiliza uma API pública documentada; os dados pré-operatórios foram mapeados da base e enviados pela interface WebSocket da calculadora, tanto para análise em lote quanto para predição individual. "
-                "A análise comparativa principal foi a coorte tripla, composta pelos pacientes com disponibilidade simultânea de AI Risk, EuroSCORE II e STS. Análises complementares poderão ser conduzidas em subconjuntos específicos, de acordo com a disponibilidade de cada escore, com explicitação das diferenças amostrais. A discriminação foi avaliada por AUC-ROC e AUPRC. No leaderboard de modelos (comparação interna), sensibilidade e especificidade foram calculadas no limiar ótimo determinado pelo índice de Youden (J = sensibilidade + especificidade − 1) para cada modelo independentemente. Na comparação tripla de escores, um limiar clínico fixo de decisão (padrão 8%) foi aplicado uniformemente aos três escores. A calibração foi avaliada por curva de calibração visual, calibration-in-the-large, slope de calibração, Brier score e teste de Hosmer-Lemeshow (10 grupos) como avaliação complementar. A comparação formal entre curvas ROC utilizou delta AUC por bootstrap (2.000 reamostras) com intervalos de confiança de 95% e teste de DeLong para curvas correlacionadas. A utilidade clínica foi avaliada por decision curve analysis em limiares de 5% a 20%, e a reclassificação prognóstica foi resumida por NRI (categorias de risco: baixo <5%, intermediário 5–15%, alto >15%) e IDI como análises complementares. Foram ainda planejadas análises por subgrupos segundo tipo de cirurgia (valvar, revascularização do miocárdio, cirurgia da aorta, transplante/assist device e cirurgia mista) e perfil clínico (faixa etária, categoria de FEVE, função renal e sexo), com intervalos de confiança de 95% por bootstrap."
-        )
-    return (
-        "Foi realizada comparação retrospectiva entre AI Risk, EuroSCORE II e STS para mortalidade hospitalar ou em 30 dias após cirurgia cardíaca. "
-        "O AI Risk foi validado por validação cruzada agrupada por paciente, e o desempenho foi avaliado por métricas de discriminação, calibração, comparação formal entre curvas ROC, decision curve analysis e reclassificação."
-    )
+    return _build_methods_text_impl(mode, language, tr)
 
 
 def build_results_text(mode: str, context: Dict[str, object]) -> str:
-    detailed = mode == tr("Detailed", "Detalhado")
-    if language == "English":
-        if detailed:
-            return (
-                f"In the primary triple-cohort analysis including patients with simultaneous availability of AI Risk, EuroSCORE II, and STS (n={context['n_triple']}), the best overall discrimination was observed for {context['best_auc_model']} with AUC-ROC={context['best_auc']:.3f}. "
-                f"At the selected decision threshold of {context['threshold']:.2f}, the highest sensitivity was observed for {context['best_sens_model']}, whereas the highest specificity was observed for {context['best_spec_model']}. The highest positive predictive value was observed for {context['best_ppv_model']}, and the highest negative predictive value for {context['best_npv_model']}. "
-                f"Regarding calibration, the best overall Brier score was observed for {context['best_brier_model']}. Formal comparison of ROC curves indicated that {context['formal_summary']} In terms of clinical utility, the highest mean net benefit between 5% and 20% was observed for {context['best_dca_model']}. Regarding reclassification, {context['reclass_summary']} Overall, these findings indicate that model choice should not rely on discrimination alone, but also on calibration, threshold-dependent performance, and net clinical benefit."
-            )
-        return (
-            f"In the primary triple cohort (n={context['n_triple']}), {context['best_auc_model']} showed the best discrimination, {context['best_brier_model']} the best calibration, and {context['best_dca_model']} the highest average net benefit between 5% and 20%."
-        )
-    if detailed:
-        return (
-            f"Na análise principal da coorte tripla, composta pelos pacientes com disponibilidade simultânea de AI Risk, EuroSCORE II e STS (n={context['n_triple']}), a melhor discriminação global foi observada em {context['best_auc_model']}, com AUC-ROC={context['best_auc']:.3f}. "
-            f"No limiar de decisão selecionado de {context['threshold']:.2f}, a maior sensibilidade foi observada em {context['best_sens_model']}, enquanto a maior especificidade foi observada em {context['best_spec_model']}. O maior valor preditivo positivo foi observado em {context['best_ppv_model']}, e o maior valor preditivo negativo em {context['best_npv_model']}. "
-            f"Em relação à calibração, o melhor desempenho global pelo Brier score foi observado em {context['best_brier_model']}. A comparação formal entre curvas ROC indicou que {context['formal_summary']} Em termos de utilidade clínica, o maior benefício líquido médio entre 5% e 20% foi observado em {context['best_dca_model']}. Em relação à reclassificação, {context['reclass_summary']} Em conjunto, esses achados sugerem que a escolha do melhor modelo não deve se apoiar apenas na discriminação, mas também na calibração, no desempenho dependente do limiar e no benefício clínico líquido."
-        )
-    return (
-        f"Na coorte tripla principal (n={context['n_triple']}), {context['best_auc_model']} apresentou a melhor discriminação, {context['best_brier_model']} a melhor calibração e {context['best_dca_model']} o maior benefício líquido médio entre 5% e 20%."
-    )
-
-
-def evaluate_subgroup(df_in: pd.DataFrame, subgroup_col: str, score_cols: list[str], threshold: float) -> pd.DataFrame:
-    rows = []
-    for subgroup_name, sub in df_in.groupby(subgroup_col):
-        for score in score_cols:
-            s = sub[["morte_30d", score]].dropna()
-            if len(s) < 20 or s["morte_30d"].nunique() < 2:
-                continue
-            metrics = evaluate_scores_with_threshold(s, "morte_30d", [score], threshold)
-            if metrics.empty:
-                continue
-            rec = metrics.iloc[0].to_dict()
-            rec["Subgroup"] = subgroup_col
-            rec["Group"] = subgroup_name
-            rec["Deaths"] = int(s["morte_30d"].sum())
-            # Bootstrap CI for AUC, AUPRC, Brier (reduced resamples for speed in subgroups)
-            ci = bootstrap_metrics_ci(s["morte_30d"].values, s[score].values, n_boot=500, seed=42)
-            rec["AUC_IC95_inf"] = ci.get("AUC_IC95_inf", np.nan)
-            rec["AUC_IC95_sup"] = ci.get("AUC_IC95_sup", np.nan)
-            rec["AUPRC_IC95_inf"] = ci.get("AUPRC_IC95_inf", np.nan)
-            rec["AUPRC_IC95_sup"] = ci.get("AUPRC_IC95_sup", np.nan)
-            rec["Brier_IC95_inf"] = ci.get("Brier_IC95_inf", np.nan)
-            rec["Brier_IC95_sup"] = ci.get("Brier_IC95_sup", np.nan)
-            rows.append(rec)
-    return pd.DataFrame(rows)
+    return _build_results_text_impl(mode, context, language, tr)
 
 
 def _get_numeric_columns_from_pipeline(model_pipeline) -> set:
@@ -2773,6 +2598,21 @@ surgery_other_label = tr("Other / custom", "Outro / personalizado")
 # The user can adjust freely via the slider.
 _default_threshold = 0.08
 
+# Phase 3 — compact execution status near the top of the page.
+# The full expandable report is rendered at the bottom of the Overview
+# tab so it does not visually compete with the leaderboard/results.
+# Blocking errors (if any) still surface prominently here via st.error.
+_run_report = bundle.get("run_report")
+if _run_report is not None and getattr(_run_report, "steps", None):
+    try:
+        import observability as _obs
+        _obs.render_run_report_compact(_run_report, tr=tr)
+    except Exception as _obs_err:
+        st.caption(tr(
+            f"Execution status unavailable: {_obs_err}",
+            f"Status de execução indisponível: {_obs_err}",
+        ))
+
 _tab_labels = [
     tr("Overview", "Visão Geral"),
     tr("Prediction", "Predição"),
@@ -2832,20 +2672,6 @@ if _active_tab == 0:  # Overview
                 "Exporte os metadados para rastreamento de versões, comparação de bundles e validação externa.",
             ))
 
-    # Phase 3: observability — end-of-run report across ingestion,
-    # eligibility, training, and STS Score. Skipped silently for legacy
-    # bundles that predate Phase 3.
-    _run_report = bundle.get("run_report")
-    if _run_report is not None and getattr(_run_report, "steps", None):
-        try:
-            import observability as _obs
-            _obs.render_run_report(_run_report, tr=tr)
-        except Exception as _obs_err:
-            st.caption(tr(
-                f"Observability report unavailable: {_obs_err}",
-                f"Relatório de observabilidade indisponível: {_obs_err}",
-            ))
-
     st.subheader(tr("IA Model Performance", "Desempenho dos modelos de IA"))
     st.caption(
         tr(
@@ -2893,6 +2719,22 @@ if _active_tab == 0:  # Overview
         "All scores shown are computed by the app — not read from the input file. Sheet-derived values are retained only as optional reference in the Data Quality tab.",
         "Todos os escores exibidos são calculados pelo app — não lidos do arquivo de entrada. Valores derivados da planilha são mantidos apenas como referência opcional no painel de Qualidade da Base.",
     ))
+
+    # Phase 3 — full execution report at the bottom of the page.
+    # The compact status at the top of the page shows the per-phase
+    # badge row; this is where the user can drill into counters,
+    # incidents, and the normalization audit table.  Legacy bundles
+    # without a run_report are skipped silently.
+    if _run_report is not None and getattr(_run_report, "steps", None):
+        st.divider()
+        try:
+            import observability as _obs
+            _obs.render_run_report(_run_report, tr=tr)
+        except Exception as _obs_err:
+            st.caption(tr(
+                f"Execution report unavailable: {_obs_err}",
+                f"Relatório de execução indisponível: {_obs_err}",
+            ))
 
 elif _active_tab == 1:  # Individual Prediction
     st.subheader(tr("Individual calculation", "Cálculo individual"))
