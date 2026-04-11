@@ -2359,13 +2359,12 @@ def _align_input_to_training_schema(input_df: pd.DataFrame, reference_df: pd.Dat
     return aligned
 
 
-def _temporal_patient_identifier(row_dict: Dict[str, object], fallback_index: int) -> str:
-    """Best-effort patient identifier for temporal-validation incident reporting.
+def _patient_identifier_from_row(row_dict: Dict[str, object], fallback_index: int) -> str:
+    """Best-effort patient identifier for incident reporting across all inference flows.
 
-    Looks for the same identifier columns the temporal-validation case-level
-    table uses (``Name``, ``Nome``, ``_patient_key``) and falls back to a
-    1-based row index when none are present.  Kept tiny and local — no new
-    schema, no overengineering.
+    Looks for common identifier columns (``Name``, ``Nome``, ``_patient_key``)
+    and falls back to a 1-based row index when none are present.
+    Used by individual, batch, and temporal-validation inference paths.
     """
     for key in ("Name", "Nome", "_patient_key"):
         val = row_dict.get(key)
@@ -2374,6 +2373,91 @@ def _temporal_patient_identifier(row_dict: Dict[str, object], fallback_index: in
             if text:
                 return text
     return f"row_{fallback_index + 1}"
+
+
+def _run_ai_risk_inference_row(
+    *,
+    model_pipeline,
+    feature_columns: list,
+    reference_df: pd.DataFrame,
+    row_dict: dict,
+    patient_id: str,
+    numeric_cols: set,
+    language: str = "English",
+) -> dict:
+    """Unified per-row AI Risk frozen-inference core.
+
+    This is the single inference path shared by individual, batch, and
+    temporal-validation flows.  It encapsulates every step between a raw input
+    dict and a calibrated probability so that parsing, schema alignment, feature
+    cleaning, completeness assessment, and incident capture are always identical
+    across all three callers.
+
+    Parameters
+    ----------
+    model_pipeline : sklearn-compatible pipeline
+        Frozen estimator (preprocessing + fitted estimator + calibration).
+    feature_columns : list[str]
+        Locked training feature schema (``artifacts.feature_columns``).
+    reference_df : pd.DataFrame
+        Training-time feature DataFrame used to drive numeric/categorical
+        coercion inside ``_align_input_to_training_schema``.
+    row_dict : dict
+        Raw input values (form data or a row from an uploaded file).
+    patient_id : str
+        Best-effort patient identifier used in incident reporting.
+    numeric_cols : set[str]
+        Set of column names that should be numeric (extracted from the
+        preprocessing pipeline).  Passed to ``clean_features`` to prevent
+        single-row categorical loss.
+    language : str
+        Forwarded to ``assess_input_completeness`` for label localisation.
+
+    Returns
+    -------
+    dict
+        ``probability``  – float or None (None means inference failed),
+        ``completeness`` – dict from ``assess_input_completeness``, or None,
+        ``incident``     – ``{"patient_id", "stage", "reason"}`` or None,
+        ``model_input``  – aligned/cleaned DataFrame ready for ``predict_proba``,
+                           or None on failure; available so callers can run
+                           additional models without rebuilding the input.
+    """
+    try:
+        input_row = _build_input_row(feature_columns, row_dict)
+        input_row = _align_input_to_training_schema(input_row, reference_df)
+        model_input = clean_features(input_row[feature_columns], numeric_columns=numeric_cols)
+        # Final safety: force any numeric columns that are still object-dtype
+        # after the main cleaning pass (can happen with mixed-type CSV imports).
+        for _c in model_input.columns:
+            if (
+                model_input[_c].dtype == object
+                and _c in reference_df.columns
+                and pd.api.types.is_numeric_dtype(reference_df[_c])
+            ):
+                model_input[_c] = pd.to_numeric(
+                    model_input[_c].astype(str).str.replace(",", ".", regex=False),
+                    errors="coerce",
+                )
+        prob = float(model_pipeline.predict_proba(model_input)[:, 1][0])
+        comp = assess_input_completeness(feature_columns, input_row, language)
+        return {
+            "probability": prob,
+            "completeness": comp,
+            "incident": None,
+            "model_input": model_input,
+        }
+    except Exception as exc:  # noqa: BLE001 – surfaced to caller as incident
+        return {
+            "probability": None,
+            "completeness": None,
+            "incident": {
+                "patient_id": patient_id,
+                "stage": "ai_risk_inference",
+                "reason": f"{type(exc).__name__}: {exc}",
+            },
+            "model_input": None,
+        }
 
 
 def apply_frozen_model_to_temporal_cohort(
@@ -2439,23 +2523,23 @@ def apply_frozen_model_to_temporal_cohort(
     rows = temporal_data.to_dict(orient="records")
 
     for idx, row_dict in enumerate(rows):
-        patient_id = _temporal_patient_identifier(row_dict, idx)
-        try:
-            input_row = _build_input_row(feature_columns, row_dict)
-            input_row = _align_input_to_training_schema(input_row, reference_df)
-            model_input = clean_features(input_row[feature_columns], numeric_columns=numeric_cols)
-            prob = float(model_pipeline.predict_proba(model_input)[:, 1][0])
-            comp = assess_input_completeness(feature_columns, input_row, language)
-            probabilities.append(prob)
-            completeness.append(comp["level"])
-        except Exception as exc:  # noqa: BLE001 - surfaced in incidents
+        patient_id = _patient_identifier_from_row(row_dict, idx)
+        _infer = _run_ai_risk_inference_row(
+            model_pipeline=model_pipeline,
+            feature_columns=feature_columns,
+            reference_df=reference_df,
+            row_dict=row_dict,
+            patient_id=patient_id,
+            numeric_cols=numeric_cols,
+            language=language,
+        )
+        if _infer["incident"] is not None:
             probabilities.append(np.nan)
             completeness.append("error")
-            incidents.append({
-                "patient_id": patient_id,
-                "stage": "ai_risk_inference",
-                "reason": f"{type(exc).__name__}: {exc}",
-            })
+            incidents.append(_infer["incident"])
+        else:
+            probabilities.append(_infer["probability"])
+            completeness.append(_infer["completeness"]["level"])
 
         if progress_callback is not None:
             try:
@@ -2713,6 +2797,30 @@ prepared = bundle["prepared"]
 artifacts = bundle["artifacts"]
 base_df = bundle["data"].copy()
 best_model_name = artifacts.best_model_name
+
+# Guard the single-patient inference simplification: the individual prediction
+# flow calls _run_ai_risk_inference_row with artifacts.feature_columns only
+# (no prepared/artifacts merge).  If the schemas ever diverge the input will
+# be silently wrong, so we surface the discrepancy here at load time.
+_prepared_cols = set(getattr(prepared, "feature_columns", []))
+_artifact_cols = set(getattr(artifacts, "feature_columns", []))
+if _prepared_cols != _artifact_cols:
+    _only_prepared = _prepared_cols - _artifact_cols
+    _only_artifact = _artifact_cols - _prepared_cols
+    st.warning(
+        tr(
+            f"⚠️ Feature schema mismatch between training data and model artifacts "
+            f"({len(_only_prepared)} column(s) only in prepared data, "
+            f"{len(_only_artifact)} only in model artifacts). "
+            f"Individual prediction uses the model artifact schema. "
+            f"Consider retraining to resolve.",
+            f"⚠️ Divergência de esquema entre dados de treino e artefatos do modelo "
+            f"({len(_only_prepared)} coluna(s) apenas nos dados preparados, "
+            f"{len(_only_artifact)} apenas nos artefatos). "
+            f"A predição individual usa o esquema dos artefatos. "
+            f"Considere retreinar para resolver.",
+        )
+    )
 
 model_options = artifacts.leaderboard["Modelo"].tolist()
 default_idx = model_options.index(best_model_name) if best_model_name in model_options else 0
@@ -3332,19 +3440,27 @@ elif _active_tab == 1:  # Individual Prediction
             "Vena contracta (mm)": vc_mi if vc_mi is not None else np.nan,
         }
 
-        input_row = _build_input_row(prepared.feature_columns, form_map)
-        # Also build from model's feature_columns to catch features not in prepared data
-        input_row_model = _build_input_row(artifacts.feature_columns, form_map)
-        # Merge: add any columns from model features missing in prepared features
-        for _mc in artifacts.feature_columns:
-            if _mc not in input_row.columns:
-                input_row[_mc] = input_row_model[_mc].values if _mc in input_row_model.columns else np.nan
-        input_row = _align_input_to_training_schema(input_row, prepared.data[prepared.feature_columns])
         _num_cols = _get_numeric_columns_from_pipeline(artifacts.fitted_models[forced_model])
-        model_input = clean_features(input_row[artifacts.feature_columns], numeric_columns=_num_cols)
+        _patient_id_sp = _patient_identifier_from_row(form_map, 0)
+        _infer_sp = _run_ai_risk_inference_row(
+            model_pipeline=artifacts.fitted_models[forced_model],
+            feature_columns=artifacts.feature_columns,
+            reference_df=prepared.data,
+            row_dict=form_map,
+            patient_id=_patient_id_sp,
+            numeric_cols=_num_cols,
+            language=language,
+        )
+        if _infer_sp["incident"] is not None:
+            st.error(tr(
+                f"AI Risk inference failed: {_infer_sp['incident']['reason']}",
+                f"Falha na inferência AI Risk: {_infer_sp['incident']['reason']}",
+            ))
+            st.stop()
+        model_input = _infer_sp["model_input"]
+        ia_prob = _infer_sp["probability"]
         informed_features = int(model_input.notna().sum(axis=1).iloc[0])
         imputed_features = int(model_input.shape[1] - informed_features)
-        ia_prob = float(artifacts.fitted_models[forced_model].predict_proba(model_input)[:, 1][0])
         euro_prob = float(euroscore_from_inputs(form_map))
         # Calculate STS Score via the web calculator, routed through the
         # Phase 2 persistent STS Score cache (14-day TTL, revalidation).
@@ -4718,24 +4834,33 @@ elif _active_tab == 4:  # Batch & Export
                     f"Calculando AI Risk + EuroSCORE: 0/{_n_total}",
                 ))
                 _n_errors = 0
+                _batch_ai_incidents: list = []
                 _num_cols_batch = _get_numeric_columns_from_pipeline(artifacts.fitted_models[forced_model])
                 for idx, row_data in new_df.iterrows():
                     _i = len(results)
-                    try:
-                        form_map = row_data.to_dict()
-                        input_row = _build_input_row(artifacts.feature_columns, form_map)
-                        input_row = _align_input_to_training_schema(input_row, ref_df)
-                        model_input = clean_features(input_row[artifacts.feature_columns], numeric_columns=_num_cols_batch)
-
-                        # Final safety: force numeric columns that are still object
-                        for _c in model_input.columns:
-                            if model_input[_c].dtype == object and _c in ref_df.columns and pd.api.types.is_numeric_dtype(ref_df[_c]):
-                                model_input[_c] = pd.to_numeric(
-                                    model_input[_c].astype(str).str.replace(',', '.', regex=False),
-                                    errors="coerce",
-                                )
-
-                        ia_prob = float(artifacts.fitted_models[forced_model].predict_proba(model_input)[:, 1][0])
+                    form_map = row_data.to_dict()
+                    _patient_id_batch = _patient_identifier_from_row(form_map, idx)
+                    _infer_batch = _run_ai_risk_inference_row(
+                        model_pipeline=artifacts.fitted_models[forced_model],
+                        feature_columns=artifacts.feature_columns,
+                        reference_df=ref_df,
+                        row_dict=form_map,
+                        patient_id=_patient_id_batch,
+                        numeric_cols=_num_cols_batch,
+                        language=language,
+                    )
+                    if _infer_batch["incident"] is not None:
+                        _n_errors += 1
+                        _batch_ai_incidents.append(_infer_batch["incident"])
+                        results.append({
+                            tr("Row", "Linha"): idx + 1,
+                            tr("Name", "Nome"): form_map.get("Name", form_map.get("Nome", f"Patient {idx+1}")),
+                            tr("Error", "Erro"): _infer_batch["incident"]["reason"],
+                        })
+                        batch_rows_for_sts.append({})
+                    else:
+                        ia_prob = _infer_batch["probability"]
+                        model_input = _infer_batch["model_input"]
                         euro_prob = float(euroscore_from_inputs(form_map))
 
                         row_result = {
@@ -4753,14 +4878,6 @@ elif _active_tab == 4:  # Batch & Export
                         row_result[tr("Risk class", "Classe de risco")] = class_risk(ia_prob)
                         results.append(row_result)
                         batch_rows_for_sts.append(form_map)
-                    except Exception as _row_err:
-                        _n_errors += 1
-                        results.append({
-                            tr("Row", "Linha"): idx + 1,
-                            tr("Name", "Nome"): form_map.get("Name", form_map.get("Nome", f"Patient {idx+1}")),
-                            tr("Error", "Erro"): str(_row_err),
-                        })
-                        batch_rows_for_sts.append({})
 
                     _pct = (_i + 1) / _n_total
                     _progress_bar.progress(_pct, text=tr(
@@ -4772,6 +4889,25 @@ elif _active_tab == 4:  # Batch & Export
                     f"AI Risk + EuroSCORE complete: {_n_total - _n_errors} OK, {_n_errors} errors",
                     f"AI Risk + EuroSCORE completo: {_n_total - _n_errors} OK, {_n_errors} erros",
                 ))
+
+                # Surface per-patient AI Risk incidents (mirrors temporal validation UI).
+                if _batch_ai_incidents:
+                    st.warning(tr(
+                        f"AI Risk inference incidents (batch): {len(_batch_ai_incidents)} patient(s) failed.",
+                        f"Incidentes de inferência do AI Risk (lote): {len(_batch_ai_incidents)} paciente(s) falharam.",
+                    ))
+                    with st.expander(
+                        tr(
+                            f"AI Risk per-patient incidents (batch) ({len(_batch_ai_incidents)})",
+                            f"Incidentes por paciente do AI Risk (lote) ({len(_batch_ai_incidents)})",
+                        ),
+                        expanded=False,
+                    ):
+                        st.dataframe(
+                            pd.DataFrame(_batch_ai_incidents),
+                            width="stretch",
+                            hide_index=True,
+                        )
 
                 # --- Phase 2: STS Score (routed through Phase 2 cache) ---
                 sts_probs = [np.nan] * len(results)

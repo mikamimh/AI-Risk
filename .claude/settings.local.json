@@ -15,7 +15,8 @@
       "Bash(python -c \"import py_compile; py_compile.compile\\(''app.py'', doraise=True\\); print\\(''app.py syntax OK''\\)\")",
       "Bash(python -c \"from modeling import clean_features, train_and_select_model; print\\(''OK''\\)\")",
       "WebSearch",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")"
     ]
   }
 }
