@@ -1,7 +1,12 @@
-# force-reload-v4: ensure modeling.py and sts_calculator.py changes are picked up
+# force-reload-v5: ensure modeling.py / sts_calculator.py / sts_cache.py changes are picked up
 import importlib as _il
 import modeling as _modeling_mod
 _il.reload(_modeling_mod)
+try:
+    import sts_cache as _sts_cache_mod
+    _il.reload(_sts_cache_mod)
+except Exception:
+    _sts_cache_mod = None  # type: ignore[assignment]
 import sts_calculator as _sts_mod
 _il.reload(_sts_mod)
 
@@ -49,6 +54,7 @@ from stats_compare import (
     calibration_data,
     calibration_intercept_slope,
     class_risk,
+    classification_metrics_at_threshold,
     compute_idi,
     compute_nri,
     decision_curve,
@@ -199,6 +205,42 @@ def _safe_prob(x: object) -> float:
     return float(min(v, 1.0))
 
 
+def _sts_score_patient_id(row: dict) -> "str | None":
+    """Extract a stable STS Score patient identifier from a row dict.
+
+    Used by the STS Score cache layer to key the cross-hash stale
+    fallback index. Returns None when no stable identifier is available.
+    """
+    if not isinstance(row, dict):
+        return None
+    for k in ("_patient_key", "patient_id", "Name", "Nome"):
+        v = row.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s and s.lower() not in ("nan", "none", "-"):
+            return s
+    return None
+
+
+def _sts_score_patient_ids(rows) -> list:
+    return [_sts_score_patient_id(r) for r in rows]
+
+
+def _sts_score_status_caption(execution_log) -> str:
+    """Return a one-line summary like 'cached 431 · fresh 20 · stale_fallback 3'."""
+    try:
+        import sts_cache as _sc
+        summary = _sc.summarise_execution_log(execution_log)
+    except Exception:
+        return ""
+    parts = []
+    for k in ("fresh", "cached", "refreshed", "stale_fallback", "failed"):
+        if summary.get(k, 0):
+            parts.append(f"{k} {summary[k]}")
+    return " · ".join(parts)
+
+
 def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]:
     # Force-reload modeling module to pick up any code changes without server restart
     import importlib
@@ -208,19 +250,51 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
     importlib.reload(_mod)
     _fresh_train = _mod.train_and_select_model
 
+    # Phase 3: observability — build a RunReport as each phase completes.
+    import observability as _obs
+    importlib.reload(_obs)
+    run_report = _obs.RunReport()
+
     prepared = prepare_master_dataset(xlsx_path)
+
+    # Phase 3: ingestion + cohort eligibility steps. A required-column
+    # failure is a hard stop; the report is attached to the raised error
+    # so the caller can render it before aborting.
+    _ingest_step = _obs.build_step_ingestion(getattr(prepared, "ingestion_report", None))
+    run_report.add(_ingest_step)
+    if _ingest_step is not None and _ingest_step.status == _obs.STATUS_ERROR:
+        err = RuntimeError(
+            "Ingestion halted: required columns are missing. "
+            "See the observability report for details."
+        )
+        err.run_report = run_report  # type: ignore[attr-defined]
+        err.source_label = Path(xlsx_path).name  # type: ignore[attr-defined]
+        raise err
+    run_report.add(_obs.build_step_eligibility(prepared.info))
+
     artifacts = _fresh_train(prepared.data, prepared.feature_columns, progress_callback=progress_callback)
+
+    # Phase 3: training step.
+    run_report.add(_obs.build_step_training(
+        leaderboard=artifacts.leaderboard,
+        best_model_name=artifacts.best_model_name,
+        n_features=len(prepared.feature_columns),
+        prevalence=float(prepared.info.get("positive_rate", 0.0) or 0.0),
+    ))
 
     df = prepared.data.copy()
     df["euroscore_calc"] = df.apply(euroscore_from_row, axis=1)
     df["euroscore_sheet_clean"] = pd.to_numeric(df["euroscore_sheet"], errors="coerce")
     df["euroscore_auto_sheet_clean"] = pd.to_numeric(df["euroscore_auto_sheet"], errors="coerce")
 
-    # STS: query web calculator for all patients (preferred over CSV values)
+    # STS Score: query the web calculator for all patients, routed
+    # through the Phase 2 persistent STS Score cache (14-day TTL,
+    # patient-keyed stale fallback, structured execution log).
     sts_ws_results = []
     if HAS_STS:
         rows_as_dicts = df.to_dict(orient="records")
-        sts_ws_results = calculate_sts_batch(rows_as_dicts)
+        _sts_pids = _sts_score_patient_ids(rows_as_dicts)
+        sts_ws_results = calculate_sts_batch(rows_as_dicts, patient_ids=_sts_pids)
 
     if sts_ws_results:
         df["sts_score"] = [r.get("predmort", np.nan) for r in sts_ws_results]
@@ -232,10 +306,16 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
         # No fallback — STS is only available via the web calculator
         df["sts_score"] = np.nan
 
+    # Phase 3: STS Score step (falls back gracefully if no log attached).
+    run_report.add(_obs.build_step_sts_score(
+        getattr(calculate_sts_batch, "last_execution_log", None)
+    ))
+
     return {
         "prepared": prepared,
         "artifacts": artifacts,
         "data": df,
+        "run_report": run_report,
     }
 
 
@@ -829,7 +909,14 @@ def _serialize_bundle(bundle: Dict[str, object]) -> Dict[str, object]:
         "fitted_models": artifacts.fitted_models,
         "best_model_name": artifacts.best_model_name,
         "calibration_method": getattr(artifacts, "calibration_method", "sigmoid"),
+        "youden_thresholds": getattr(artifacts, "youden_thresholds", None),
+        "best_youden_threshold": getattr(artifacts, "best_youden_threshold", None),
     }
+    # Phase 3: persist the run report as a plain dict so module reloads
+    # don't break unpickling.
+    run_report = out.get("run_report")
+    if run_report is not None and hasattr(run_report, "to_dict"):
+        out["run_report"] = run_report.to_dict()
     return out
 
 
@@ -858,7 +945,16 @@ def _deserialize_bundle(bundle: Dict[str, object]) -> Dict[str, object]:
             best_model_name=a["best_model_name"],
             calibration_method=a.get("calibration_method", "sigmoid"),
             oof_raw=a.get("oof_raw"),                       # may be None in old caches
+            youden_thresholds=a.get("youden_thresholds"),
+            best_youden_threshold=a.get("best_youden_threshold"),
         )
+    # Phase 3: rebuild RunReport from persisted dict (legacy bundles without
+    # the key simply carry no report).
+    rr = out.get("run_report")
+    if isinstance(rr, dict):
+        import observability as _obs
+        importlib.reload(_obs)
+        out["run_report"] = _obs.RunReport.from_dict(rr)
     return out
 
 
@@ -1832,6 +1928,7 @@ def general_table_column_config(kind: str) -> dict:
             "Brier": st.column_config.NumberColumn("Brier", help=tr("Probabilistic accuracy. Lower is better.", "Acurácia probabilística. Quanto menor, melhor."), format="%.4f"),
             "Sensibilidade": st.column_config.NumberColumn(tr("Sensitivity", "Sensibilidade"), help=tr("Out-of-fold sensitivity at the optimal threshold (Youden's J).", "Sensibilidade out-of-fold no limiar ótimo (Youden's J)."), format="%.3f"),
             "Especificidade": st.column_config.NumberColumn(tr("Specificity", "Especificidade"), help=tr("Out-of-fold specificity at the optimal threshold (Youden's J).", "Especificidade out-of-fold no limiar ótimo (Youden's J)."), format="%.3f"),
+            "Limiar_Youden": st.column_config.NumberColumn(tr("Youden threshold", "Limiar de Youden"), help=tr("Optimal out-of-fold threshold maximizing Youden's J.", "Limiar ótimo out-of-fold que maximiza o índice J de Youden."), format="%.3f"),
         }
     if kind == "eligibility":
         return {
@@ -2560,12 +2657,31 @@ if force_retrain:
             "Training complete!", "Treinamento concluído!",
         ))
     except Exception as e:
-        st.error(
-            tr(
-                f"Training failed: {e}",
-                f"Falha no treino: {e}",
+        # Phase 3: if ingestion halted on a required-column error, the
+        # exception carries a RunReport — render it so the user sees
+        # exactly which columns were missing before the app stops.
+        _err_report = getattr(e, "run_report", None)
+        _err_source = getattr(e, "source_label", None)
+        if _err_source:
+            st.error(
+                tr(
+                    f"Training halted while processing '{_err_source}': {e}",
+                    f"Treino interrompido ao processar '{_err_source}': {e}",
+                )
             )
-        )
+        else:
+            st.error(
+                tr(
+                    f"Training failed: {e}",
+                    f"Falha no treino: {e}",
+                )
+            )
+        if _err_report is not None:
+            try:
+                import observability as _obs
+                _obs.render_run_report(_err_report, tr=tr)
+            except Exception:
+                pass
         try:
             st.markdown(tr("**Eligibility summary**", "**Resumo de elegibilidade**"))
             st.dataframe(_eligibility_summary(xlsx_path), width="stretch", column_config=general_table_column_config("eligibility"))
@@ -2711,6 +2827,20 @@ if _active_tab == 0:  # Overview
             st.caption(tr(
                 "Export metadata for version tracking, bundle comparison, and external validation.",
                 "Exporte os metadados para rastreamento de versões, comparação de bundles e validação externa.",
+            ))
+
+    # Phase 3: observability — end-of-run report across ingestion,
+    # eligibility, training, and STS Score. Skipped silently for legacy
+    # bundles that predate Phase 3.
+    _run_report = bundle.get("run_report")
+    if _run_report is not None and getattr(_run_report, "steps", None):
+        try:
+            import observability as _obs
+            _obs.render_run_report(_run_report, tr=tr)
+        except Exception as _obs_err:
+            st.caption(tr(
+                f"Observability report unavailable: {_obs_err}",
+                f"Relatório de observabilidade indisponível: {_obs_err}",
             ))
 
     st.subheader(tr("IA Model Performance", "Desempenho dos modelos de IA"))
@@ -3102,11 +3232,19 @@ elif _active_tab == 1:  # Individual Prediction
         imputed_features = int(model_input.shape[1] - informed_features)
         ia_prob = float(artifacts.fitted_models[forced_model].predict_proba(model_input)[:, 1][0])
         euro_prob = float(euroscore_from_inputs(form_map))
-        # Calculate STS via web calculator
+        # Calculate STS Score via the web calculator, routed through the
+        # Phase 2 persistent STS Score cache (14-day TTL, revalidation).
         sts_result = {}
+        sts_exec_record = None
         if HAS_STS:
-            with st.spinner(tr("Querying STS web calculator...", "Consultando calculadora web do STS...")):
-                sts_result = calculate_sts(form_map)
+            _sts_pid = _sts_score_patient_id(form_map) or form_map.get("Name") or None
+            with st.spinner(tr("Querying STS Score web calculator...", "Consultando calculadora web do STS Score...")):
+                sts_result = calculate_sts(form_map, patient_id=_sts_pid)
+            # Grab the most recent execution record (appended by calculate_sts)
+            try:
+                sts_exec_record = calculate_sts.last_execution_log[-1]  # type: ignore[attr-defined]
+            except Exception:
+                sts_exec_record = None
         sts_prob = sts_result.get("predmort", np.nan)
 
         patient_pred = []
@@ -3141,9 +3279,51 @@ elif _active_tab == 1:  # Individual Prediction
         ))
         if np.isnan(sts_prob):
             st.caption(tr(
-                "STS score unavailable — the web calculator could not be reached or did not return a result for this patient. No dataset fallback is used.",
-                "Score STS indisponível — a calculadora web não pôde ser acessada ou não retornou resultado para este paciente. Nenhum fallback do dataset é utilizado.",
+                "STS Score unavailable — the web calculator could not be reached or did not return a result for this patient. No dataset fallback is used.",
+                "STS Score indisponível — a calculadora web não pôde ser acessada ou não retornou resultado para este paciente. Nenhum fallback do dataset é utilizado.",
             ))
+
+        # STS Score cache transparency (Phase 2): surface status, cache age,
+        # and any fallback/failure reason for the user and the audit trail.
+        if sts_exec_record is not None:
+            _st_status = getattr(sts_exec_record, "status", "unknown")
+            _st_age = getattr(sts_exec_record, "cache_age_days", None)
+            _st_stage = getattr(sts_exec_record, "stage", "")
+            _st_reason = getattr(sts_exec_record, "reason", "")
+            _st_retry = getattr(sts_exec_record, "retry_attempted", False)
+            _st_used_prev = getattr(sts_exec_record, "used_previous_cache", False)
+            _age_txt = f" (age {_st_age:.1f} d)" if isinstance(_st_age, (int, float)) else ""
+            if _st_status == "cached":
+                st.caption(tr(
+                    f"STS Score: cached result returned{_age_txt}. No network call.",
+                    f"STS Score: resultado em cache{_age_txt}. Sem chamada de rede.",
+                ))
+            elif _st_status == "fresh":
+                st.caption(tr(
+                    "STS Score: fresh calculation from the web calculator (cached for 14 days).",
+                    "STS Score: cálculo novo via calculadora web (armazenado em cache por 14 dias).",
+                ))
+            elif _st_status == "refreshed":
+                st.caption(tr(
+                    "STS Score: cached entry expired and was refreshed from the web calculator.",
+                    "STS Score: entrada em cache expirada e atualizada via calculadora web.",
+                ))
+            elif _st_status == "stale_fallback":
+                st.warning(tr(
+                    f"STS Score: web calculator failed; using a previous cached result{_age_txt}. "
+                    f"Stage: {_st_stage}. Reason: {_st_reason}. "
+                    f"Retry attempted: {_st_retry}. Previous cache used: {_st_used_prev}.",
+                    f"STS Score: a calculadora web falhou; usando um resultado anterior em cache{_age_txt}. "
+                    f"Etapa: {_st_stage}. Motivo: {_st_reason}. "
+                    f"Tentativa de repetição: {_st_retry}. Cache anterior utilizado: {_st_used_prev}.",
+                ))
+            elif _st_status == "failed":
+                st.warning(tr(
+                    f"STS Score: calculation failed and no previous cache is available. "
+                    f"Stage: {_st_stage}. Reason: {_st_reason}. Retry attempted: {_st_retry}.",
+                    f"STS Score: cálculo falhou e não há cache anterior disponível. "
+                    f"Etapa: {_st_stage}. Motivo: {_st_reason}. Tentativa de repetição: {_st_retry}.",
+                ))
 
         out = pd.DataFrame(
             {
@@ -3467,11 +3647,58 @@ elif _active_tab == 2:  # Statistical Comparison
     st.subheader(tr("Statistical performance comparison", "Comparação estatística de desempenho"))
     st.caption(tr("Report with 95% CI by bootstrap (2,000 resamples) and formal model comparison.", "Relatório com IC95% por bootstrap (2.000 reamostras) e comparação formal entre modelos."))
 
+    # ── Threshold mode selector ──
+    _best_youden = getattr(artifacts, "best_youden_threshold", None)
+    _youden_available = _best_youden is not None
+    _mode_fixed_label = tr("Fixed clinical threshold (8%)", "Limiar clínico fixo (8%)")
+    _mode_youden_label = (
+        tr(
+            f"Best model Youden threshold: {_best_youden*100:.1f}%",
+            f"Limiar de Youden do melhor modelo: {_best_youden*100:.1f}%",
+        )
+        if _youden_available
+        else tr("Youden threshold (not available — retrain required)", "Limiar de Youden (indisponível — retreino necessário)")
+    )
+    _threshold_mode = st.radio(
+        tr("Threshold mode", "Modo de limiar"),
+        options=[_mode_fixed_label, _mode_youden_label],
+        index=0,  # Fixed 8% is always the default
+        horizontal=True,
+        disabled=not _youden_available and True,
+        help=tr(
+            "Choose between the fixed 8% clinical threshold (default) or the optimal Youden threshold learned from the training data. "
+            "AUC, AUPRC, and Brier score are not affected — only classification metrics change.",
+            "Escolha entre o limiar clínico fixo de 8% (padrão) ou o limiar ótimo de Youden aprendido dos dados de treino. "
+            "AUC, AUPRC e Brier score não são afetados — apenas métricas de classificação mudam.",
+        ),
+    )
+    _use_youden = _youden_available and _threshold_mode == _mode_youden_label
+    _slider_default = _best_youden if _use_youden else _default_threshold
+
+    if _use_youden:
+        st.info(tr(
+            f"**Active threshold: Best model Youden = {_slider_default*100:.1f}%** (probability {_slider_default:.4f}). "
+            f"Learned from training OOF predictions — not recomputed on this data.",
+            f"**Limiar ativo: Youden do melhor modelo = {_slider_default*100:.1f}%** (probabilidade {_slider_default:.4f}). "
+            f"Aprendido das predições OOF de treino — não recalculado nestes dados.",
+        ))
+    else:
+        st.info(tr(
+            f"**Active threshold: Fixed clinical = {_default_threshold*100:.1f}%** (probability {_default_threshold:.4f})  \n"
+            f"Aligned with the EuroSCORE II high-risk boundary (>8%) and chosen conservatively — in cardiac surgery, "
+            f"missing a high-risk patient (false negative) is much more costly than an unnecessary alert (false positive). "
+            f"See the expander below for the full rationale.",
+            f"**Limiar ativo: Clínico fixo = {_default_threshold*100:.1f}%** (probabilidade {_default_threshold:.4f})  \n"
+            f"Alinhado com a fronteira de alto risco do EuroSCORE II (>8%) e escolhido de forma conservadora — em cirurgia cardíaca, "
+            f"não identificar um paciente de alto risco (falso negativo) é muito mais custoso do que um alerta desnecessário (falso positivo). "
+            f"Veja o expansor abaixo para a justificativa completa.",
+        ))
+
     decision_threshold = st.slider(
         tr("Decision threshold", "Limiar de decisão"),
         min_value=0.01,
         max_value=0.99,
-        value=_default_threshold,
+        value=_slider_default,
         step=0.01,
     )
     with st.expander(tr("What is the decision threshold?", "O que é o limiar de decisão?"), expanded=False):
@@ -3638,6 +3865,210 @@ O valor padrão ({_default_threshold:.0%}) é um limiar **conservador** para cir
         _plot_ia_model_boxplots(df["morte_30d"].values, artifacts.oof_predictions)
     else:
         st.warning(tr("Insufficient sample for complete triple comparison.", "Amostra insuficiente para comparação tripla completa."))
+
+    # ── Read-only probability distribution diagnostics ────────────────────
+    # Diagnostic-only panel: does NOT change thresholds, model logic,
+    # methodology, or any metric shown above. Inspects the exact
+    # probability source already used by this tab (calibrated OOF).
+    with st.expander(
+        tr(
+            "Probability distribution diagnostics (read-only)",
+            "Diagnóstico de distribuição de probabilidades (somente leitura)",
+        ),
+        expanded=False,
+    ):
+        st.caption(tr(
+            "Read-only inspection of AI Risk probability distributions and threshold behavior. "
+            "No threshold, model output, or methodology is changed by this panel.",
+            "Inspeção somente leitura das distribuições de probabilidade do AI Risk e do comportamento do limiar. "
+            "Nenhum limiar, saída de modelo ou metodologia é alterado por este painel.",
+        ))
+
+        def _describe_prob_array(arr) -> dict:
+            a = np.asarray(arr, dtype=float)
+            a = a[~np.isnan(a)]
+            if len(a) == 0:
+                return {}
+            return {
+                "n": int(len(a)),
+                "min": float(np.min(a)),
+                "p01": float(np.quantile(a, 0.01)),
+                "p05": float(np.quantile(a, 0.05)),
+                "p25": float(np.quantile(a, 0.25)),
+                "median": float(np.median(a)),
+                "p75": float(np.quantile(a, 0.75)),
+                "p95": float(np.quantile(a, 0.95)),
+                "p99": float(np.quantile(a, 0.99)),
+                "max": float(np.max(a)),
+                "frac<0.08": float((a < 0.08).mean()),
+            }
+
+        _youden_dict = getattr(artifacts, "youden_thresholds", None) or {}
+
+        # Panel 1 — Calibrated OOF, per model
+        st.markdown(tr(
+            "**1. Calibrated OOF probabilities — per model**",
+            "**1. Probabilidades OOF calibradas — por modelo**",
+        ))
+        st.caption(tr(
+            "Source: `artifacts.oof_predictions` (nested-CV calibrated OOF — the honest evaluation probabilities used by this tab).",
+            "Origem: `artifacts.oof_predictions` (OOF calibrado por CV aninhada — as probabilidades honestas usadas nesta aba).",
+        ))
+        _cal_rows = []
+        for _mn, _probs in artifacts.oof_predictions.items():
+            _d = _describe_prob_array(_probs)
+            if not _d:
+                continue
+            _d = {"model": _mn, **_d, "youden": float(_youden_dict.get(_mn, np.nan))}
+            _cal_rows.append(_d)
+        if _cal_rows:
+            _cal_diag_df = pd.DataFrame(_cal_rows)[
+                ["model", "n", "min", "p01", "p05", "p25", "median",
+                 "p75", "p95", "p99", "max", "frac<0.08", "youden"]
+            ]
+            st.dataframe(_cal_diag_df, width="stretch", hide_index=True)
+        else:
+            st.info(tr("No calibrated OOF predictions available.",
+                       "Sem predições OOF calibradas disponíveis."))
+
+        # Panel 2 — Raw OOF, per model (if stored in bundle)
+        st.markdown(tr(
+            "**2. Raw OOF probabilities — per model (uncalibrated, audit only)**",
+            "**2. Probabilidades OOF brutas — por modelo (não calibradas, apenas auditoria)**",
+        ))
+        st.caption(tr(
+            "Source: `artifacts.oof_raw`. Comparing panel 1 vs panel 2 exposes the effect of Platt scaling on the distribution floor.",
+            "Origem: `artifacts.oof_raw`. Comparar os painéis 1 e 2 mostra o efeito do Platt scaling no piso da distribuição.",
+        ))
+        _oof_raw = getattr(artifacts, "oof_raw", None)
+        if _oof_raw:
+            _raw_rows = []
+            for _mn, _probs in _oof_raw.items():
+                _d = _describe_prob_array(_probs)
+                if not _d:
+                    continue
+                _raw_rows.append({"model": _mn, **_d})
+            if _raw_rows:
+                _raw_diag_df = pd.DataFrame(_raw_rows)[
+                    ["model", "n", "min", "p01", "p05", "p25", "median",
+                     "p75", "p95", "p99", "max", "frac<0.08"]
+                ]
+                st.dataframe(_raw_diag_df, width="stretch", hide_index=True)
+            else:
+                st.info(tr("Raw OOF dict is empty.", "Dicionário OOF bruto vazio."))
+        else:
+            st.info(tr(
+                "No raw OOF predictions stored in this bundle (retrain to populate).",
+                "Sem predições OOF brutas armazenadas neste bundle (retreinar para popular).",
+            ))
+
+        # Panel 3 — Focus on the active AI Risk OOF series (calibrated)
+        st.markdown(tr(
+            f"**3. Active AI Risk OOF series — calibrated (model: `{forced_model}`)**",
+            f"**3. Série OOF do AI Risk ativa — calibrada (modelo: `{forced_model}`)**",
+        ))
+        st.caption(tr(
+            "This is the exact probability series used by the Comparison tab above. "
+            "Source: `df['ia_risk_oof']` = `artifacts.oof_predictions[forced_model]`.",
+            "Esta é a série exata de probabilidades usada na aba de Comparação acima. "
+            "Origem: `df['ia_risk_oof']` = `artifacts.oof_predictions[forced_model]`.",
+        ))
+        _active_mask = df["ia_risk_oof"].notna() & df["morte_30d"].notna()
+        _active_np = df.loc[_active_mask, "ia_risk_oof"].values.astype(float)
+        _y_active = df.loc[_active_mask, "morte_30d"].astype(int).values
+        _forced_youden = float(_youden_dict.get(forced_model, np.nan)) if _youden_dict else float("nan")
+
+        if len(_active_np) >= 2 and len(np.unique(_y_active)) >= 2:
+            _desc = _describe_prob_array(_active_np)
+            _n_below_8 = int((_active_np < 0.08).sum())
+            _frac_below_8 = float(_n_below_8 / len(_active_np))
+            _min_above_8 = bool(_desc["min"] >= 0.08)
+            if not np.isnan(_forced_youden):
+                _n_below_yd = int((_active_np < _forced_youden).sum())
+                _frac_below_yd = float(_n_below_yd / len(_active_np))
+                _yd_label = f"{_forced_youden:.4f}"
+            else:
+                _n_below_yd = np.nan
+                _frac_below_yd = np.nan
+                _yd_label = "N/A"
+
+            _active_summary = pd.DataFrame([
+                {"metric": "n (non-null, y known)", "value": _desc["n"]},
+                {"metric": "min", "value": _desc["min"]},
+                {"metric": "p01", "value": _desc["p01"]},
+                {"metric": "p05", "value": _desc["p05"]},
+                {"metric": "p25", "value": _desc["p25"]},
+                {"metric": "median", "value": _desc["median"]},
+                {"metric": "p75", "value": _desc["p75"]},
+                {"metric": "p95", "value": _desc["p95"]},
+                {"metric": "p99", "value": _desc["p99"]},
+                {"metric": "max", "value": _desc["max"]},
+                {"metric": "count < 0.08", "value": _n_below_8},
+                {"metric": "fraction < 0.08", "value": _frac_below_8},
+                {"metric": f"count < Youden ({_yd_label})", "value": _n_below_yd},
+                {"metric": f"fraction < Youden ({_yd_label})", "value": _frac_below_yd},
+                {"metric": "min >= 0.08 ?", "value": _min_above_8},
+            ])
+            st.dataframe(_active_summary, width="stretch", hide_index=True)
+
+            # Panel 4 — calibration intercept/slope on the same series
+            st.markdown(tr(
+                "**4. Calibration intercept and slope (active AI Risk series)**",
+                "**4. Intercepto e slope de calibração (série ativa do AI Risk)**",
+            ))
+            st.caption(tr(
+                "Computed on the exact series shown in panel 3. Intercept near 0 and slope near 1 indicate good calibration-in-the-large and spread.",
+                "Calculado na série exata mostrada no painel 3. Intercepto próximo de 0 e slope próximo de 1 indicam boa calibração global e de dispersão.",
+            ))
+            _cis = calibration_intercept_slope(_y_active, _active_np)
+            _cis_df = pd.DataFrame([
+                {"metric": "Calibration intercept", "value": _cis["Calibration intercept"]},
+                {"metric": "Calibration slope", "value": _cis["Calibration slope"]},
+            ])
+            st.dataframe(_cis_df, width="stretch", hide_index=True)
+
+            # Panel 5 — side-by-side threshold comparison
+            st.markdown(tr(
+                "**5. Threshold comparison: fixed 8% vs stored Youden (this model)**",
+                "**5. Comparação de limiares: 8% fixo vs Youden armazenado (este modelo)**",
+            ))
+            st.caption(tr(
+                "Classification of the active AI Risk OOF series at both thresholds. Diagnostic only — does not change the metrics above.",
+                "Classificação da série OOF ativa do AI Risk em ambos os limiares. Somente diagnóstico — não altera as métricas acima.",
+            ))
+            _thr_rows = []
+            _thr_pairs = [("Fixed 8%", 0.08),
+                          (f"Youden ({forced_model})", _forced_youden)]
+            for _label, _thr in _thr_pairs:
+                if np.isnan(_thr):
+                    _thr_rows.append({
+                        "threshold_label": _label,
+                        "threshold_value": np.nan,
+                        "n_positive": np.nan,
+                        "Sensitivity": np.nan,
+                        "Specificity": np.nan,
+                        "PPV": np.nan,
+                        "NPV": np.nan,
+                    })
+                    continue
+                _cls = classification_metrics_at_threshold(_y_active, _active_np, float(_thr))
+                _n_pos = int((_active_np >= float(_thr)).sum())
+                _thr_rows.append({
+                    "threshold_label": _label,
+                    "threshold_value": float(_thr),
+                    "n_positive": _n_pos,
+                    "Sensitivity": _cls["Sensitivity"],
+                    "Specificity": _cls["Specificity"],
+                    "PPV": _cls["PPV"],
+                    "NPV": _cls["NPV"],
+                })
+            _thr_df = pd.DataFrame(_thr_rows)
+            st.dataframe(_thr_df, width="stretch", hide_index=True)
+        else:
+            st.info(tr(
+                "Active AI Risk OOF series is empty or has only one outcome class — cannot diagnose.",
+                "Série OOF do AI Risk ativa está vazia ou tem apenas uma classe — não é possível diagnosticar.",
+            ))
 
     st.markdown(tr("**Pairwise comparisons (larger sample)**", "**Comparações por pares (amostra maior)**"))
     st.caption(
@@ -4205,12 +4636,12 @@ elif _active_tab == 4:  # Batch & Export
                     f"AI Risk + EuroSCORE completo: {_n_total - _n_errors} OK, {_n_errors} erros",
                 ))
 
-                # --- Phase 2: STS (optional, slow — WebSocket per patient) ---
+                # --- Phase 2: STS Score (routed through Phase 2 cache) ---
                 sts_probs = [np.nan] * len(results)
                 if HAS_STS and _include_sts:
                     _sts_progress = st.progress(0, text=tr(
-                        f"Querying STS web calculator: 0/{_n_total}",
-                        f"Consultando calculadora web do STS: 0/{_n_total}",
+                        f"Querying STS Score web calculator (with cache): 0/{_n_total}",
+                        f"Consultando calculadora web do STS Score (com cache): 0/{_n_total}",
                     ))
                     try:
                         def _sts_progress_cb(done, total):
@@ -4218,46 +4649,63 @@ elif _active_tab == 4:  # Batch & Export
                                 _sts_progress.progress(
                                     done / max(total, 1),
                                     text=tr(
-                                        f"Querying STS web calculator: {done}/{total}",
-                                        f"Consultando calculadora web do STS: {done}/{total}",
+                                        f"Querying STS Score web calculator (with cache): {done}/{total}",
+                                        f"Consultando calculadora web do STS Score (com cache): {done}/{total}",
                                     ),
                                 )
                             except Exception:
                                 pass
-                        sts_results = calculate_sts_batch(batch_rows_for_sts, progress_callback=_sts_progress_cb)
+                        _batch_pids = _sts_score_patient_ids(batch_rows_for_sts)
+                        sts_results = calculate_sts_batch(
+                            batch_rows_for_sts,
+                            progress_callback=_sts_progress_cb,
+                            patient_ids=_batch_pids,
+                        )
                         if sts_results:
                             for _ri, _sr in enumerate(sts_results):
                                 if isinstance(_sr, dict) and "predmort" in _sr:
                                     sts_probs[_ri] = _sr["predmort"]
                         _n_sts_ok = sum(1 for p in sts_probs if pd.notna(p))
                         _sts_progress.progress(1.0, text=tr(
-                            f"STS complete: {_n_sts_ok}/{_n_total} calculated",
-                            f"STS completo: {_n_sts_ok}/{_n_total} calculados",
+                            f"STS Score complete: {_n_sts_ok}/{_n_total} resolved",
+                            f"STS Score completo: {_n_sts_ok}/{_n_total} resolvidos",
                         ))
+                        # Phase 2: surface cache status summary for transparency.
+                        _sts_exec_log = getattr(calculate_sts_batch, 'last_execution_log', [])
+                        _sts_status_line = _sts_score_status_caption(_sts_exec_log)
+                        if _sts_status_line:
+                            st.caption(tr(
+                                f"STS Score cache status: {_sts_status_line}",
+                                f"Status do cache do STS Score: {_sts_status_line}",
+                            ))
                         if _n_sts_ok < _n_total:
                             _fail_log = getattr(calculate_sts_batch, 'failure_log', [])
                             if _fail_log:
                                 _fail_details = "\n".join(
-                                    f"- **{f.get('name', '?')}** ({f.get('surgery', '?')}): {f.get('reason', '?')}"
+                                    f"- **patient={f.get('patient_id') or '?'}** | "
+                                    f"status={f.get('status','?')} | stage={f.get('stage','?')} | "
+                                    f"reason={f.get('reason','?')} | "
+                                    f"retry={f.get('retry_attempted', False)} | "
+                                    f"used_previous_cache={f.get('used_previous_cache', False)}"
                                     for f in _fail_log
                                 )
                                 st.warning(tr(
-                                    f"STS calculated for {_n_sts_ok}/{_n_total} patients. Failed patients:",
-                                    f"STS calculado para {_n_sts_ok}/{_n_total} pacientes. Pacientes que falharam:",
+                                    f"STS Score resolved for {_n_sts_ok}/{_n_total} patients. Incidents:",
+                                    f"STS Score resolvido para {_n_sts_ok}/{_n_total} pacientes. Incidentes:",
                                 ))
                                 st.markdown(_fail_details)
                             else:
                                 st.warning(tr(
-                                    f"STS calculated for {_n_sts_ok}/{_n_total} patients.",
-                                    f"STS calculado para {_n_sts_ok}/{_n_total} pacientes.",
+                                    f"STS Score resolved for {_n_sts_ok}/{_n_total} patients.",
+                                    f"STS Score resolvido para {_n_sts_ok}/{_n_total} pacientes.",
                                 ))
                     except Exception as _sts_err:
                         _sts_progress.progress(1.0, text=tr(
-                            f"STS failed: {_sts_err}", f"STS falhou: {_sts_err}",
+                            f"STS Score failed: {_sts_err}", f"STS Score falhou: {_sts_err}",
                         ))
                         st.warning(tr(
-                            f"STS calculation failed: {_sts_err}. Results shown without STS.",
-                            f"Cálculo STS falhou: {_sts_err}. Resultados mostrados sem STS.",
+                            f"STS Score calculation failed: {_sts_err}. Results shown without STS Score.",
+                            f"Cálculo do STS Score falhou: {_sts_err}. Resultados exibidos sem STS Score.",
                         ))
 
                 for i, sp in enumerate(sts_probs):
@@ -4983,7 +5431,54 @@ elif _active_tab == 9:  # Temporal Validation
         calibration_method=getattr(artifacts, "calibration_method", "sigmoid"),
         training_data=prepared.data,
     )
-    _tv_locked_threshold = _tv_meta.get("locked_threshold", 0.08)
+    _tv_locked_threshold_default = _tv_meta.get("locked_threshold", 0.08)
+
+    # ── Threshold mode selector ──
+    _tv_best_youden = getattr(artifacts, "best_youden_threshold", None)
+    _tv_youden_avail = _tv_best_youden is not None
+    _tv_mode_fixed = tr(
+        f"Locked clinical threshold ({_tv_locked_threshold_default*100:.0f}%)",
+        f"Limiar clínico bloqueado ({_tv_locked_threshold_default*100:.0f}%)",
+    )
+    _tv_mode_youden = (
+        tr(
+            f"Training Youden threshold: {_tv_best_youden*100:.1f}%",
+            f"Limiar de Youden do treino: {_tv_best_youden*100:.1f}%",
+        )
+        if _tv_youden_avail
+        else tr("Youden threshold (not available)", "Limiar de Youden (indisponível)")
+    )
+    _tv_threshold_mode = st.radio(
+        tr("Threshold mode", "Modo de limiar"),
+        options=[_tv_mode_fixed, _tv_mode_youden],
+        index=0,
+        horizontal=True,
+        disabled=not _tv_youden_avail,
+        help=tr(
+            "Choose the threshold for classification metrics. The Youden threshold was learned during training — it is NOT recomputed on the validation data.",
+            "Escolha o limiar para métricas de classificação. O limiar de Youden foi aprendido durante o treino — NÃO é recalculado nos dados de validação.",
+        ),
+        key="tv_threshold_mode",
+    )
+    _tv_use_youden = _tv_youden_avail and _tv_threshold_mode == _tv_mode_youden
+    _tv_locked_threshold = _tv_best_youden if _tv_use_youden else _tv_locked_threshold_default
+
+    if _tv_use_youden:
+        st.info(tr(
+            f"**Active threshold: Training Youden = {_tv_locked_threshold*100:.1f}%** (probability {_tv_locked_threshold:.4f}). "
+            f"Learned during model development — not recomputed on temporal data.",
+            f"**Limiar ativo: Youden do treino = {_tv_locked_threshold*100:.1f}%** (probabilidade {_tv_locked_threshold:.4f}). "
+            f"Aprendido durante o desenvolvimento — não recalculado nos dados temporais.",
+        ))
+    else:
+        st.info(tr(
+            f"**Active threshold: Locked clinical = {_tv_locked_threshold*100:.1f}%** (probability {_tv_locked_threshold:.4f})  \n"
+            f"Locked at training time, aligned with the EuroSCORE II high-risk boundary (>8%). "
+            f"Not recomputed on temporal data — this preserves the prospective validation integrity.",
+            f"**Limiar ativo: Clínico bloqueado = {_tv_locked_threshold*100:.1f}%** (probabilidade {_tv_locked_threshold:.4f})  \n"
+            f"Bloqueado no treinamento, alinhado com a fronteira de alto risco do EuroSCORE II (>8%). "
+            f"Não recalculado nos dados temporais — isso preserva a integridade da validação prospectiva.",
+        ))
 
     with st.expander(tr("Locked model details", "Detalhes do modelo congelado"), expanded=True):
         st.dataframe(
@@ -5147,21 +5642,66 @@ elif _active_tab == 9:  # Temporal Validation
                     _tv_progress.progress(0.42, text=tr("Computing EuroSCORE II...", "Calculando EuroSCORE II..."))
                     _tv_data["euroscore_calc"] = _tv_data.apply(euroscore_from_row, axis=1)
 
-                    # ── 5.3 STS ──
+                    # ── 5.3 STS Score (routed through Phase 2 cache) ──
                     _tv_data["sts_score"] = np.nan
                     _tv_sts_ok = False
                     if HAS_STS:
-                        _tv_progress.progress(0.50, text=tr("Querying STS web calculator...", "Consultando calculadora web do STS..."))
+                        _tv_progress.progress(0.50, text=tr("Querying STS Score web calculator (with cache)...", "Consultando calculadora web do STS Score (com cache)..."))
                         try:
                             _tv_sts_rows = _tv_data.to_dict(orient="records")
-                            _tv_sts_results = calculate_sts_batch(_tv_sts_rows)
+                            _tv_sts_pids = _sts_score_patient_ids(_tv_sts_rows)
+                            _tv_sts_results = calculate_sts_batch(
+                                _tv_sts_rows, patient_ids=_tv_sts_pids,
+                            )
                             if _tv_sts_results:
                                 _tv_data["sts_score"] = [r.get("predmort", np.nan) for r in _tv_sts_results]
                                 _tv_sts_ok = _tv_data["sts_score"].notna().sum() > 0
+                            # Expose STS Score cache status summary.
+                            _tv_exec_log = getattr(calculate_sts_batch, 'last_execution_log', [])
+                            _tv_sts_status = _sts_score_status_caption(_tv_exec_log)
+                            if _tv_sts_status:
+                                st.caption(tr(
+                                    f"STS Score cache status (temporal validation): {_tv_sts_status}",
+                                    f"Status do cache do STS Score (validação temporal): {_tv_sts_status}",
+                                ))
+                            # Phase 3: mirror the batch flow — surface
+                            # per-patient incidents (stale_fallback /
+                            # failed) so temporal validation is not a
+                            # black box.
+                            try:
+                                import observability as _obs_tv
+                                _obs_tv.render_sts_score_incidents(
+                                    _tv_exec_log,
+                                    tr=tr,
+                                    header=tr(
+                                        "STS Score per-patient incidents (temporal validation)",
+                                        "Incidentes por paciente do STS Score (validação temporal)",
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                            # Phase 3: if the batch exposes a failure log
+                            # with richer detail than the execution log,
+                            # show the same warning block as the batch tab.
+                            _tv_fail_log = getattr(calculate_sts_batch, 'failure_log', [])
+                            if _tv_fail_log:
+                                _tv_fail_details = "\n".join(
+                                    f"- **patient={f.get('patient_id') or '?'}** | "
+                                    f"status={f.get('status','?')} | stage={f.get('stage','?')} | "
+                                    f"reason={f.get('reason','?')} | "
+                                    f"retry={f.get('retry_attempted', False)} | "
+                                    f"used_previous_cache={f.get('used_previous_cache', False)}"
+                                    for f in _tv_fail_log
+                                )
+                                st.warning(tr(
+                                    f"STS Score incidents (temporal validation): {len(_tv_fail_log)}",
+                                    f"Incidentes do STS Score (validação temporal): {len(_tv_fail_log)}",
+                                ))
+                                st.markdown(_tv_fail_details)
                         except Exception as _tv_sts_err:
                             st.warning(tr(
-                                f"STS calculation failed: {_tv_sts_err}. Continuing without STS.",
-                                f"Cálculo do STS falhou: {_tv_sts_err}. Continuando sem STS.",
+                                f"STS Score calculation failed: {_tv_sts_err}. Continuing without STS Score.",
+                                f"Cálculo do STS Score falhou: {_tv_sts_err}. Continuando sem STS Score.",
                             ))
 
                     if not _tv_sts_ok:

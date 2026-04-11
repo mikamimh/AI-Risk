@@ -28,11 +28,25 @@ import pandas as pd
 MISSING_TOKENS = {
     "",
     "-",
+    "--",
     "nan",
     "none",
+    "na",
+    "n/a",
+    "null",
     "not applicable",
     "unknown",
     "not informed",
+    "não informado",
+}
+
+NONE_IS_VALID_COLUMNS = {
+    "Aortic Stenosis", "Aortic Regurgitation",
+    "Mitral Stenosis", "Mitral Regurgitation",
+    "Tricuspid Regurgitation",
+    "aortic_stenosis_pre", "aortic_regurgitation_pre",
+    "mitral_stenosis_pre", "mitral_regurgitation_pre",
+    "tricuspid_regurgitation_pre",
 }
 
 REQUIRED_SOURCE_TABLES = [
@@ -266,36 +280,365 @@ def _to_date(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors="coerce").dt.date
 
 
-def parse_number(value: object) -> float:
+def parse_number(
+    value: object,
+    *,
+    _warn_ambiguous: list | None = None,
+    strict: bool = False,
+) -> float:
+    """Parse a numeric value handling BR and EN formats.
+
+    Handles comma-decimal (``1,08``), BR thousands (``1.234,56``),
+    EN thousands (``1,234.56``), and percentage suffixes (``64,7%``).
+
+    **EN safety guarantee**: any value that ``float(value)`` already
+    parses correctly will produce the identical result.
+
+    Parameters
+    ----------
+    _warn_ambiguous : list, optional
+        If provided, ambiguous values (e.g. ``69,227``) are appended
+        so the caller can log them.
+    strict : bool
+        If ``True``, disable the regex fallback that extracts embedded
+        digits from non-numeric strings (e.g. ``"ID0001"`` → ``1``).
+        Use ``True`` for column-level conversion to avoid false positives.
+    """
     if pd.isna(value):
         return np.nan
     txt = str(value).strip()
     if txt.lower() in MISSING_TOKENS:
         return np.nan
-    txt = txt.replace(",", ".")
-    found = re.findall(r"[-+]?\d*\.?\d+", txt)
-    if not found:
+    # Strip trailing percentage
+    if txt.endswith("%"):
+        txt = txt[:-1].strip()
+    if not txt:
         return np.nan
+
+    # Fast path: direct float (integers, EN decimals like "64.7")
     try:
-        return float(found[0])
+        return float(txt)
+    except ValueError:
+        pass
+
+    has_comma = "," in txt
+    has_dot = "." in txt
+
+    if has_comma and has_dot:
+        last_comma = txt.rfind(",")
+        last_dot = txt.rfind(".")
+        if last_comma > last_dot:
+            # BR thousands: 1.234,56 → remove dots, comma→dot
+            cleaned = txt.replace(".", "").replace(",", ".")
+        else:
+            # EN thousands: 1,234.56 → remove commas
+            cleaned = txt.replace(",", "")
+    elif has_comma:
+        # Only comma — disambiguate thousands vs decimal
+        magnitude = txt.lstrip("-+ ")
+        parts = magnitude.split(",")
+        if (
+            len(parts) >= 2
+            and parts[0].isdigit()
+            and len(parts[0]) <= 3
+            and all(len(p) == 3 and p.isdigit() for p in parts[1:])
+        ):
+            # EN thousands without decimal: 1,234 or 69,227
+            cleaned = txt.replace(",", "")
+            if _warn_ambiguous is not None and len(parts) == 2:
+                _warn_ambiguous.append(txt)
+        else:
+            # BR decimal: 1,08 or 64,7
+            cleaned = txt.replace(",", ".")
+    else:
+        cleaned = txt
+
+    try:
+        return float(cleaned)
+    except ValueError:
+        if strict:
+            return np.nan
+        # Last resort: extract first numeric substring
+        found = re.findall(r"[-+]?\d*\.?\d+", cleaned)
+        if found:
+            try:
+                return float(found[0])
+            except ValueError:
+                pass
+        return np.nan
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Clinical plausibility layer (narrow post-parse correction)
+# ──────────────────────────────────────────────────────────────────────
+#
+# The generic parse_number() handles BR/EN numeric formats well, but a
+# handful of clinically ambiguous values slip through — for example the
+# raw token "69,227" in an LVEF cell is treated as EN thousands
+# (69227) because it matches the 3-digit-group pattern, even though
+# 69227 % LVEF is clinically impossible and the intended value is
+# almost certainly 69.227.
+#
+# This layer runs ONLY for the listed clinical columns and:
+#   1. checks the parsed value against a wide clinical safety range,
+#   2. if out of range, attempts ONE reinterpretation (treat every
+#      comma as a decimal point) using the original raw string,
+#   3. accepts the reinterpretation only if it lands inside the range,
+#   4. otherwise sets NaN.
+#
+# Every action is reported through the IngestionReport warnings bucket
+# so the Phase 3 observability layer surfaces it automatically.
+#
+# Ranges are deliberately wide safety bounds — the goal is to catch
+# parsing errors (orders-of-magnitude off), NOT to reject physiological
+# outliers. A value that is merely abnormal must still pass.
+_CLINICAL_PLAUSIBILITY_RANGES: Dict[str, Tuple[float, float]] = {
+    "LVEF, %": (1.0, 100.0),
+    "Hematocrit (%)": (1.0, 100.0),
+    "Creatinine (mg/dL)": (0.05, 50.0),
+    "PSAP": (0.0, 250.0),
+    "Aortic Mean gradient (mmHg)": (0.0, 250.0),
+    "Mitral Mean gradient (mmHg)": (0.0, 100.0),
+    "AVA (cm\u00b2)": (0.01, 10.0),
+    "MVA (cm\u00b2)": (0.01, 15.0),
+    "Vena contracta": (0.0, 50.0),
+    "Vena contracta (mm)": (0.0, 50.0),
+    "TAPSE": (0.0, 60.0),
+}
+
+
+def _reinterpret_as_decimal(raw: object) -> float:
+    """One-shot reinterpretation: treat every comma as a decimal point.
+
+    Used ONLY by the clinical plausibility layer as a narrow fallback
+    when parse_number()'s output is clinically impossible.  This helper
+    deliberately does NOT replicate parse_number's full logic — it
+    applies exactly one transformation (``,`` → ``.``) and, if that
+    leaves multiple dots, keeps only the last as the decimal point.
+
+    Returns np.nan if the reinterpretation cannot produce a float.
+    """
+    if raw is None:
+        return np.nan
+    if isinstance(raw, float) and np.isnan(raw):
+        return np.nan
+    txt = str(raw).strip()
+    if not txt or txt.lower() in MISSING_TOKENS:
+        return np.nan
+    if txt.endswith("%"):
+        txt = txt[:-1].strip()
+    cleaned = txt.replace(",", ".")
+    if cleaned.count(".") > 1:
+        head, _, tail = cleaned.rpartition(".")
+        cleaned = head.replace(".", "") + "." + tail
+    try:
+        return float(cleaned)
     except ValueError:
         return np.nan
 
 
-def map_death_30d(value: object) -> int:
-    txt = _norm_text(value)
-    txt_l = txt.lower()
-    if txt_l in {"", "-", "nan"}:
-        return 0
-    if txt == "Operative":
-        return 1
-    if txt == "> 30":
-        return 0
+def _apply_clinical_plausibility(
+    out: pd.DataFrame,
+    raw_df: pd.DataFrame,
+    report_warnings: List["ColumnAction"],
+) -> None:
+    """Apply column-specific plausibility correction to ``out`` in place.
+
+    For every column listed in :data:`_CLINICAL_PLAUSIBILITY_RANGES`
+    that exists in ``out``:
+
+    1. Find rows where the parsed value is finite but outside the
+       plausible range ``[low, high]``.
+    2. Read the original raw string from ``raw_df`` for the same row
+       and attempt one reinterpretation via
+       :func:`_reinterpret_as_decimal`.
+    3. If the reinterpretation lies inside the range, overwrite the
+       parsed value and append a ``corrected_plausibility`` warning.
+    4. Otherwise, set the cell to NaN and append a
+       ``cleared_implausible`` warning.
+
+    Values already inside the range (or already NaN) are left
+    untouched, guaranteeing that valid inputs are never modified.
+    """
+    for col, (lo, hi) in _CLINICAL_PLAUSIBILITY_RANGES.items():
+        if col not in out.columns:
+            continue
+
+        parsed_series = pd.to_numeric(out[col], errors="coerce")
+        out_of_range_mask = parsed_series.notna() & (
+            (parsed_series < lo) | (parsed_series > hi)
+        )
+        if not out_of_range_mask.any():
+            continue
+
+        corrected_examples: List[str] = []
+        cleared_examples: List[str] = []
+        n_corrected = 0
+        n_cleared = 0
+
+        for idx in out.index[out_of_range_mask]:
+            parsed = float(parsed_series.loc[idx])
+            raw_val = (
+                raw_df.at[idx, col]
+                if (col in raw_df.columns and idx in raw_df.index)
+                else parsed
+            )
+            reinterpreted = _reinterpret_as_decimal(raw_val)
+
+            if (
+                isinstance(reinterpreted, float)
+                and np.isfinite(reinterpreted)
+                and lo <= reinterpreted <= hi
+            ):
+                out.at[idx, col] = reinterpreted
+                n_corrected += 1
+                if len(corrected_examples) < 5:
+                    corrected_examples.append(
+                        f"raw={raw_val!r} parsed={parsed:g} "
+                        f"-> corrected={reinterpreted:g}"
+                    )
+            else:
+                out.at[idx, col] = np.nan
+                n_cleared += 1
+                if len(cleared_examples) < 5:
+                    cleared_examples.append(
+                        f"raw={raw_val!r} parsed={parsed:g} -> NaN"
+                    )
+
+        if n_corrected > 0:
+            report_warnings.append(ColumnAction(
+                column=col,
+                action="corrected_plausibility",
+                detail=(
+                    f"{n_corrected} value(s) outside clinical range "
+                    f"[{lo:g}, {hi:g}] reinterpreted as decimal: "
+                    + "; ".join(corrected_examples)
+                ),
+                count=n_corrected,
+            ))
+        if n_cleared > 0:
+            report_warnings.append(ColumnAction(
+                column=col,
+                action="cleared_implausible",
+                detail=(
+                    f"{n_cleared} value(s) outside clinical range "
+                    f"[{lo:g}, {hi:g}] still implausible after "
+                    "reinterpretation; set to NaN: "
+                    + "; ".join(cleared_examples)
+                ),
+                count=n_cleared,
+            ))
+
+
+def is_missing(value: object, column: str | None = None) -> bool:
+    """Context-aware missing value detection.
+
+    Returns ``True`` if *value* should be treated as missing data.
+    For columns in :data:`NONE_IS_VALID_COLUMNS` (valve severity),
+    ``"none"`` is **not** treated as missing because it is a valid
+    clinical value meaning *no disease*.
+    """
+    if pd.isna(value):
+        return True
+    txt = str(value).strip()
+    if not txt:
+        return True
+    txt_lower = txt.lower()
+    if column and column in NONE_IS_VALID_COLUMNS and txt_lower == "none":
+        return False
+    return txt_lower in MISSING_TOKENS
+
+
+@dataclass
+class PostopTiming:
+    """Structured representation of a postoperative timing value.
+
+    Preserves the full semantics of values like ``"Operative"``,
+    ``"0"``, ``"> 30"``, ``"Death"``, and day-counts without
+    flattening them to a single boolean.
+    """
+    raw_value: str
+    category: str       # survivor | operative | day_of_surgery | days_to_event
+                        # | beyond_threshold | event_occurred_no_day | unknown
+    days: Optional[int]
+    threshold: Optional[int]
+    event_occurred: bool
+    within_30d: bool
+
+    @property
+    def is_operative(self) -> bool:
+        return self.category == "operative"
+
+    @property
+    def is_early(self) -> bool:
+        """Event within 48 h (operative, day 0, days 1-2)."""
+        if self.category in ("operative", "day_of_surgery"):
+            return True
+        return self.days is not None and self.days <= 2
+
+
+_SURVIVOR_TOKENS = {"-", "--"}
+
+
+def parse_postop_timing(value: object) -> PostopTiming:
+    """Parse a postoperative timing value into a :class:`PostopTiming`.
+
+    Recognises the patterns found in the dataset's Death, ICU-days,
+    and complication-timing columns.
+    """
+    if pd.isna(value):
+        return PostopTiming("", "unknown", None, None, False, False)
+
+    txt = str(value).strip()
+    txt_lower = txt.lower()
+
+    if not txt or txt_lower in (MISSING_TOKENS - _SURVIVOR_TOKENS):
+        return PostopTiming(txt, "unknown", None, None, False, False)
+
+    if txt_lower in _SURVIVOR_TOKENS:
+        return PostopTiming(txt, "survivor", None, None, False, False)
+
+    if txt_lower == "operative":
+        return PostopTiming(txt, "operative", 0, None, True, True)
+
+    if txt_lower == "death":
+        return PostopTiming(txt, "event_occurred_no_day", None, None, True, True)
+
+    # "> 15", "> 30", ">15", ">30"
+    m = re.match(r">\s*(\d+)", txt)
+    if m:
+        threshold = int(m.group(1))
+        return PostopTiming(txt, "beyond_threshold", None, threshold, True, threshold < 30)
+
     num = parse_number(txt)
-    if np.isnan(num):
-        warnings.warn(f"map_death_30d: unrecognised value '{txt}' — treated as 0 (survivor). Please review this record.", stacklevel=2)
+    if not np.isnan(num):
+        days = int(num)
+        if days == 0:
+            return PostopTiming(txt, "day_of_surgery", 0, None, True, True)
+        return PostopTiming(txt, "days_to_event", days, None, True, days <= 30)
+
+    return PostopTiming(txt, "unknown", None, None, False, False)
+
+
+def map_death_30d(value: object) -> int:
+    """Map a Death column value to 30-day mortality (0 or 1).
+
+    Delegates to :func:`parse_postop_timing` for parsing, then returns
+    ``1`` if the event occurred within 30 days, ``0`` otherwise.
+    Preserves legacy behaviour: unrecognised values map to 0 with warning.
+    """
+    timing = parse_postop_timing(value)
+    if timing.category == "survivor":
         return 0
-    return int(num <= 30)
+    if timing.category == "unknown":
+        if timing.raw_value and timing.raw_value.lower() not in MISSING_TOKENS:
+            warnings.warn(
+                f"map_death_30d: unrecognised value '{timing.raw_value}' "
+                "— treated as 0 (survivor). Please review this record.",
+                stacklevel=2,
+            )
+        return 0
+    return int(timing.within_30d)
 
 
 def is_combined_surgery(text: object) -> int:
@@ -424,10 +767,54 @@ def _aggregate_score_by_patient(df: pd.DataFrame, patient_col: str, score_col: s
 
 
 @dataclass
+class ColumnAction:
+    """Record of a single normalization action on a column."""
+    column: str
+    action: str     # converted_numeric | normalized_missing | dropped_sparse
+                    # | dropped_constant | flagged_ambiguous | required_missing
+    detail: str
+    count: int = 0
+
+
+@dataclass
+class IngestionReport:
+    """Structured report of all normalization actions applied during ingestion."""
+    columns_converted: List[ColumnAction]
+    missing_normalized: List[ColumnAction]
+    columns_dropped: List[ColumnAction]       # reported only, not removed from df
+    required_failures: List[ColumnAction]
+    warnings: List[ColumnAction]
+    n_rows_input: int
+    n_rows_output: int
+    n_columns_input: int
+    n_columns_output: int
+
+    def has_errors(self) -> bool:
+        """True if any required columns are missing."""
+        return len(self.required_failures) > 0
+
+    def summary_lines(self) -> List[str]:
+        """One-line-per-action summary suitable for UI display."""
+        lines: List[str] = []
+        for a in self.columns_converted:
+            lines.append(f"[CONVERTED] {a.column}: {a.detail}")
+        for a in self.missing_normalized:
+            lines.append(f"[MISSING] {a.column}: {a.detail}")
+        for a in self.columns_dropped:
+            lines.append(f"[SPARSE] {a.column}: {a.detail}")
+        for a in self.required_failures:
+            lines.append(f"[ERROR] {a.column}: {a.detail}")
+        for a in self.warnings:
+            lines.append(f"[WARNING] {a.column}: {a.detail}")
+        return lines
+
+
+@dataclass
 class PreparedData:
     data: pd.DataFrame
     feature_columns: List[str]
     info: Dict[str, object]
+    ingestion_report: Optional[IngestionReport] = None
 
 
 def _load_source_tables(source_path: str) -> Dict[str, pd.DataFrame]:
@@ -463,6 +850,157 @@ def _normalize_flat_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _read_csv_auto(path: str, nrows: int | None = None) -> pd.DataFrame:
     return pd.read_csv(path, sep=None, engine="python", nrows=nrows)
+
+
+def normalize_dataframe(
+    df: pd.DataFrame,
+    *,
+    numeric_hint: set | None = None,
+    required_columns: set | None = None,
+    min_completion: float = 0.05,
+    source_label: str = "unknown",
+) -> Tuple[pd.DataFrame, IngestionReport]:
+    """Unified normalization pipeline for training and validation data.
+
+    Steps (in order):
+    1. Missing-token normalization (context-aware for valve columns).
+    2. Numeric conversion via :func:`parse_number` for object columns
+       where >= 60 % of non-null values parse as numeric.
+    3. Sparsity / constant-column analysis (reported, **not** dropped).
+    4. Required-column validation.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Data after format-specific loading and column mapping.
+    numeric_hint : set of str, optional
+        Columns forced through numeric conversion regardless of the
+        auto-detection threshold.
+    required_columns : set of str, optional
+        Columns whose absence is recorded as a required-column failure.
+    min_completion : float
+        Minimum fraction of non-missing values.  Columns below this
+        threshold are flagged as sparse (default 0.05 → >95 % missing).
+    source_label : str
+        Provenance tag included in the report.
+
+    Returns
+    -------
+    (DataFrame, IngestionReport)
+    """
+    out = df.copy()
+    n_rows = len(out)
+
+    cols_converted: List[ColumnAction] = []
+    missing_normalized: List[ColumnAction] = []
+    cols_dropped: List[ColumnAction] = []
+    required_failures: List[ColumnAction] = []
+    report_warnings: List[ColumnAction] = []
+
+    # ── 1. Missing-token normalization ──────────────────────────────
+    for col in out.columns:
+        if out[col].dtype != object:
+            continue
+        before_na = int(out[col].isna().sum())
+        mask = out[col].apply(lambda v, c=col: is_missing(v, column=c))
+        after_na = int(mask.sum())
+        n_new = after_na - before_na
+        if n_new > 0:
+            out.loc[mask, col] = np.nan
+            missing_normalized.append(ColumnAction(
+                column=col,
+                action="normalized_missing",
+                detail=f"{n_new} missing token(s) \u2192 NaN",
+                count=n_new,
+            ))
+
+    # ── 2. Numeric conversion ──────────────────────────────────────
+    _force = numeric_hint or set()
+    for col in out.columns:
+        if out[col].dtype != object:
+            continue
+        non_null = out[col].dropna()
+        if non_null.empty:
+            continue
+
+        ambiguous: list = []
+        converted = non_null.map(
+            lambda v: parse_number(v, _warn_ambiguous=ambiguous, strict=True)
+        )
+        n_parsed = int(converted.notna().sum())
+        pct = n_parsed / len(non_null)
+
+        if col in _force or pct >= 0.6:
+            out[col] = out[col].map(
+                lambda v: parse_number(v, strict=True)
+            )
+            cols_converted.append(ColumnAction(
+                column=col,
+                action="converted_numeric",
+                detail=f"{n_parsed}/{len(non_null)} non-null values parsed ({pct:.0%})",
+                count=n_parsed,
+            ))
+            if ambiguous:
+                report_warnings.append(ColumnAction(
+                    column=col,
+                    action="flagged_ambiguous",
+                    detail=(
+                        f"Ambiguous values treated as EN thousands: "
+                        f"{ambiguous[:5]}"
+                    ),
+                    count=len(ambiguous),
+                ))
+
+    # ── 2b. Clinical plausibility correction (narrow, column-specific) ──
+    # Runs ONLY for the clinical columns listed in
+    # _CLINICAL_PLAUSIBILITY_RANGES.  Values already inside the
+    # plausible range (or NaN) are untouched; out-of-range values get
+    # one reinterpretation attempt (comma → decimal point) and are
+    # otherwise set to NaN.  Every action is logged via report_warnings.
+    _apply_clinical_plausibility(out, df, report_warnings)
+
+    # ── 3. Sparsity / constant-column analysis (report only) ──────
+    for col in out.columns:
+        miss_count = int(out[col].isna().sum())
+        miss_rate = miss_count / n_rows if n_rows > 0 else 0
+        if miss_rate > (1 - min_completion):
+            cols_dropped.append(ColumnAction(
+                column=col,
+                action="dropped_sparse",
+                detail=f"{miss_rate:.0%} missing ({miss_count}/{n_rows})",
+                count=miss_count,
+            ))
+        elif out[col].dropna().nunique() <= 1:
+            cols_dropped.append(ColumnAction(
+                column=col,
+                action="dropped_constant",
+                detail="\u22641 unique non-missing value",
+                count=0,
+            ))
+
+    # ── 4. Required-column check ──────────────────────────────────
+    if required_columns:
+        for col in sorted(required_columns):
+            if col not in out.columns:
+                required_failures.append(ColumnAction(
+                    column=col,
+                    action="required_missing",
+                    detail=f"Required column not found in data",
+                    count=0,
+                ))
+
+    report = IngestionReport(
+        columns_converted=cols_converted,
+        missing_normalized=missing_normalized,
+        columns_dropped=cols_dropped,
+        required_failures=required_failures,
+        warnings=report_warnings,
+        n_rows_input=len(df),
+        n_rows_output=n_rows,
+        n_columns_input=len(df.columns),
+        n_columns_output=len(out.columns),
+    )
+    return out, report
 
 
 def prepare_flat_dataset(source_path: str) -> PreparedData:
@@ -539,6 +1077,9 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
         else:
             data["_patient_key"] = pd.Series(range(len(data))).astype(str)
 
+    # ── Unified normalization ──
+    data, ingestion_report = normalize_dataframe(data, source_label="flat")
+
     exclude_cols = {
         "morte_30d",
         "Death",
@@ -588,7 +1129,7 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
         "positive_rate": float(pd.to_numeric(data["morte_30d"], errors="coerce").mean()),
         "source_type": "flat",
     }
-    return PreparedData(data=data, feature_columns=feature_columns, info=info)
+    return PreparedData(data=data, feature_columns=feature_columns, info=info, ingestion_report=ingestion_report)
 
 
 def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True) -> PreparedData:
@@ -679,6 +1220,9 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
     pre_post["euroscore_auto_sheet"] = pre_post["_patient_key"].map(eu_auto_series)
     pre_post["sts_score_sheet"] = pre_post["_patient_key"].map(sts_series)
 
+    # ── Unified normalization ──
+    pre_post, ingestion_report = normalize_dataframe(pre_post, source_label="master")
+
     pre_cols_exclude = {
         "Name",
         "Procedure Date",
@@ -733,4 +1277,4 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
         "available_optional_tables": [t for t in OPTIONAL_SOURCE_TABLES if t in tables],
     }
 
-    return PreparedData(data=pre_post, feature_columns=feature_columns, info=info)
+    return PreparedData(data=pre_post, feature_columns=feature_columns, info=info, ingestion_report=ingestion_report)

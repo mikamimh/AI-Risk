@@ -153,7 +153,7 @@ def build_model_metadata(
         "calibration": {
             "method": f"{calibration_method} (Platt scaling)" if calibration_method == "sigmoid" else calibration_method,
             "applied_to": "tree-based models (RandomForest, XGBoost, LightGBM, CatBoost)",
-            "oof_evaluation": "calibrated inside each CV fold (inner cv≤3, StratifiedKFold)",
+            "oof_evaluation": "calibrated inside each CV fold (RandomForest: sigmoid inner cv≤5; LightGBM/CatBoost: isotonic inner cv≤5; XGBoost: isotonic inner cv≤3)",
             "grouping_note": "inner calibration CV does not enforce patient grouping (sklearn limitation)",
         },
         "thresholds": {

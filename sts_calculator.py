@@ -19,7 +19,10 @@ import asyncio
 import json
 import re
 import html as html_mod
-from typing import Dict, Optional
+import logging
+import time
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -28,6 +31,19 @@ try:
     HAS_WEBSOCKETS = True
 except ImportError:
     HAS_WEBSOCKETS = False
+
+# Phase 2: persistent STS Score cache with revalidation and transparency.
+# The cache layer is optional — if it fails to import, calculate_sts and
+# calculate_sts_batch fall back to the legacy (uncached) behavior so the
+# app remains runnable.
+try:
+    import sts_cache as _sts_cache
+    HAS_STS_CACHE = True
+except Exception:  # pragma: no cover - fall back silently
+    _sts_cache = None  # type: ignore[assignment]
+    HAS_STS_CACHE = False
+
+_sts_log = logging.getLogger("sts_score.calculator")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -677,24 +693,89 @@ def _run_async(coro):
         return asyncio.run(coro)
 
 
-def calculate_sts(row: dict) -> Dict[str, float]:
-    """Calculate STS risk scores for a single patient row.
+def _sts_fetch_once(sts_input: dict) -> Dict[str, float]:
+    """Single fetch attempt against the STS Score WebSocket endpoint.
+
+    Returns an empty dict on any failure. Used as the ``fetch_func`` for
+    the STS Score cache layer, which owns retries and validation.
+    """
+    if not HAS_WEBSOCKETS:
+        return {}
+    try:
+        return _run_async(_query_sts_ws(sts_input)) or {}
+    except Exception:
+        return {}
+
+
+def calculate_sts(
+    row: dict,
+    patient_id: Optional[str] = None,
+    use_cache: bool = True,
+) -> Dict[str, float]:
+    """Calculate STS Score risk endpoints for a single patient row.
+
+    Phase 2: by default this routes through the persistent STS Score
+    cache (``sts_cache``). The cache handles:
+      - input hashing (clinically relevant STS Score fields only)
+      - 14-day TTL revalidation
+      - integration-version invalidation
+      - response validation + retry
+      - stale fallback to a previous valid entry
+      - structured execution logging
+
+    The return value remains the plain result dict so legacy callers
+    continue to work. The full structured ``ExecutionRecord`` is
+    appended to ``calculate_sts.last_execution_log`` for inspection.
 
     Args:
         row: dict with CSV column names or app display names.
+        patient_id: stable identifier for the patient (used for the
+            patient-level stale fallback index). May be None.
+        use_cache: if False, bypass the STS Score cache entirely
+            and perform a one-shot fetch (legacy behavior).
 
     Returns:
         Dict with keys like 'predmort', 'predmm', etc.
         Values are decimals (0.0646 = 6.46%).
-        Empty dict if the web calculator query fails.
+        Empty dict if the STS Score query failed and no fallback exists.
     """
     if not HAS_WEBSOCKETS:
         return {}
-    sts_input = build_sts_input_from_row(row)
+
     try:
-        return _run_async(_query_sts_ws(sts_input))
-    except Exception:
+        sts_input = build_sts_input_from_row(row)
+    except Exception as e:
+        _sts_log.warning("STS Score mapping_failure patient=%s: %s", patient_id, e)
+        if HAS_STS_CACHE:
+            calculate_sts.last_execution_log.append(
+                _sts_cache.make_failed_record(
+                    str(patient_id) if patient_id is not None else None,
+                    None,
+                    "build_input",
+                    f"mapping_failure: {e}",
+                )
+            )
         return {}
+
+    if not (use_cache and HAS_STS_CACHE):
+        try:
+            return _run_async(_query_sts_ws(sts_input))
+        except Exception:
+            return {}
+
+    record = _sts_cache.get_cached_or_fetch(
+        sts_input,
+        patient_id=patient_id,
+        fetch_func=_sts_fetch_once,
+        max_retries=2,
+    )
+    calculate_sts.last_execution_log.append(record)
+    return record.result
+
+
+# Execution log shared across calls to calculate_sts().
+# Callers (e.g. app.py) can read and clear this list as needed.
+calculate_sts.last_execution_log = []  # type: ignore[attr-defined]
 
 
 async def _calculate_sts_chunk_async(rows_with_indices: list, max_concurrent: int = 2, max_retries: int = 2, failure_log: list = None) -> dict:
@@ -743,24 +824,15 @@ async def _calculate_sts_chunk_async(rows_with_indices: list, max_concurrent: in
     return results
 
 
-def calculate_sts_batch(rows: list, progress_callback=None, chunk_size: int = 5) -> list:
-    """Calculate STS risk scores for a batch of patient rows.
+def _calculate_sts_batch_legacy(
+    rows: list,
+    progress_callback=None,
+    chunk_size: int = 5,
+) -> tuple:
+    """Legacy uncached batch path (preserved for use_cache=False).
 
-    Processes in small chunks so progress can be reported from the main thread
-    (avoids deadlock when Streamlit progress callbacks run from async threads).
-
-    Args:
-        rows: list of dicts, each with CSV column names or app display names.
-        progress_callback: optional callable(current, total) for progress tracking.
-        chunk_size: number of patients per async chunk.
-
-    Returns:
-        List of result dicts (same order as input).
-        If errors occur, the last error is stored in the `last_error` attribute.
+    Returns (results, last_error, failure_log).
     """
-    if not HAS_WEBSOCKETS:
-        return [{} for _ in rows]
-
     all_results: list = [{} for _ in rows]
     total = len(rows)
     done = 0
@@ -771,7 +843,9 @@ def calculate_sts_batch(rows: list, progress_callback=None, chunk_size: int = 5)
         chunk_end = min(chunk_start + chunk_size, total)
         chunk = [(i, rows[i]) for i in range(chunk_start, chunk_end)]
         try:
-            chunk_results = _run_async(_calculate_sts_chunk_async(chunk, failure_log=failure_log))
+            chunk_results = _run_async(
+                _calculate_sts_chunk_async(chunk, failure_log=failure_log)
+            )
             for idx, result in chunk_results.items():
                 all_results[idx] = result
         except Exception as e:
@@ -783,10 +857,241 @@ def calculate_sts_batch(rows: list, progress_callback=None, chunk_size: int = 5)
             except Exception:
                 pass
 
-    # Store diagnostics for display
+    return all_results, last_error, failure_log
+
+
+def calculate_sts_batch(
+    rows: list,
+    progress_callback=None,
+    chunk_size: int = 5,
+    patient_ids: Optional[List[Optional[str]]] = None,
+    use_cache: bool = True,
+) -> list:
+    """Calculate STS Score risk scores for a batch of patient rows.
+
+    Phase 2: by default this routes every row through the persistent
+    STS Score cache. The flow is:
+
+      1. Pre-check: compute each row's input hash and look it up on disk.
+         Rows with a valid, in-TTL, version-matching cached entry are
+         resolved immediately as ``cached`` without touching the network.
+      2. Fetch: the remaining rows are queried via the existing chunked
+         async WebSocket path (preserving first-run performance).
+      3. Post-process: each fetched result is validated; valid results
+         are persisted as ``fresh`` (or ``refreshed`` if an expired prior
+         entry existed). Invalid / missing results trigger the stale
+         fallback policy and produce a ``stale_fallback`` or ``failed``
+         execution record.
+
+    All per-row statuses are appended to
+    ``calculate_sts_batch.last_execution_log`` as ``ExecutionRecord``
+    objects. The returned list preserves input order and contains the
+    effective result dict for each row (possibly from a stale fallback,
+    or empty on total failure), keeping the existing call-site contract.
+
+    Args:
+        rows: list of dicts, each with CSV column names or app display names.
+        progress_callback: optional callable(current, total).
+        chunk_size: number of patients per async chunk (fetch path only).
+        patient_ids: optional list of stable per-row patient identifiers
+            (same length as ``rows``). Used for cross-hash stale fallback.
+        use_cache: if False, bypass the STS Score cache entirely and run
+            the legacy chunked async path (no hashing, no persistence,
+            no execution log).
+    """
+    # Reset public diagnostic attributes up front so the UI always sees
+    # the current call's state even on early returns.
+    calculate_sts_batch.last_error = None
+    calculate_sts_batch.failure_log = []
+    calculate_sts_batch.last_execution_log = []
+
+    if not HAS_WEBSOCKETS:
+        return [{} for _ in rows]
+
+    total = len(rows)
+    if total == 0:
+        return []
+
+    # Normalize patient_ids to the same length as rows.
+    pids: List[Optional[str]]
+    if patient_ids is None:
+        pids = [None] * total
+    else:
+        pids = list(patient_ids)
+        if len(pids) < total:
+            pids = pids + [None] * (total - len(pids))
+        elif len(pids) > total:
+            pids = pids[:total]
+
+    # --- Legacy path ---
+    if not (use_cache and HAS_STS_CACHE):
+        results, last_error, failure_log = _calculate_sts_batch_legacy(
+            rows, progress_callback=progress_callback, chunk_size=chunk_size
+        )
+        calculate_sts_batch.last_error = last_error
+        calculate_sts_batch.failure_log = failure_log
+        return results
+
+    # --- Cached path ---
+    results: list = [{} for _ in rows]
+    execution_log: list = []
+    failure_log: list = []
+    last_error: Optional[Exception] = None
+
+    # Phase A: cache pre-check (no network).
+    # Items in `pending` are (orig_idx, row, sts_input, input_hash, prior_entry, patient_id_str).
+    pending: list = []
+    for i, row in enumerate(rows):
+        pid = pids[i]
+        pid_str = str(pid) if pid is not None else None
+
+        if not row:
+            rec = _sts_cache.make_failed_record(
+                pid_str, None, "build_input", "empty_row"
+            )
+            execution_log.append(rec)
+            failure_log.append({
+                "idx": i, "patient_id": pid_str, "status": rec.status,
+                "stage": rec.stage, "reason": rec.reason,
+                "retry_attempted": False, "used_previous_cache": False,
+            })
+            continue
+
+        try:
+            sts_input = build_sts_input_from_row(row)
+        except Exception as e:
+            rec = _sts_cache.make_failed_record(
+                pid_str, None, "build_input", f"mapping_failure: {e}"
+            )
+            execution_log.append(rec)
+            failure_log.append({
+                "idx": i, "patient_id": pid_str, "status": rec.status,
+                "stage": rec.stage, "reason": rec.reason,
+                "retry_attempted": False, "used_previous_cache": False,
+            })
+            continue
+
+        try:
+            input_hash = _sts_cache.compute_input_hash(sts_input)
+        except Exception as e:
+            rec = _sts_cache.make_failed_record(
+                pid_str, None, "build_input", f"input_hash_error: {e}"
+            )
+            execution_log.append(rec)
+            failure_log.append({
+                "idx": i, "patient_id": pid_str, "status": rec.status,
+                "stage": rec.stage, "reason": rec.reason,
+                "retry_attempted": False, "used_previous_cache": False,
+            })
+            continue
+
+        entry = _sts_cache.load_entry(input_hash)
+        entry_usable = (
+            entry is not None
+            and entry.get("integration_version") == _sts_cache.STS_SCORE_INTEGRATION_VERSION
+            and _sts_cache.is_valid_result(entry.get("result"))
+            and not _sts_cache.is_expired(entry)
+        )
+        if entry_usable:
+            rec = _sts_cache.make_cache_hit_record(entry, pid_str, input_hash)
+            execution_log.append(rec)
+            if pid_str:
+                _sts_cache.remember_patient_hash(pid_str, input_hash)
+            results[i] = dict(entry.get("result") or {})
+            continue
+
+        pending.append((i, row, sts_input, input_hash, entry, pid_str))
+
+    # Report progress after the cache-only phase.
+    done_base = total - len(pending)
+    if progress_callback:
+        try:
+            progress_callback(done_base, total)
+        except Exception:
+            pass
+
+    # Phase B: fetch the pending rows using the existing chunked async path.
+    fetched: Dict[int, Dict[str, float]] = {}
+    if pending:
+        local_pairs = [
+            (local_i, pending[local_i][1]) for local_i in range(len(pending))
+        ]
+        inner_failure_log: list = []
+        for chunk_start in range(0, len(local_pairs), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(local_pairs))
+            chunk = local_pairs[chunk_start:chunk_end]
+            try:
+                chunk_results = _run_async(
+                    _calculate_sts_chunk_async(chunk, failure_log=inner_failure_log)
+                )
+                for local_i, result in chunk_results.items():
+                    fetched[local_i] = result or {}
+            except Exception as e:
+                last_error = e
+                _sts_log.warning("STS Score batch chunk error: %s", e)
+                for local_i, _ in chunk:
+                    fetched.setdefault(local_i, {})
+            if progress_callback:
+                try:
+                    progress_callback(done_base + chunk_end, total)
+                except Exception:
+                    pass
+
+    # Phase C: validate, persist, and classify each pending row.
+    for local_i, (orig_i, row, sts_input, input_hash, prior_entry, pid_str) in enumerate(pending):
+        result = fetched.get(local_i, {}) or {}
+        need_refresh = (
+            prior_entry is not None
+            and prior_entry.get("integration_version") == _sts_cache.STS_SCORE_INTEGRATION_VERSION
+            and _sts_cache.is_valid_result(prior_entry.get("result"))
+        )
+
+        if _sts_cache.is_valid_result(result):
+            _sts_cache.persist_fresh_result(sts_input, result, input_hash, pid_str)
+            rec = _sts_cache.make_fresh_record(
+                result, pid_str, input_hash,
+                refreshed=need_refresh, retry_attempted=True,
+            )
+            execution_log.append(rec)
+            results[orig_i] = dict(result)
+            continue
+
+        # Fetch failed -> stale fallback or total failure.
+        fallback_entry = _sts_cache.find_stale_fallback(
+            pid_str, input_hash, prior_entry
+        )
+        reason = "fetch_failed" if not result else "response_validation_failure"
+        if fallback_entry is not None:
+            rec = _sts_cache.make_stale_fallback_record(
+                fallback_entry, pid_str, input_hash, reason, retry_attempted=True,
+            )
+            execution_log.append(rec)
+            failure_log.append({
+                "idx": orig_i, "patient_id": pid_str, "status": rec.status,
+                "stage": rec.stage, "reason": rec.reason,
+                "retry_attempted": True, "used_previous_cache": True,
+            })
+            results[orig_i] = dict(fallback_entry.get("result") or {})
+            continue
+
+        rec = _sts_cache.make_failed_record(
+            pid_str, input_hash, "fetch",
+            f"{reason}; no fallback available", retry_attempted=True,
+        )
+        execution_log.append(rec)
+        failure_log.append({
+            "idx": orig_i, "patient_id": pid_str, "status": rec.status,
+            "stage": rec.stage, "reason": rec.reason,
+            "retry_attempted": True, "used_previous_cache": False,
+        })
+        results[orig_i] = {}
+
     calculate_sts_batch.last_error = last_error
     calculate_sts_batch.failure_log = failure_log
-    return all_results
+    calculate_sts_batch.last_execution_log = execution_log
+    return results
+
 
 calculate_sts_batch.last_error = None
 calculate_sts_batch.failure_log = []
+calculate_sts_batch.last_execution_log = []

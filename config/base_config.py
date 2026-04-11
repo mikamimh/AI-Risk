@@ -51,11 +51,16 @@ class AppConfig:
     MISSING_TOKENS = {
         "",
         "-",
+        "--",
         "nan",
         "none",
+        "na",
+        "n/a",
+        "null",
         "not applicable",
         "unknown",
         "not informed",
+        "não informado",
     }
     
     # ==== Required Data Structure ====
@@ -71,6 +76,17 @@ class AppConfig:
         "STS Score",
     ]
     
+    # ==== STS Score Cache (Phase 2: transparent caching + revalidation) ====
+    # Persistent on-disk cache so STS Score calculations are not a black box.
+    # The cache key is a hash of the clinically relevant STS Score input
+    # fields (exactly what would be sent to the STS Score website).  A
+    # cached entry is only returned if its STS_SCORE_INTEGRATION_VERSION
+    # matches and it is within the TTL window below.  Bumping
+    # STS_SCORE_INTEGRATION_VERSION invalidates every prior entry.
+    STS_SCORE_CACHE_DIR = APP_CACHE_DIR / "sts_score_cache"
+    STS_SCORE_CACHE_TTL_DAYS = 14
+    STS_SCORE_INTEGRATION_VERSION = "sts-score-v1-2026-04"
+
     # ==== Performance & Metrics ====
     N_BOOTSTRAP_SAMPLES = 2000
     BOOTSTRAP_SEED = 42

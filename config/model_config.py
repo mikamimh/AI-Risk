@@ -28,6 +28,19 @@ MODEL_HYPERPARAMS: Dict[str, Dict[str, Any]] = {
         "alpha": 1e-2,
         "learning_rate_init": 1e-3,
         "max_iter": 600,
+        # Early stopping prevents Adam from overtraining the sigmoid into
+        # saturation.  Defaults (validation_fraction=0.1, n_iter_no_change=10)
+        # were too aggressive on this 454-row dataset: the validation signal
+        # on ~36 held-out rows is noisy and the network was stopping after
+        # a handful of iterations before learning anything discriminative
+        # (AUC collapsed to ~0.52, effectively random).  Escalating to
+        # n_iter_no_change=30 and validation_fraction=0.2 gives Adam more
+        # patience on a less noisy validation signal while still avoiding
+        # the bimodal-saturation collapse the original no-early-stopping
+        # config produced.
+        "early_stopping": True,
+        "n_iter_no_change": 30,
+        "validation_fraction": 0.2,
         "random_state": AppConfig.RANDOM_SEED,
     },
 
