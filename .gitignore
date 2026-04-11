@@ -5,10 +5,8 @@ __pycache__/
 catboost_info/
 
 local_data/
-*.csv
-*.xlsx
-*.xls
-*.parquet
+exports/
+temp/
 
 *.joblib
 *.pkl
