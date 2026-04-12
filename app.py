@@ -2452,18 +2452,22 @@ if force_retrain:
         _train_progress = st.progress(0, text=tr(
             "Preparing data…", "Preparando dados…",
         ))
+        _train_last_phase: list = [""]  # [label] — updated at each phase transition
         def _train_progress_cb(phase, current, total, model_name):
             if phase == "loading_data":
+                _train_last_phase[0] = tr("loading and preparing dataset", "carregando e preparando dados")
                 _update_phase(_train_phase_slot, 1, 5, tr(
                     "loading and preparing dataset",
                     "carregando e preparando dados",
                 ))
             elif phase == "eligibility_done":
+                _train_last_phase[0] = tr("cohort eligibility", "elegibilidade da coorte")
                 _update_phase(_train_phase_slot, 2, 5, tr(
                     "cohort eligibility",
                     "elegibilidade da coorte",
                 ))
             elif phase == "cross_validation":
+                _train_last_phase[0] = tr("training candidate models", "treinando modelos candidatos")
                 _update_phase(_train_phase_slot, 3, 5, tr(
                     "training candidate models",
                     "treinando modelos candidatos",
@@ -2474,6 +2478,7 @@ if force_retrain:
                     f"Validação cruzada: {model_name} ({current + 1}/{total})",
                 ))
             elif phase == "final_fit":
+                _train_last_phase[0] = tr("training candidate models", "treinando modelos candidatos")
                 _update_phase(_train_phase_slot, 3, 5, tr(
                     "training candidate models",
                     "treinando modelos candidatos",
@@ -2484,6 +2489,7 @@ if force_retrain:
                     f"Treino final: {model_name} ({current + 1}/{total})",
                 ))
             elif phase == "selecting_best":
+                _train_last_phase[0] = tr("selecting best model", "selecionando melhor modelo")
                 _update_phase(_train_phase_slot, 3, 5, tr(
                     "selecting best model",
                     "selecionando melhor modelo",
@@ -2492,6 +2498,7 @@ if force_retrain:
                     "Selecting best model…", "Selecionando melhor modelo…",
                 ))
             elif phase == "euroscore_calc":
+                _train_last_phase[0] = tr("computing scores", "calculando escores")
                 _update_phase(_train_phase_slot, 4, 5, tr(
                     "computing scores",
                     "calculando escores",
@@ -2500,6 +2507,7 @@ if force_retrain:
                     "Computing EuroSCORE II…", "Calculando EuroSCORE II…",
                 ))
             elif phase == "sts_score_calc":
+                _train_last_phase[0] = tr("querying STS Score web calculator", "consultando calculadora web STS Score")
                 _update_phase(_train_phase_slot, 4, 5, tr(
                     "querying STS Score web calculator",
                     "consultando calculadora web STS Score",
@@ -2508,6 +2516,7 @@ if force_retrain:
                     "Querying STS Score…", "Consultando STS Score…",
                 ))
             elif phase == "building_reports":
+                _train_last_phase[0] = tr("building reports and bundle", "gerando relatórios e bundle")
                 _update_phase(_train_phase_slot, 5, 5, tr(
                     "building reports and bundle",
                     "gerando relatórios e bundle",
@@ -2523,6 +2532,11 @@ if force_retrain:
         _train_progress.progress(1.0, text=tr(
             "Training complete!", "Treinamento concluído!",
         ))
+        with st.expander(tr("View training execution details", "Ver detalhes de execução do treinamento"), expanded=False):
+            st.caption(tr(
+                f"Last phase: {_train_last_phase[0]} | Source: {_retrained_info.get('training_source', '?')}",
+                f"Última fase: {_train_last_phase[0]} | Fonte: {_retrained_info.get('training_source', '?')}",
+            ))
     except Exception as e:
         # Phase 3: if ingestion halted on a required-column error, the
         # exception carries a RunReport — render it so the user sees
@@ -4687,6 +4701,16 @@ elif _active_tab == 4:  # Batch & Export
                     f"AI Risk + EuroSCORE complete: {_n_total - _n_errors} OK, {_n_errors} errors",
                     f"AI Risk + EuroSCORE completo: {_n_total - _n_errors} OK, {_n_errors} erros",
                 ))
+                with st.expander(tr("View AI Risk + EuroSCORE execution details", "Ver detalhes de execução do AI Risk + EuroSCORE"), expanded=False):
+                    st.caption(tr(
+                        f"Processed: {_n_total} | OK: {_n_total - _n_errors} | Errors: {_n_errors}",
+                        f"Processados: {_n_total} | OK: {_n_total - _n_errors} | Erros: {_n_errors}",
+                    ))
+                    if _batch_ai_incidents:
+                        st.caption(tr(
+                            f"AI Risk incidents: {len(_batch_ai_incidents)} — see warning below for details.",
+                            f"Incidentes de AI Risk: {len(_batch_ai_incidents)} — veja o aviso abaixo para detalhes.",
+                        ))
 
                 # Surface per-patient AI Risk incidents (mirrors temporal validation UI).
                 if _batch_ai_incidents:
@@ -6003,6 +6027,15 @@ elif _active_tab == 9:  # Temporal Validation
 
                     _tv_progress.progress(1.0, text=tr("Done.", "Concluído."))
                     _tv_phase_slot.empty()
+                    with st.expander(tr("View execution details", "Ver detalhes de execução"), expanded=False):
+                        st.caption(tr(
+                            f"Cohort: {len(_tv_data)} patients | "
+                            f"AI Risk incidents: {len(_tv_ai_incidents) if _tv_ai_incidents else 0} | "
+                            f"STS Score: {'available' if _tv_sts_ok else 'not available'}",
+                            f"Coorte: {len(_tv_data)} pacientes | "
+                            f"Incidentes de AI Risk: {len(_tv_ai_incidents) if _tv_ai_incidents else 0} | "
+                            f"STS Score: {'disponível' if _tv_sts_ok else 'não disponível'}",
+                        ))
 
                     # ── Persist result state for tab-navigation session cache ──
                     # Saves only the computed data (no export bytes).  Export bytes

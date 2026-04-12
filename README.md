@@ -24,16 +24,18 @@ The app is organised as ten tabs in the following order:
 
 | # | Tab | Role |
 |:--|:--|:--|
-| 1 | **Overview** | Cohort summary, grouped surgery profile (descriptive mortality by surgery category), input-completeness indicator, and execution report for the current run |
-| 2 | **Prediction** | Single-patient scoring: AI Risk, EuroSCORE II and STS for one case with per-variable contributions |
-| 3 | **Batch & Export** | Full dataset with all three scores plus OOF predictions; XLSX/CSV download |
-| 4 | **Statistical Comparison** | Head-to-head comparison of AI Risk, EuroSCORE II and STS with bootstrap 95% CI, DeLong, DCA, NRI/IDI |
-| 5 | **Temporal Validation** | Split by procedure date to evaluate stability over time at the fixed 8% threshold |
+| 1 | **Overview** | Cohort summary, grouped surgery profile, model-version details, candidate-model leaderboard (calibrated OOF metrics and per-model Youden thresholds), eligibility flow, and execution report for the current run |
+| 2 | **Prediction** | Single-patient scoring: AI Risk, EuroSCORE II, and STS Score for one case with per-variable contributions |
+| 3 | **Batch & Export** | (a) Training dataset export with all three scores and OOF predictions (XLSX/CSV). (b) New-patient batch prediction: upload a clinical file, receive AI Risk + EuroSCORE II + STS Score per row, download CSV/XLSX/Markdown/PDF |
+| 4 | **Comparison** | Head-to-head statistical comparison of AI Risk, EuroSCORE II, and STS Score with bootstrap 95% CI, DeLong, DCA, NRI/IDI; export PDF/XLSX/CSV/Markdown |
+| 5 | **Temporal Validation** | Apply the frozen trained model to an independently uploaded patient cohort; computes AI Risk, EuroSCORE II, and STS Score; reports metrics at the fixed 8% threshold; export XLSX/CSV/PDF |
 | 6 | **Data Quality** | Missing-data audit, imputation tracking, valve-severity coverage |
-| 7 | **Models** | Leaderboard with calibrated OOF metrics and per-model Youden thresholds; force-select a candidate |
+| 7 | **Models** | Plain-language guide to how each candidate algorithm works — how it behaves, its strengths and limitations, and when it typically fails |
 | 8 | **Subgroups** | Performance stratified by clinically relevant subgroups |
-| 9 | **Analysis Guide** | Methodological notes, variable mapping, EuroSCORE II approximations |
-| 10 | **Variable Dictionary** | Structured dictionary of every variable consumed by the app |
+| 9 | **Guide** | Methodological notes, variable mapping, EuroSCORE II approximations; Methods text download (.txt) |
+| 10 | **Dictionary** | Structured dictionary of every variable consumed by the app; CSV download |
+
+**Model force-selection** is done via the sidebar selectbox (not in a dedicated tab). The sidebar also controls the display language (English / Portuguese).
 
 ## How each score is computed
 
@@ -50,11 +52,13 @@ The app is organised as ten tabs in the following order:
 - Valve severity variables: OrdinalEncoder with clinical order (None < Trivial < Mild < Moderate < Severe) — "None" means no disease, not missing data
 - Other categorical variables: mode imputation + TargetEncoder (smooth="auto")
 
+The same inference core (`ai_risk_inference.py`) is used by all three scoring contexts — individual prediction, batch new-patient prediction, and temporal validation — so the probability computed is identical regardless of how a patient reaches the model.
+
 ### EuroSCORE II
 
 - Calculated locally using the published logistic regression formula with 18 risk factors and 27 coefficients
 - Reference: Nashef et al., *Eur J Cardiothorac Surg*, 2012
-- Variables mapped from the available dataset; some approximations are documented in the Analysis Guide tab
+- Variables mapped from the available dataset; some approximations are documented in the Guide tab
 
 ### STS Score (STS Predicted Risk of Mortality)
 
@@ -82,12 +86,20 @@ The STS Score is obtained by **automated interaction with the official STS Risk 
 - The web interface may change without notice, potentially breaking the automation
 - For the dissertation, this should be described as "automated querying of the STS web calculator" rather than "official API"
 
-**Robustness of the STS fetch path:**
+**Robustness of the STS Score fetch path:**
 
-- **Cache:** every successful fetch is stored on disk keyed by the canonicalised patient payload, so reruns do not re-query the calculator for unchanged inputs
+The STS Score lookup uses a three-tier cache before making a network request:
+
+1. **In-memory cache** — a process-local dictionary keyed by canonicalised patient payload. Checked first on every call. Populated from disk hits (promotion) and successful fresh fetches. Survives tab navigation within the same Streamlit session; cleared on server restart. This eliminates redundant disk reads for patients already seen in the current session.
+2. **Persistent disk cache** — JSON files keyed by the same payload hash (TTL = 14 days). Survives server restarts. Successful disk hits are promoted to the in-memory layer.
+3. **Network fetch** — WebSocket connection to the STS calculator. Only reached when both cache layers miss.
+
+Additional reliability mechanisms:
 - **Retries:** each fetch is retried up to 4 times with back-off before being marked as failed (transient WebSocket errors account for most failures)
 - **Stale fallback:** if a fresh fetch fails but a previously cached value exists for the same payload, that stale value is reused and flagged as `stale_fallback` in the execution record
 - **Severity classification:** partial failures (one or more patients fail but usable results remain) are reported as **warnings**; only `n_usable == 0` or `fail_ratio ≥ 0.5` are reported as **blocking errors**
+
+After each STS Score batch run, a compact summary line is shown (Cache hits / Misses / Refreshed / Stale fallback / Failed) followed by a collapsible "View STS Score execution details" expander with the last phase label and any per-patient incidents.
 
 ## How to run
 
@@ -119,7 +131,7 @@ Required sheets/tables:
 Optional sheets/tables:
 - `EuroSCORE II` — pre-calculated EuroSCORE II values for reference
 - `EuroSCORE II Automático` — automatically calculated EuroSCORE II values
-- `STS Score` — pre-calculated STS values for reference/fallback
+- `STS Score` — pre-calculated STS Score values for reference/fallback
 
 ### Flat format (`.csv`, `.parquet`)
 
@@ -138,12 +150,11 @@ All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converg
 
 - Patient name and procedure date are used only for internal matching across sheets — never as predictors
 - AI Risk uses exclusively preoperative predictors, preventing temporal leakage
-- **All scores displayed are computed by the app** — EuroSCORE II from the published equation, STS via automated query to the web calculator. Values pre-existing in the input file are retained only as optional reference, not as the primary source
+- **All scores displayed are computed by the app** — EuroSCORE II from the published equation, STS Score via automated query to the web calculator. Values pre-existing in the input file are retained only as optional reference, not as the primary source
 - Missing data is handled via imputation; the app tracks and displays which variables were imputed
 - Input completeness is classified in 4 levels (complete, adequate, partial, low) based on clinical relevance of missing variables
 - Detailed valve measurements (AVA, MVA, PHT, gradients, Vena contracta) are optional and do not penalize the completeness indicator
 - BSA (body surface area) is auto-calculated using the DuBois formula
-- Statistical summary can be exported in PDF, XLSX, CSV, or Markdown
 - Model version, training metadata, and imputation details are recorded for auditability
 
 ## Project structure
@@ -155,8 +166,8 @@ All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converg
 | `risk_data.py` | Data loading, normalization, patient matching, feature engineering |
 | `modeling.py` | ML pipeline: preprocessing, training, candidate selection |
 | `euroscore.py` | EuroSCORE II formula implementation |
-| `sts_calculator.py` | STS Score WebSocket transport — connects to the STS calculator website |
-| `sts_cache.py` | STS Score cache and revalidation policy: TTL, versioning, stale fallback, patient index |
+| `sts_calculator.py` | STS Score WebSocket transport — connects to the STS calculator website; holds the process-local in-memory cache |
+| `sts_cache.py` | STS Score persistent disk cache: TTL, versioning, stale fallback, patient index, ExecutionRecord |
 | `observability.py` | Execution report: RunReport/RunStep data structures, builders, and Streamlit renderers |
 | `bundle_io.py` | Bundle serialization/deserialization (Streamlit module-reload safety) |
 | `subgroups.py` | Subgroup assignment (surgery type, LVEF, renal function) and per-subgroup metrics |
@@ -173,10 +184,43 @@ All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converg
 
 Each run is instrumented with a structured execution report surfaced in two places:
 
-- **Top compact status row** (sidebar / header) — one chip per phase (ingestion & normalization, cohort eligibility, model training, STS Score execution) with a single-glyph status: ✅ OK, ⚠️ warning, ❌ blocking error. A blocking error also displays an inline banner at the top of the page.
-- **Bottom detailed expander** ("Execution report") — per-step expanders with short summaries, raw counters (rows in / out, imputed, excluded, failed), and the list of incidents (e.g., patients for which the STS fetch failed) so the user can audit what happened in the current run.
+- **Compact status row** (near the top of the page, below the tab bar) — one chip per phase (ingestion & normalization, cohort eligibility, model training, STS Score execution) with a single-glyph status: ✅ OK, ⚠️ warning, ❌ blocking error. A blocking error also displays an inline banner.
+- **Detailed expander in the Overview tab** ("Execution report") — per-step expanders with short summaries, raw counters (rows in / out, imputed, excluded, failed), and the list of incidents (e.g., patients for which the STS Score fetch failed) so the user can audit what happened in the current run.
 
-Severity is classified independently of the Python exception layer: partial failures (e.g., some patients failing STS while usable results remain) are reported as **warnings** and do not block downstream analysis. Only `n_usable == 0` or `fail_ratio ≥ 0.5` is escalated to **blocking error**.
+Severity is classified independently of the Python exception layer: partial failures (e.g., some patients failing STS Score while usable results remain) are reported as **warnings** and do not block downstream analysis. Only `n_usable == 0` or `fail_ratio ≥ 0.5` is escalated to **blocking error**.
+
+## Progress transparency
+
+Long-running flows emit phased progress labels so the user always knows which stage is running:
+
+| Flow | Phases |
+|:--|:--|
+| Training / retraining | 1/5 loading and preparing dataset → 2/5 cohort eligibility → 3/5 training candidate models → 4/5 computing scores (EuroSCORE II / STS Score) → 5/5 building reports and bundle |
+| Batch new-patient prediction — local phase | 1/2 applying AI Risk + EuroSCORE II → 2/2 consolidating results |
+| Batch new-patient prediction — STS Score phase | 1/4 checking cache → 2/4 identifying misses → 3/4 querying web calculator → 4/4 validating and consolidating results |
+| Temporal validation | 1/5 loading cohort → 2/5 applying AI Risk model → 3/5 computing EuroSCORE II → 4/5 querying STS Score web calculator → 5/5 computing metrics and consolidating |
+
+Each phase is displayed as a caption below the progress bar ("Phase N/N: label"). The caption is cleared automatically when the flow completes. A collapsible execution-detail expander is shown after each major local flow completes, reporting the last phase reached and any relevant counts or incidents.
+
+## Session reuse
+
+Two results are preserved across tab navigation without recomputation:
+
+**STS Score in-memory cache** — the process-local cache in `sts_calculator.py` persists for the lifetime of the server process. Patients queried once in any flow (training, batch, temporal validation) are resolved from memory on every subsequent call in the same session, skipping both the disk read and the network round-trip.
+
+**Temporal validation session cache** — when the Temporal Validation tab has been run and the user navigates away and back, the app checks whether the current context (uploaded file identity, bundle save timestamp, selected model, threshold) matches the previously stored result via a 16-character SHA-256 context signature. If it matches, results are restored from `st.session_state` immediately without re-running AI Risk inference, EuroSCORE II, or STS Score queries. A notice is shown: "Temporal validation results restored from session — no recomputation performed. Click **Run temporal validation** to recompute." Results are recomputed when any context parameter changes.
+
+## Temporal validation behavior
+
+The Temporal Validation tab applies the frozen trained model to an **independently uploaded patient cohort**. It does not split the training dataset by date.
+
+- The user uploads a separate patient file (the temporal cohort)
+- The app checks that the temporal cohort does not chronologically overlap with the training cohort; if it does, the run button is disabled
+- The locked threshold (8% clinical default) is applied from training and is not recalculated
+- All three scores are computed: AI Risk (via the frozen model), EuroSCORE II, and STS Score (via the web calculator with the same cache path as other flows)
+- Performance metrics are reported at the fixed 8% threshold
+- Export options: XLSX (full results table), CSV (predictions), PDF (summary report)
+- Results persist in session state for tab-navigation reuse (see "Session reuse" above)
 
 ## Decision threshold
 
