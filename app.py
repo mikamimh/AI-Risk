@@ -4622,18 +4622,31 @@ elif _active_tab == 4:  # Batch & Export
                 # --- Phase 2: STS Score (routed through Phase 2 cache) ---
                 sts_probs = [np.nan] * len(results)
                 if HAS_STS and _include_sts:
+                    _sts_phase_slot = st.empty()
                     _sts_progress = st.progress(0, text=tr(
-                        f"Querying STS Score web calculator (with cache): 0/{_n_total}",
-                        f"Consultando calculadora web do STS Score (com cache): 0/{_n_total}",
+                        f"STS Score — Phase 1/4: checking cache: 0/{_n_total}",
+                        f"STS Score — Fase 1/4: verificando cache: 0/{_n_total}",
                     ))
+                    _sts_last_phase: list = ["", ""]  # [label, detail]
                     try:
+                        def _sts_phase_cb(phase_num, phase_total, label, detail=""):
+                            _sts_last_phase[0] = label
+                            _sts_last_phase[1] = detail
+                            try:
+                                _sts_phase_slot.caption(tr(
+                                    f"STS Score — Phase {phase_num}/{phase_total}: {label}",
+                                    f"STS Score — Fase {phase_num}/{phase_total}: {label}",
+                                ))
+                            except Exception:
+                                pass
+
                         def _sts_progress_cb(done, total):
                             try:
                                 _sts_progress.progress(
                                     done / max(total, 1),
                                     text=tr(
-                                        f"Querying STS Score web calculator (with cache): {done}/{total}",
-                                        f"Consultando calculadora web do STS Score (com cache): {done}/{total}",
+                                        f"STS Score: {done}/{total}",
+                                        f"STS Score: {done}/{total}",
                                     ),
                                 )
                             except Exception:
@@ -4642,8 +4655,10 @@ elif _active_tab == 4:  # Batch & Export
                         sts_results = calculate_sts_batch(
                             batch_rows_for_sts,
                             progress_callback=_sts_progress_cb,
+                            phase_callback=_sts_phase_cb,
                             patient_ids=_batch_pids,
                         )
+                        _sts_phase_slot.empty()  # clear phase label on completion
                         if sts_results:
                             for _ri, _sr in enumerate(sts_results):
                                 if isinstance(_sr, dict) and "predmort" in _sr:
@@ -4653,24 +4668,50 @@ elif _active_tab == 4:  # Batch & Export
                             f"STS Score complete: {_n_sts_ok}/{_n_total} resolved",
                             f"STS Score completo: {_n_sts_ok}/{_n_total} resolvidos",
                         ))
-                        # Phase 2: surface cache status summary for transparency.
+                        # Phase 3: compact cache status summary.
                         _sts_exec_log = getattr(calculate_sts_batch, 'last_execution_log', [])
-                        _sts_status_line = _sts_score_status_caption(_sts_exec_log)
-                        if _sts_status_line:
+                        _sts_fail_log = getattr(calculate_sts_batch, 'failure_log', [])
+                        _sts_hits = sum(1 for r in _sts_exec_log if getattr(r, 'status', '') == 'cached')
+                        _sts_fresh = sum(1 for r in _sts_exec_log if getattr(r, 'status', '') == 'fresh')
+                        _sts_refreshed = sum(1 for r in _sts_exec_log if getattr(r, 'status', '') == 'refreshed')
+                        _sts_stale = sum(1 for r in _sts_exec_log if getattr(r, 'status', '') == 'stale_fallback')
+                        _sts_failed_n = sum(1 for r in _sts_exec_log if getattr(r, 'status', '') == 'failed')
+                        st.caption(tr(
+                            f"STS Score — Cache hits: {_sts_hits} | Misses: {_sts_fresh} | "
+                            f"Refreshed: {_sts_refreshed} | Stale fallback: {_sts_stale} | Failed: {_sts_failed_n}",
+                            f"STS Score — Cache acertos: {_sts_hits} | Faltas: {_sts_fresh} | "
+                            f"Atualizados: {_sts_refreshed} | Fallback antigo: {_sts_stale} | Falhas: {_sts_failed_n}",
+                        ))
+                        # Phase 3: execution details expander.
+                        with st.expander(tr("View STS Score execution details", "Ver detalhes de execução do STS Score"), expanded=False):
                             st.caption(tr(
-                                f"STS Score cache status: {_sts_status_line}",
-                                f"Status do cache do STS Score: {_sts_status_line}",
+                                f"Last phase: {_sts_last_phase[0]} | Detail: {_sts_last_phase[1]}",
+                                f"Última fase: {_sts_last_phase[0]} | Detalhe: {_sts_last_phase[1]}",
                             ))
+                            if _sts_fail_log:
+                                st.markdown(tr("**Incidents:**", "**Incidentes:**"))
+                                for _sf in _sts_fail_log[:10]:
+                                    st.text(
+                                        f"patient={_sf.get('patient_id') or '?'} | "
+                                        f"status={_sf.get('status','?')} | stage={_sf.get('stage','?')} | "
+                                        f"reason={_sf.get('reason','?')}"
+                                    )
+                                if len(_sts_fail_log) > 10:
+                                    st.caption(tr(
+                                        f"... and {len(_sts_fail_log) - 10} more incidents",
+                                        f"... e mais {len(_sts_fail_log) - 10} incidentes",
+                                    ))
+                            else:
+                                st.caption(tr("No incidents.", "Nenhum incidente."))
                         if _n_sts_ok < _n_total:
-                            _fail_log = getattr(calculate_sts_batch, 'failure_log', [])
-                            if _fail_log:
+                            if _sts_fail_log:
                                 _fail_details = "\n".join(
                                     f"- **patient={f.get('patient_id') or '?'}** | "
                                     f"status={f.get('status','?')} | stage={f.get('stage','?')} | "
                                     f"reason={f.get('reason','?')} | "
                                     f"retry={f.get('retry_attempted', False)} | "
                                     f"used_previous_cache={f.get('used_previous_cache', False)}"
-                                    for f in _fail_log
+                                    for f in _sts_fail_log
                                 )
                                 st.warning(tr(
                                     f"STS Score resolved for {_n_sts_ok}/{_n_total} patients. Incidents:",
@@ -5572,6 +5613,25 @@ elif _active_tab == 9:  # Temporal Validation
                 # the user cannot accidentally publish retrograde results.
                 _tv_chrono_blocked = (sev == "error")
 
+                # ── Session-cache context signature ──
+                # Used to detect when the inputs have changed so cached results
+                # from a prior run are NOT reused for a different file/model/threshold.
+                import hashlib as _tv_hl
+                _tv_file_sig = getattr(_tv_file, "file_id", None) or f"{_tv_file.name}_{_tv_file.size}"
+                _tv_context_sig = _tv_hl.sha256(
+                    (
+                        f"{_tv_file_sig}|"
+                        f"{_tv_meta.get('bundle_saved_at', '')}|"
+                        f"{forced_model}|"
+                        f"{_tv_locked_threshold:.6f}"
+                    ).encode()
+                ).hexdigest()[:16]
+                _tv_has_cached = (
+                    not _tv_chrono_blocked
+                    and "_tv_result" in st.session_state
+                    and st.session_state.get("_tv_result_sig") == _tv_context_sig
+                )
+
                 # ── 5. Run button ──
                 st.divider()
                 if _tv_chrono_blocked:
@@ -5665,14 +5725,38 @@ elif _active_tab == 9:  # Temporal Validation
                     # ── 5.3 STS Score (routed through Phase 2 cache) ──
                     _tv_data["sts_score"] = np.nan
                     _tv_sts_ok = False
+                    _tv_exec_log: list = []      # overwritten below if HAS_STS
+                    _tv_sts_status: str = ""     # overwritten below if HAS_STS
+                    _tv_fail_log: list = []      # overwritten below if HAS_STS
                     if HAS_STS:
-                        _tv_progress.progress(0.50, text=tr("Querying STS Score web calculator (with cache)...", "Consultando calculadora web do STS Score (com cache)..."))
+                        _tv_sts_phase_slot = st.empty()
+                        _tv_progress.progress(0.50, text=tr(
+                            "STS Score — Phase 1/4: checking cache...",
+                            "STS Score — Fase 1/4: verificando cache...",
+                        ))
+                        def _tv_sts_phase_cb(phase_num, phase_total, label, detail=""):
+                            try:
+                                _tv_sts_phase_slot.caption(tr(
+                                    f"STS Score — Phase {phase_num}/{phase_total}: {label}",
+                                    f"STS Score — Fase {phase_num}/{phase_total}: {label}",
+                                ))
+                                _tv_progress.progress(
+                                    0.50 + 0.28 * (phase_num / phase_total),
+                                    text=tr(
+                                        f"STS Score — Phase {phase_num}/{phase_total}: {label}",
+                                        f"STS Score — Fase {phase_num}/{phase_total}: {label}",
+                                    ),
+                                )
+                            except Exception:
+                                pass
                         try:
                             _tv_sts_rows = _tv_data.to_dict(orient="records")
                             _tv_sts_pids = _sts_score_patient_ids(_tv_sts_rows)
                             _tv_sts_results = calculate_sts_batch(
                                 _tv_sts_rows, patient_ids=_tv_sts_pids,
+                                phase_callback=_tv_sts_phase_cb,
                             )
+                            _tv_sts_phase_slot.empty()
                             if _tv_sts_results:
                                 _tv_data["sts_score"] = [r.get("predmort", np.nan) for r in _tv_sts_results]
                                 _tv_sts_ok = _tv_data["sts_score"].notna().sum() > 0
@@ -5802,6 +5886,69 @@ elif _active_tab == 9:  # Temporal Validation
                     }
 
                     _tv_progress.progress(1.0, text=tr("Done.", "Concluído."))
+
+                    # ── Persist result state for tab-navigation session cache ──
+                    # Saves only the computed data (no export bytes).  Export bytes
+                    # are cheaply rebuilt from this data in the display section.
+                    st.session_state["_tv_result"] = {
+                        "data": _tv_data.copy(),
+                        "perf": _tv_perf,
+                        "pairwise": _tv_pairwise,
+                        "risk_cat": _tv_risk_cat,
+                        "calib_df": _tv_calib_df,
+                        "cohort_summary": dict(_tv_cohort_summary),
+                        "score_cols": list(_tv_score_cols),
+                        "rename": dict(_tv_rename),
+                        "sts_ok": bool(_tv_sts_ok),
+                        "ai_incidents": list(_tv_ai_incidents) if _tv_ai_incidents else [],
+                        "exec_log": _tv_exec_log,
+                        "sts_status": str(_tv_sts_status),
+                        "fail_log": list(_tv_fail_log) if _tv_fail_log else [],
+                        "locked_threshold": float(_tv_locked_threshold),
+                    }
+                    st.session_state["_tv_result_sig"] = _tv_context_sig
+
+                # ── Display results (runs on fresh compute OR valid session cache) ──
+                if _tv_run or _tv_has_cached:
+                    if _tv_has_cached and not _tv_run:
+                        # Restore computed state from session — no recomputation.
+                        _saved = st.session_state["_tv_result"]
+                        _tv_data = _saved["data"].copy()
+                        _tv_perf = _saved["perf"]
+                        _tv_pairwise = _saved["pairwise"]
+                        _tv_risk_cat = _saved["risk_cat"]
+                        _tv_calib_df = _saved["calib_df"]
+                        _tv_cohort_summary = _saved["cohort_summary"]
+                        _tv_score_cols = _saved["score_cols"]
+                        _tv_rename = _saved["rename"]
+                        _tv_sts_ok = _saved["sts_ok"]
+                        _tv_ai_incidents = _saved.get("ai_incidents", [])
+                        _tv_exec_log = _saved.get("exec_log", [])
+                        _tv_sts_status = _saved.get("sts_status", "")
+                        _tv_fail_log = _saved.get("fail_log", [])
+                        _tv_locked_threshold = _saved.get("locked_threshold", _tv_locked_threshold)
+                        st.success(tr(
+                            "Temporal validation results restored from session — "
+                            "no recomputation performed. "
+                            "Click **Run temporal validation** to recompute.",
+                            "Resultados da validação temporal restaurados da sessão — "
+                            "nenhuma recomputação realizada. "
+                            "Clique em **Executar validação temporal** para recomputar.",
+                        ))
+                        if _tv_ai_incidents:
+                            st.warning(tr(
+                                f"AI Risk inference incidents (temporal validation): "
+                                f"{len(_tv_ai_incidents)} patient(s) had issues on last run.",
+                                f"Incidentes de inferência do AI Risk (validação temporal): "
+                                f"{len(_tv_ai_incidents)} paciente(s) com problemas na última execução.",
+                            ))
+                        if _tv_fail_log:
+                            st.warning(tr(
+                                f"STS Score incidents (temporal validation): "
+                                f"{len(_tv_fail_log)} patient(s) had issues on last run.",
+                                f"Incidentes do STS Score (validação temporal): "
+                                f"{len(_tv_fail_log)} paciente(s) com problemas na última execução.",
+                            ))
 
                     # ── 7. Display results ──
                     st.divider()
@@ -6142,28 +6289,13 @@ elif _active_tab == 9:  # Temporal Validation
                         "md": _tv_md_bytes,
                     }
 
-                    # Log audit
-                    log_analysis(
-                        analysis_type="temporal_validation",
-                        source_file=_tv_file.name,
-                        model_version=MODEL_VERSION,
-                        n_patients=_tv_n,
-                        extra={
-                            "n_events": _tv_events,
-                            "event_rate": round(_tv_rate, 4),
-                            "validation_date_range": f"{_tv_val_start} — {_tv_val_end}",
-                            "sts_available": _tv_sts_ok,
-                        },
-                    )
-
-                if "_tv_exports" in st.session_state:
-                    _tve = st.session_state["_tv_exports"]
-                    st.divider()
-                    st.markdown(tr("### Export results", "### Exportar resultados"))
+                    # Download buttons — rendered here for both fresh runs and
+                    # session-cache restores so the user never has to recompute
+                    # just to download.
                     _ex_c1, _ex_c2, _ex_c3, _ex_c4 = st.columns(4)
                     with _ex_c1:
                         _bytes_download_btn(
-                            _tve["xlsx"],
+                            _tv_xlsx_bytes,
                             "temporal_validation_summary.xlsx",
                             tr("Download XLSX", "Baixar XLSX"),
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -6171,16 +6303,16 @@ elif _active_tab == 9:  # Temporal Validation
                         )
                     with _ex_c2:
                         _bytes_download_btn(
-                            _tve["csv"],
+                            _tv_csv_bytes,
                             "temporal_validation_predictions.csv",
                             tr("Download CSV", "Baixar CSV"),
                             "text/csv",
                             key="dl_tv_csv",
                         )
                     with _ex_c3:
-                        if _tve["pdf"]:
+                        if _tv_pdf_bytes:
                             _bytes_download_btn(
-                                _tve["pdf"],
+                                _tv_pdf_bytes,
                                 "temporal_validation_report.pdf",
                                 tr("Download PDF", "Baixar PDF"),
                                 "application/pdf",
@@ -6190,11 +6322,26 @@ elif _active_tab == 9:  # Temporal Validation
                             st.caption(tr("PDF export requires fpdf library.", "Exportação PDF requer biblioteca fpdf."))
                     with _ex_c4:
                         _bytes_download_btn(
-                            _tve["md"],
+                            _tv_md_bytes,
                             "temporal_validation_report.md",
                             tr("Download Markdown", "Baixar Markdown"),
                             "text/markdown",
                             key="dl_tv_md",
+                        )
+
+                    if _tv_run:
+                        # Log audit — only on fresh computation, not cache restores.
+                        log_analysis(
+                            analysis_type="temporal_validation",
+                            source_file=_tv_file.name,
+                            model_version=MODEL_VERSION,
+                            n_patients=_tv_n,
+                            extra={
+                                "n_events": _tv_events,
+                                "event_rate": round(_tv_rate, 4),
+                                "validation_date_range": f"{_tv_val_start} — {_tv_val_end}",
+                                "sts_available": _tv_sts_ok,
+                            },
                         )
 
 # ── Footer ──

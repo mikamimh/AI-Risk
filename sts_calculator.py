@@ -43,6 +43,16 @@ except Exception:  # pragma: no cover - fall back silently
     _sts_cache = None  # type: ignore[assignment]
     HAS_STS_CACHE = False
 
+# Phase 3: in-memory/session STS Score cache.
+# Lookup order within calculate_sts_batch:
+#   1. in-memory  (this dict)
+#   2. persistent disk cache  (sts_cache.py)
+#   3. network fetch via WebSocket
+# Keyed by input_hash; stores the full entry dict so make_cache_hit_record
+# works without modification.  Process-local — does NOT persist across server
+# restarts, but DOES survive tab navigation within the same Streamlit session.
+_sts_memory_cache: Dict[str, dict] = {}
+
 _sts_log = logging.getLogger("sts_score.calculator")
 
 # ---------------------------------------------------------------------------
@@ -863,6 +873,7 @@ def _calculate_sts_batch_legacy(
 def calculate_sts_batch(
     rows: list,
     progress_callback=None,
+    phase_callback=None,
     chunk_size: int = 5,
     patient_ids: Optional[List[Optional[str]]] = None,
     use_cache: bool = True,
@@ -872,9 +883,9 @@ def calculate_sts_batch(
     Phase 2: by default this routes every row through the persistent
     STS Score cache. The flow is:
 
-      1. Pre-check: compute each row's input hash and look it up on disk.
-         Rows with a valid, in-TTL, version-matching cached entry are
-         resolved immediately as ``cached`` without touching the network.
+      1. Pre-check: compute each row's input hash and look it up first in the
+         in-memory session cache, then on disk.  Rows already resolved are
+         returned immediately as ``cached`` without touching the network.
       2. Fetch: the remaining rows are queried via the existing chunked
          async WebSocket path (preserving first-run performance).
       3. Post-process: each fetched result is validated; valid results
@@ -892,6 +903,10 @@ def calculate_sts_batch(
     Args:
         rows: list of dicts, each with CSV column names or app display names.
         progress_callback: optional callable(current, total).
+        phase_callback: optional callable(phase_num, phase_total, label, detail)
+            fired at each major phase transition (1-based; phase_total == 4).
+            Phases: 1=checking cache, 2=identifying misses, 3=querying web,
+            4=validating and consolidating.
         chunk_size: number of patients per async chunk (fetch path only).
         patient_ids: optional list of stable per-row patient identifiers
             (same length as ``rows``). Used for cross-hash stale fallback.
@@ -939,7 +954,13 @@ def calculate_sts_batch(
     last_error: Optional[Exception] = None
 
     # Phase A: cache pre-check (no network).
+    # Lookup order: 1. in-memory/session cache  2. persistent disk cache
     # Items in `pending` are (orig_idx, row, sts_input, input_hash, prior_entry, patient_id_str).
+    if phase_callback is not None:
+        try:
+            phase_callback(1, 4, "checking cache", f"0/{total} checked")
+        except Exception:
+            pass
     pending: list = []
     for i, row in enumerate(rows):
         pid = pids[i]
@@ -985,6 +1006,17 @@ def calculate_sts_batch(
             })
             continue
 
+        # 1. In-memory/session cache (fastest path — skips JSON file read).
+        mem_entry = _sts_memory_cache.get(input_hash)
+        if mem_entry is not None:
+            rec = _sts_cache.make_cache_hit_record(mem_entry, pid_str, input_hash)
+            execution_log.append(rec)
+            if pid_str:
+                _sts_cache.remember_patient_hash(pid_str, input_hash)
+            results[i] = dict(mem_entry.get("result") or {})
+            continue
+
+        # 2. Persistent disk cache.
         entry = _sts_cache.load_entry(input_hash)
         entry_usable = (
             entry is not None
@@ -993,6 +1025,7 @@ def calculate_sts_batch(
             and not _sts_cache.is_expired(entry)
         )
         if entry_usable:
+            _sts_memory_cache[input_hash] = entry  # promote to in-memory cache
             rec = _sts_cache.make_cache_hit_record(entry, pid_str, input_hash)
             execution_log.append(rec)
             if pid_str:
@@ -1004,6 +1037,15 @@ def calculate_sts_batch(
 
     # Report progress after the cache-only phase.
     done_base = total - len(pending)
+    if phase_callback is not None:
+        try:
+            phase_callback(
+                2, 4, "identifying cache misses",
+                f"{done_base} cache hit{'s' if done_base != 1 else ''}, "
+                f"{len(pending)} miss{'es' if len(pending) != 1 else ''}",
+            )
+        except Exception:
+            pass
     if progress_callback:
         try:
             progress_callback(done_base, total)
@@ -1011,6 +1053,14 @@ def calculate_sts_batch(
             pass
 
     # Phase B: fetch the pending rows using the existing chunked async path.
+    if phase_callback is not None:
+        try:
+            phase_callback(
+                3, 4, "querying web calculator",
+                f"{len(pending)} patient{'s' if len(pending) != 1 else ''} to fetch",
+            )
+        except Exception:
+            pass
     fetched: Dict[int, Dict[str, float]] = {}
     if pending:
         local_pairs = [
@@ -1038,6 +1088,14 @@ def calculate_sts_batch(
                     pass
 
     # Phase C: validate, persist, and classify each pending row.
+    if phase_callback is not None:
+        try:
+            phase_callback(
+                4, 4, "validating and consolidating results",
+                f"{len(fetched)} result{'s' if len(fetched) != 1 else ''} fetched",
+            )
+        except Exception:
+            pass
     for local_i, (orig_i, row, sts_input, input_hash, prior_entry, pid_str) in enumerate(pending):
         result = fetched.get(local_i, {}) or {}
         need_refresh = (
@@ -1048,6 +1106,14 @@ def calculate_sts_batch(
 
         if _sts_cache.is_valid_result(result):
             _sts_cache.persist_fresh_result(sts_input, result, input_hash, pid_str)
+            # Promote fresh result to in-memory cache for subsequent lookups
+            # within the same session without a disk read.
+            _sts_memory_cache[input_hash] = {
+                "input_hash": input_hash,
+                "integration_version": _sts_cache.STS_SCORE_INTEGRATION_VERSION,
+                "result": dict(result),
+                "created_ts": time.time(),
+            }
             rec = _sts_cache.make_fresh_record(
                 result, pid_str, input_hash,
                 refreshed=need_refresh, retry_attempted=True,
