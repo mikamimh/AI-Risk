@@ -4,21 +4,21 @@
 
 ### risk_data.py
 
-#### `prepare_master_dataset(xlsx_path: str) -> PreparedDataset`
-Load and prepare data from Excel source.
+#### `prepare_master_dataset(source) -> PreparedData`
+Load and prepare data from any supported source format.
 
 **Parameters:**
-- `xlsx_path` (str): Path to Excel file with required sheets
+- `source`: Path to an `.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, or `.parquet` file
 
 **Returns:**
-- `PreparedDataset` dataclass containing:
+- `PreparedData` dataclass containing:
   - `data`: Prepared DataFrame with matched records
   - `feature_columns`: List of feature column names
   - `info`: Dictionary with preparation statistics
 
 **Raises:**
-- `FileNotFoundError`: If file doesn't exist
-- `ValueError`: If required sheets missing or no matching records
+- `FileNotFoundError`: If file does not exist
+- `ValueError`: If required sheets are missing or no matching records are found
 
 **Example:**
 ```python
@@ -294,6 +294,141 @@ class TrainedArtifacts:
     fitted_models: Dict[str, Pipeline]    # All trained models
     best_model_name: str                  # Name of best
 ```
+
+---
+
+### sts_calculator.py
+
+**STS Score acquisition via WebSocket automation.**
+
+The module queries the official STS Risk Calculator (`acsdriskcalc.research.sts.org`) via its WebSocket/Shiny interface. This is not a documented public API — it automates the same web calculator that clinicians use manually.
+
+Key behaviours:
+- Results are cached on disk, keyed by canonicalized patient payload. A cache hit skips the network query entirely.
+- Each patient is retried up to 4 times with back-off before being marked as failed.
+- If all retries fail but a prior cached value exists, it is returned and flagged as `stale_fallback` in the execution record.
+- Severity: partial failures (some patients fail, usable results remain) → warning; `n_usable == 0` or `fail_ratio ≥ 0.5` → blocking error.
+
+**Supported procedures:** Isolated CABG, Isolated AVR, Isolated MVR, AVR+CABG, MVR+CABG, MV Repair, MV Repair+CABG.
+
+---
+
+### ai_risk_inference.py
+
+**Frozen-model inference core. No Streamlit dependencies.**
+
+All three inference flows (individual, batch, temporal validation) route through this module. The frozen pipeline (`predict_proba`) is never retrained or recalibrated after the bundle is saved.
+
+---
+
+#### `_run_ai_risk_inference_row(*, model_pipeline, feature_columns, reference_df, row_dict, patient_id, numeric_cols, language) -> dict`
+Unified per-row inference. Encapsulates input assembly, dtype alignment, feature cleaning, prediction, and completeness assessment.
+
+**Returns dict with keys:**
+- `probability` — float, or `None` on failure
+- `completeness` — dict from `assess_input_completeness`, or `None` on failure
+- `incident` — `None` on success; `{"patient_id", "stage", "reason"}` on failure
+- `model_input` — cleaned DataFrame passed to `predict_proba`, or `None` on failure
+
+---
+
+#### `apply_frozen_model_to_temporal_cohort(*, model_pipeline, feature_columns, reference_df, temporal_data, language, progress_callback) -> dict`
+Row-level inference over a prepared temporal cohort DataFrame.
+
+**Parameters:**
+- `temporal_data`: DataFrame already processed by `prepare_master_dataset`
+- `progress_callback`: optional `callback(i, n)` for driving a Streamlit progress bar
+
+**Returns dict with keys:**
+- `probabilities` — list of floats, `NaN` for failed rows
+- `completeness` — list of level strings
+- `incidents` — list of `{patient_id, stage, reason}` dicts
+- `n_total`, `n_failed` — integers
+
+---
+
+#### `_build_input_row(feature_columns, form) -> pd.DataFrame`
+Assembles a single-row DataFrame from a raw input dict. Handles truncated column names (Excel export artefact), derives combined-surgery flags, and fills categorical defaults for boolean comorbidities.
+
+---
+
+#### `_align_input_to_training_schema(input_df, reference_df) -> pd.DataFrame`
+Coerces column dtypes to match the training-time schema (numeric coercion with symbol stripping; categorical casting).
+
+---
+
+#### `_get_numeric_columns_from_pipeline(model_pipeline) -> set`
+Extracts the set of numeric column names from a trained sklearn Pipeline's `prep` step.
+
+---
+
+#### `_patient_identifier_from_row(row_dict, fallback_index) -> str`
+Returns the best-effort patient identifier for incident reporting. Checks `Name`, `Nome`, `_patient_key`; falls back to `row_{fallback_index + 1}`.
+
+---
+
+### export_helpers.py
+
+**Pure statistical summary export helpers. No project-level imports.**
+
+---
+
+#### `build_statistical_summary(triple_ci, calib_df, formal_df, delong_df, reclass_df, threshold, threshold_metrics, n_triple, model_version, language) -> str`
+Assembles a Markdown statistical report from input DataFrames. Returns a single Markdown string with section headers and tables.
+
+---
+
+#### `statistical_summary_to_dataframes(md_text) -> Dict[str, pd.DataFrame]`
+Parses a Markdown summary into a `dict` of DataFrames (one per section/table).
+
+---
+
+#### `statistical_summary_to_xlsx(md_text) -> bytes`
+Converts the Markdown summary to XLSX bytes. Each section becomes a separate worksheet.
+
+---
+
+#### `statistical_summary_to_csv(md_text) -> str`
+Converts the Markdown summary to a CSV string. All sections are concatenated with section-header comments.
+
+---
+
+#### `statistical_summary_to_pdf(md_text) -> bytes`
+Converts the Markdown summary to PDF bytes. Requires `fpdf2`. Returns `b""` if `fpdf2` is not installed.
+
+---
+
+### temporal_validation.py
+
+**Temporal cohort helpers. No Streamlit dependencies.**
+
+---
+
+#### `extract_year_quarter_range(data: pd.DataFrame) -> tuple`
+Returns `(start, end)` year-quarter strings derived from `surgery_year` / `surgery_quarter` columns. Format: `"2024-Q1"` or `"Unknown"` when columns are absent.
+
+---
+
+#### `check_temporal_overlap(training_start, training_end, validation_start, validation_end) -> dict`
+Compares training and validation temporal ranges. Accepts `"2024-Q1"` or plain year strings.
+
+**Returns dict with keys:** `overlap` (bool), `status`, `severity`, `message_en`, `message_pt`.
+
+Status values:
+- `no_overlap` — validation strictly after training (ideal); severity: `success`
+- `overlap` — periods overlap; severity: `warning`
+- `validation_before_training` — retrograde validation; severity: `error`
+- `unknown` — could not parse one or more ranges; severity: `warning`
+
+---
+
+#### `format_locked_model_for_display(metadata, language) -> pd.DataFrame`
+Formats locked-model metadata as a two-column (Property / Value) DataFrame for display in the Temporal Validation tab.
+
+---
+
+#### `build_temporal_validation_summary(cohort_summary, performance_df, pairwise_df, calibration_df, risk_category_df, metadata, threshold, language) -> str`
+Builds a Markdown report for temporal validation results, including cohort summary, discrimination/calibration tables, pairwise comparison, and risk category distribution.
 
 ---
 

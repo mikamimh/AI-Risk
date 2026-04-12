@@ -150,14 +150,17 @@ All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converg
 
 | File | Role |
 |:--|:--|
-| `app.py` | Streamlit application (UI, orchestration) |
-| `risk_data.py` | Data loading, validation, matching, feature engineering |
-| `modeling.py` | ML pipeline: preprocessing, training, model selection |
+| `app.py` | Streamlit application (UI, orchestration, 10 tabs) |
+| `ai_risk_inference.py` | Frozen-model inference core shared by individual, batch, and temporal flows |
+| `risk_data.py` | Data loading, normalization, patient matching, feature engineering |
+| `modeling.py` | ML pipeline: preprocessing, training, candidate selection |
 | `euroscore.py` | EuroSCORE II formula implementation |
-| `sts_calculator.py` | STS web calculator automation via WebSocket |
+| `sts_calculator.py` | STS Score acquisition via WebSocket automation, disk cache, retry logic |
 | `explainability.py` | SHAP-based model explainability |
 | `stats_compare.py` | Statistical evaluation and model comparison |
-| `model_metadata.py` | Model versioning, audit trail, individual reports, export (PDF/XLSX/CSV) |
+| `model_metadata.py` | Model versioning, audit trail, individual reports; re-exports from export_helpers and temporal_validation |
+| `export_helpers.py` | Statistical summary export: Markdown → XLSX / CSV / PDF |
+| `temporal_validation.py` | Temporal cohort helpers: year-quarter range, overlap check, locked-model display, Markdown summary |
 | `variable_dictionary.py` | Structured variable dictionary for documentation |
 | `config/` | Centralized configuration and hyperparameters |
 

@@ -5,7 +5,7 @@
 ### 1. Clone and Install
 ```bash
 git clone <repository>
-cd "IA Risk - Claude"
+cd "AI Risk"
 
 # Create virtual environment
 python -m venv venv
@@ -22,16 +22,22 @@ pip install pytest pytest-cov black flake8 mypy
 
 ### 2. Project Structure
 ```
-├── app.py                    # Main Streamlit app
-├── modeling.py               # ML training
-├── risk_data.py              # Data loading/prep
-├── euroscore.py              # EuroSCORE II
-├── stats_compare.py          # Statistical tests
+├── app.py                    # Main Streamlit app (UI, orchestration)
+├── ai_risk_inference.py      # Frozen-model inference core (no Streamlit deps)
+├── modeling.py               # ML training and candidate selection
+├── risk_data.py              # Data loading, normalization, feature engineering
+├── euroscore.py              # EuroSCORE II formula
+├── sts_calculator.py         # STS Score WebSocket automation + disk cache
+├── stats_compare.py          # Statistical evaluation and comparison
 ├── explainability.py         # SHAP integration
+├── model_metadata.py         # Versioning, audit trail, metadata; re-exports
+├── export_helpers.py         # Statistical summary export (Markdown/XLSX/CSV/PDF)
+├── temporal_validation.py    # Temporal cohort helpers
+├── variable_dictionary.py    # Structured variable reference
 │
 ├── config/
 │   ├── __init__.py
-│   ├── base_config.py        # App configuration
+│   ├── base_config.py        # App configuration (AppConfig)
 │   └── model_config.py       # ML hyperparameters
 │
 ├── docs/                     # Documentation

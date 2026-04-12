@@ -31,17 +31,18 @@ Browser should open automatically at `http://localhost:8501`
 
 1. **Machine Learning (AI Risk)**
    - Trained on your institutional data
-   - 7 candidate models (LogisticRegression, RandomForest, XGBoost, LightGBM, CatBoost, MLP, StackingEnsemble)
-   - Automatic model selection via grouped cross-validation
+   - 6 candidate models (LogisticRegression, RandomForest, XGBoost, LightGBM, CatBoost, StackingEnsemble)
+   - Automatic model selection via grouped cross-validation with clinical-usability guardrails
    
 2. **EuroSCORE II**
-   - Published risk prediction model
-   - 27 clinical variables
-   - Validated across European cohorts
+   - Published risk prediction model (Nashef et al., 2012)
+   - 18 risk factors, 27 coefficients
+   - Computed locally from the published formula
 
-3. **STS (Society of Thoracic Surgeons)**
-   - Operative mortality risk
-   - Hybrid workflow (sheet + manual entry)
+3. **STS Score (Society of Thoracic Surgeons)**
+   - STS Adult Cardiac Surgery Predicted Risk of Mortality
+   - Obtained via automated querying of the official STS web calculator (WebSocket/Shiny interface)
+   - Cached on disk per patient; retried up to 4 times on failure; stale fallback if prior cache exists
 
 All three predictions are **compared statistically** on your data.
 
@@ -79,31 +80,48 @@ All three predictions are **compared statistically** on your data.
 ### System Layers
 
 ```
-┌─────────────────────────────────┐
-│  Streamlit UI (app.py)          │  ← User interface, dashboards
-├─────────────────────────────────┤
-│  Core Processing Layer          │
-│  • modeling.py (ML)             │  ← Model training & selection
-│  • risk_data.py (Data)          │  ← Loading & preparation
-│  • stats_compare.py (Stats)     │  ← Statistical analysis
-│  • euroscore.py (Calc)          │  ← EuroSCORE II formula
-│  • explainability.py (SHAP)     │  ← Model interpretation
-├─────────────────────────────────┤
-│  Configuration Layer            │
-│  config/ (Centralized settings) │  ← Hyperparams, paths, constants
-└─────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  Streamlit UI (app.py) — 10 tabs             │
+├──────────────────────────────────────────────┤
+│  Inference Layer                             │
+│  • ai_risk_inference.py  ← frozen-model core │
+├──────────────────────────────────────────────┤
+│  Core Processing Layer                       │
+│  • modeling.py        ← ML training          │
+│  • risk_data.py       ← Loading & prep       │
+│  • stats_compare.py   ← Statistical analysis │
+│  • euroscore.py       ← EuroSCORE II formula │
+│  • sts_calculator.py  ← STS Score (WebSocket)│
+│  • explainability.py  ← SHAP                 │
+├──────────────────────────────────────────────┤
+│  Metadata / Export / Temporal Layer          │
+│  • model_metadata.py      ← Versioning, audit│
+│  • export_helpers.py      ← Report export    │
+│  • temporal_validation.py ← Temporal helpers │
+├──────────────────────────────────────────────┤
+│  Configuration Layer                         │
+│  config/ (Centralized settings)              │
+└──────────────────────────────────────────────┘
 ```
 
 ### Data Flow
 
 **Training:**
 ```
-Excel → Data Cleaning → Feature Engineering → CV Training → Model Selection → Cache
+File upload → risk_data (normalize + match) → modeling (StratifiedGroupKFold CV)
+  → per-fold calibration → auto-select with guardrails → ia_risk_bundle.joblib
 ```
 
-**Prediction:**
+**Frozen inference (individual / batch / temporal — all share the same path):**
 ```
-Patient Input → Feature Preprocessing → Model → Probability → SHAP Explanation
+Input dict → ai_risk_inference (_build_input_row → _align_schema → clean_features
+  → predict_proba → assess_completeness) → {probability, completeness, incident}
+```
+
+**STS Score:**
+```
+Patient dict → sts_calculator (cache lookup → WebSocket query w/ retries → stale fallback)
+  → probability + execution record (OK / warning / blocking error)
 ```
 
 ---
@@ -155,17 +173,16 @@ See [docs/DATA_FORMAT.md](./DATA_FORMAT.md) for detailed specifications.
 
 ### Available Models
 
-| Model | When to Use | Pros | Cons |
-|-------|------------|------|------|
-| **Logistic Regression** | Baseline, interpretable | Fast, coefficients | May underfit |
-| **Random Forest** | General purpose | Robust, fast | Less interpretable |
-| **XGBoost** | High performance | Fast, accurate | Complex tuning |
-| **LightGBM** | Large datasets | Very fast | Memory-intensive |
-| **CatBoost** | Categorical features | Handles categories | Slower training |
-| **MLP (Neural Net)** | Complex patterns | Non-linear | Black box |
-| **StackingEnsemble** | Combine strengths | Often best | Slower, overfitting risk |
+| Model | Notes |
+|-------|-------|
+| **Logistic Regression** | Baseline; uncalibrated |
+| **Random Forest** | Sigmoid (Platt) calibration; current default |
+| **XGBoost** | Isotonic calibration |
+| **LightGBM** | Isotonic calibration |
+| **CatBoost** | Isotonic calibration |
+| **StackingEnsemble** | Combines the above; uncalibrated |
 
-**Automatic selection:** App trains all available models in StratifiedGroupKFold cross-validation and selects the one with highest AUC on calibrated out-of-fold predictions. Tree-based models are calibrated via Platt scaling inside each fold.
+**Automatic selection:** All 6 candidates are trained under StratifiedGroupKFold cross-validation (same patient never in both folds). Per-model calibration is applied inside each fold. The best model is auto-selected using calibrated out-of-fold AUC as the primary criterion, subject to clinical-usability guardrails (AUC floor, Brier baseline, dynamic range, threshold coverage). Models that fail any guardrail remain visible in the leaderboard and can be force-selected manually.
 
 ---
 
