@@ -242,6 +242,15 @@ def _sts_score_patient_ids(rows) -> list:
     return [_sts_score_patient_id(r) for r in rows]
 
 
+def _update_phase(slot, phase_num: int, phase_total: int, label: str) -> None:
+    """Update a st.empty() phase-label slot. No-op if slot is None or on error."""
+    try:
+        if slot is not None:
+            slot.caption(f"Phase {phase_num}/{phase_total}: {label}")
+    except Exception:
+        pass
+
+
 def _sts_score_status_caption(execution_log) -> str:
     """Return a one-line summary like 'cached 431 · fresh 20 · stale_fallback 3'."""
     try:
@@ -270,6 +279,11 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
     importlib.reload(_obs)
     run_report = _obs.RunReport()
 
+    if progress_callback is not None:
+        try:
+            progress_callback("loading_data", 0, 1, "")
+        except Exception:
+            pass
     prepared = prepare_master_dataset(xlsx_path)
 
     # Phase 3: ingestion + cohort eligibility steps. A required-column
@@ -289,6 +303,11 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
         err.source_label = Path(xlsx_path).name  # type: ignore[attr-defined]
         raise err
     run_report.add(_obs.build_step_eligibility(prepared.info))
+    if progress_callback is not None:
+        try:
+            progress_callback("eligibility_done", 0, 1, "")
+        except Exception:
+            pass
 
     artifacts = _fresh_train(prepared.data, prepared.feature_columns, progress_callback=progress_callback)
 
@@ -300,6 +319,11 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
         prevalence=float(prepared.info.get("positive_rate", 0.0) or 0.0),
     ))
 
+    if progress_callback is not None:
+        try:
+            progress_callback("euroscore_calc", 0, 1, "")
+        except Exception:
+            pass
     df = prepared.data.copy()
     df["euroscore_calc"] = df.apply(euroscore_from_row, axis=1)
     df["euroscore_sheet_clean"] = pd.to_numeric(df["euroscore_sheet"], errors="coerce")
@@ -310,6 +334,11 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
     # patient-keyed stale fallback, structured execution log).
     sts_ws_results = []
     if HAS_STS:
+        if progress_callback is not None:
+            try:
+                progress_callback("sts_score_calc", 0, 1, "")
+            except Exception:
+                pass
         rows_as_dicts = df.to_dict(orient="records")
         _sts_pids = _sts_score_patient_ids(rows_as_dicts)
         sts_ws_results = calculate_sts_batch(rows_as_dicts, patient_ids=_sts_pids)
@@ -328,6 +357,12 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
     run_report.add(_obs.build_step_sts_score(
         getattr(calculate_sts_batch, "last_execution_log", None)
     ))
+
+    if progress_callback is not None:
+        try:
+            progress_callback("building_reports", 0, 1, "")
+        except Exception:
+            pass
 
     return {
         "prepared": prepared,
@@ -2413,30 +2448,78 @@ _retrained_bundle = None
 if force_retrain:
     load_cached_bundle_only.clear()
     try:
+        _train_phase_slot = st.empty()
         _train_progress = st.progress(0, text=tr(
             "Preparing data…", "Preparando dados…",
         ))
         def _train_progress_cb(phase, current, total, model_name):
-            if phase == "cross_validation":
+            if phase == "loading_data":
+                _update_phase(_train_phase_slot, 1, 5, tr(
+                    "loading and preparing dataset",
+                    "carregando e preparando dados",
+                ))
+            elif phase == "eligibility_done":
+                _update_phase(_train_phase_slot, 2, 5, tr(
+                    "cohort eligibility",
+                    "elegibilidade da coorte",
+                ))
+            elif phase == "cross_validation":
+                _update_phase(_train_phase_slot, 3, 5, tr(
+                    "training candidate models",
+                    "treinando modelos candidatos",
+                ))
                 _pct = current / max(total * 2, 1)  # CV = first half
                 _train_progress.progress(_pct, text=tr(
                     f"Cross-validating: {model_name} ({current + 1}/{total})",
                     f"Validação cruzada: {model_name} ({current + 1}/{total})",
                 ))
             elif phase == "final_fit":
+                _update_phase(_train_phase_slot, 3, 5, tr(
+                    "training candidate models",
+                    "treinando modelos candidatos",
+                ))
                 _pct = 0.5 + current / max(total * 2, 1)  # Final fit = second half
                 _train_progress.progress(_pct, text=tr(
                     f"Final training: {model_name} ({current + 1}/{total})",
                     f"Treino final: {model_name} ({current + 1}/{total})",
                 ))
             elif phase == "selecting_best":
+                _update_phase(_train_phase_slot, 3, 5, tr(
+                    "selecting best model",
+                    "selecionando melhor modelo",
+                ))
                 _train_progress.progress(0.95, text=tr(
                     "Selecting best model…", "Selecionando melhor modelo…",
+                ))
+            elif phase == "euroscore_calc":
+                _update_phase(_train_phase_slot, 4, 5, tr(
+                    "computing scores",
+                    "calculando escores",
+                ))
+                _train_progress.progress(0.97, text=tr(
+                    "Computing EuroSCORE II…", "Calculando EuroSCORE II…",
+                ))
+            elif phase == "sts_score_calc":
+                _update_phase(_train_phase_slot, 4, 5, tr(
+                    "querying STS Score web calculator",
+                    "consultando calculadora web STS Score",
+                ))
+                _train_progress.progress(0.97, text=tr(
+                    "Querying STS Score…", "Consultando STS Score…",
+                ))
+            elif phase == "building_reports":
+                _update_phase(_train_phase_slot, 5, 5, tr(
+                    "building reports and bundle",
+                    "gerando relatórios e bundle",
+                ))
+                _train_progress.progress(0.99, text=tr(
+                    "Building reports…", "Gerando relatórios…",
                 ))
 
         _retrained_bundle, bundle_source, _retrained_info = load_train_bundle(
             xlsx_path, force_retrain=True, progress_callback=_train_progress_cb,
         )
+        _train_phase_slot.empty()
         _train_progress.progress(1.0, text=tr(
             "Training complete!", "Treinamento concluído!",
         ))
@@ -4539,6 +4622,11 @@ elif _active_tab == 4:  # Batch & Export
                             )
 
                 # --- Phase 1: AI Risk + EuroSCORE (local, fast) ---
+                _batch_local_phase_slot = st.empty()
+                _update_phase(_batch_local_phase_slot, 1, 2, tr(
+                    "applying AI Risk + EuroSCORE II",
+                    "aplicando AI Risk + EuroSCORE II",
+                ))
                 _progress_bar = st.progress(0, text=tr(
                     f"Computing AI Risk + EuroSCORE: 0/{_n_total}",
                     f"Calculando AI Risk + EuroSCORE: 0/{_n_total}",
@@ -4620,8 +4708,13 @@ elif _active_tab == 4:  # Batch & Export
                         )
 
                 # --- Phase 2: STS Score (routed through Phase 2 cache) ---
+                _update_phase(_batch_local_phase_slot, 2, 2, tr(
+                    "consolidating results",
+                    "consolidando resultados",
+                ))
                 sts_probs = [np.nan] * len(results)
                 if HAS_STS and _include_sts:
+                    _batch_local_phase_slot.empty()
                     _sts_phase_slot = st.empty()
                     _sts_progress = st.progress(0, text=tr(
                         f"STS Score — Phase 1/4: checking cache: 0/{_n_total}",
@@ -4731,6 +4824,8 @@ elif _active_tab == 4:  # Batch & Export
                             f"STS Score calculation failed: {_sts_err}. Results shown without STS Score.",
                             f"Cálculo do STS Score falhou: {_sts_err}. Resultados exibidos sem STS Score.",
                         ))
+                else:
+                    _batch_local_phase_slot.empty()
 
                 for i, sp in enumerate(sts_probs):
                     results[i]["STS (%)"] = round(sp * 100, 2) if pd.notna(sp) else np.nan
@@ -5651,7 +5746,12 @@ elif _active_tab == 9:  # Temporal Validation
                 )
 
                 if _tv_run:
+                    _tv_phase_slot = st.empty()
                     _tv_progress = st.progress(0, text=tr("Preparing...", "Preparando..."))
+                    _update_phase(_tv_phase_slot, 1, 5, tr(
+                        "loading cohort",
+                        "carregando coorte",
+                    ))
 
                     # ── 5.1 Apply frozen AI Risk model ──
                     # Phase: temporal-validation hardening.  The per-row
@@ -5665,6 +5765,10 @@ elif _active_tab == 9:  # Temporal Validation
                     # was removed because ``_align_input_to_training_schema``
                     # already performs that exact normalization on the
                     # training-schema reference frame.
+                    _update_phase(_tv_phase_slot, 2, 5, tr(
+                        "applying AI Risk model",
+                        "aplicando modelo AI Risk",
+                    ))
                     _tv_progress.progress(0.05, text=tr("Applying frozen AI Risk model...", "Aplicando modelo AI Risk congelado..."))
 
                     _tv_ref_df = prepared.data[prepared.feature_columns]
@@ -5719,6 +5823,10 @@ elif _active_tab == 9:  # Temporal Validation
                             )
 
                     # ── 5.2 EuroSCORE II ──
+                    _update_phase(_tv_phase_slot, 3, 5, tr(
+                        "computing EuroSCORE II",
+                        "calculando EuroSCORE II",
+                    ))
                     _tv_progress.progress(0.42, text=tr("Computing EuroSCORE II...", "Calculando EuroSCORE II..."))
                     _tv_data["euroscore_calc"] = _tv_data.apply(euroscore_from_row, axis=1)
 
@@ -5729,6 +5837,10 @@ elif _active_tab == 9:  # Temporal Validation
                     _tv_sts_status: str = ""     # overwritten below if HAS_STS
                     _tv_fail_log: list = []      # overwritten below if HAS_STS
                     if HAS_STS:
+                        _update_phase(_tv_phase_slot, 4, 5, tr(
+                            "querying STS Score web calculator",
+                            "consultando calculadora web STS Score",
+                        ))
                         _tv_sts_phase_slot = st.empty()
                         _tv_progress.progress(0.50, text=tr(
                             "STS Score — Phase 1/4: checking cache...",
@@ -5815,6 +5927,10 @@ elif _active_tab == 9:  # Temporal Validation
                         ))
 
                     # ── 5.4 Risk classes ──
+                    _update_phase(_tv_phase_slot, 5, 5, tr(
+                        "computing metrics and consolidating",
+                        "calculando métricas e consolidando",
+                    ))
                     _tv_progress.progress(0.80, text=tr("Computing metrics...", "Calculando métricas..."))
                     _tv_data["class_ia"] = _tv_data["ia_risk"].map(class_risk)
                     _tv_data["class_euro"] = _tv_data["euroscore_calc"].map(class_risk)
@@ -5886,6 +6002,7 @@ elif _active_tab == 9:  # Temporal Validation
                     }
 
                     _tv_progress.progress(1.0, text=tr("Done.", "Concluído."))
+                    _tv_phase_slot.empty()
 
                     # ── Persist result state for tab-navigation session cache ──
                     # Saves only the computed data (no export bytes).  Export bytes
