@@ -192,6 +192,12 @@ def _txt_download_btn(text: str, filename: str, label: str) -> None:
     st.download_button(label, data=text.encode("utf-8"), file_name=filename, mime="text/plain")
 
 
+@st.fragment
+def _bytes_download_btn(data: bytes, filename: str, label: str, mime: str, key: str = None) -> None:
+    """Generic bytes download button isolated in a fragment — clicking it won't rerun the whole page."""
+    st.download_button(label, data=data, file_name=filename, mime=mime, key=key)
+
+
 def _format_ppv_npv(df: pd.DataFrame) -> pd.DataFrame:
     """Replace NaN in PPV/NPV with '—' for display (Streamlit shows NaN as 'None')."""
     df = df.copy()
@@ -4347,38 +4353,38 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     with _exp_col1:
         _pdf_bytes = statistical_summary_to_pdf(_stat_summary)
         if _pdf_bytes:
-            st.download_button(
-                label="📄 PDF",
-                data=_pdf_bytes,
-                file_name="statistical_summary.pdf",
-                mime="application/pdf",
-                width="stretch",
+            _bytes_download_btn(
+                _pdf_bytes,
+                "statistical_summary.pdf",
+                "📄 PDF",
+                "application/pdf",
+                key="dl_stat_pdf",
             )
         else:
             st.caption(tr("PDF unavailable (install fpdf2)", "PDF indisponível (instale fpdf2)"))
     with _exp_col2:
-        st.download_button(
-            label="📊 XLSX",
-            data=statistical_summary_to_xlsx(_stat_summary),
-            file_name="statistical_summary.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width="stretch",
+        _bytes_download_btn(
+            statistical_summary_to_xlsx(_stat_summary),
+            "statistical_summary.xlsx",
+            "📊 XLSX",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_stat_xlsx",
         )
     with _exp_col3:
-        st.download_button(
-            label="📋 CSV",
-            data=statistical_summary_to_csv(_stat_summary),
-            file_name="statistical_summary.csv",
-            mime="text/csv",
-            width="stretch",
+        _bytes_download_btn(
+            statistical_summary_to_csv(_stat_summary).encode("utf-8"),
+            "statistical_summary.csv",
+            "📋 CSV",
+            "text/csv",
+            key="dl_stat_csv",
         )
     with _exp_col4:
-        st.download_button(
-            label="📝 Markdown",
-            data=_stat_summary,
-            file_name="statistical_summary.md",
-            mime="text/markdown",
-            width="stretch",
+        _bytes_download_btn(
+            _stat_summary.encode("utf-8"),
+            "statistical_summary.md",
+            "📝 Markdown",
+            "text/markdown",
+            key="dl_stat_md",
         )
 
 elif _active_tab == 3:  # Analysis Guide
@@ -4746,11 +4752,11 @@ elif _active_tab == 4:  # Batch & Export
                 with _dl2:
                     _xlsx_buf = BytesIO()
                     result_df.to_excel(_xlsx_buf, index=False, engine="openpyxl")
-                    st.download_button(
-                        "XLSX",
+                    _bytes_download_btn(
                         _xlsx_buf.getvalue(),
                         "ia_risk_batch_predictions.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "XLSX",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="dl_batch_xlsx",
                     )
                 with _dl3:
@@ -4758,11 +4764,11 @@ elif _active_tab == 4:  # Batch & Export
                 with _dl4:
                     _batch_pdf = statistical_summary_to_pdf(_batch_md)
                     if _batch_pdf:
-                        st.download_button(
-                            "PDF",
+                        _bytes_download_btn(
                             _batch_pdf,
                             "ia_risk_batch_predictions.pdf",
-                            mime="application/pdf",
+                            "PDF",
+                            "application/pdf",
                             key="dl_batch_pdf",
                         )
 
@@ -6129,38 +6135,12 @@ elif _active_tab == 9:  # Temporal Validation
                     # 9.5 Markdown
                     _tv_md_bytes = _tv_md.encode("utf-8")
 
-                    _ex_c1, _ex_c2, _ex_c3, _ex_c4 = st.columns(4)
-                    with _ex_c1:
-                        st.download_button(
-                            tr("Download XLSX", "Baixar XLSX"),
-                            data=_tv_xlsx_bytes,
-                            file_name="temporal_validation_summary.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        )
-                    with _ex_c2:
-                        st.download_button(
-                            tr("Download CSV", "Baixar CSV"),
-                            data=_tv_csv_bytes,
-                            file_name="temporal_validation_predictions.csv",
-                            mime="text/csv",
-                        )
-                    with _ex_c3:
-                        if _tv_pdf_bytes:
-                            st.download_button(
-                                tr("Download PDF", "Baixar PDF"),
-                                data=_tv_pdf_bytes,
-                                file_name="temporal_validation_report.pdf",
-                                mime="application/pdf",
-                            )
-                        else:
-                            st.caption(tr("PDF export requires fpdf library.", "Exportação PDF requer biblioteca fpdf."))
-                    with _ex_c4:
-                        st.download_button(
-                            tr("Download Markdown", "Baixar Markdown"),
-                            data=_tv_md_bytes,
-                            file_name="temporal_validation_report.md",
-                            mime="text/markdown",
-                        )
+                    st.session_state["_tv_exports"] = {
+                        "xlsx": _tv_xlsx_bytes,
+                        "csv": _tv_csv_bytes,
+                        "pdf": _tv_pdf_bytes,
+                        "md": _tv_md_bytes,
+                    }
 
                     # Log audit
                     log_analysis(
@@ -6175,6 +6155,47 @@ elif _active_tab == 9:  # Temporal Validation
                             "sts_available": _tv_sts_ok,
                         },
                     )
+
+                if "_tv_exports" in st.session_state:
+                    _tve = st.session_state["_tv_exports"]
+                    st.divider()
+                    st.markdown(tr("### Export results", "### Exportar resultados"))
+                    _ex_c1, _ex_c2, _ex_c3, _ex_c4 = st.columns(4)
+                    with _ex_c1:
+                        _bytes_download_btn(
+                            _tve["xlsx"],
+                            "temporal_validation_summary.xlsx",
+                            tr("Download XLSX", "Baixar XLSX"),
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_tv_xlsx",
+                        )
+                    with _ex_c2:
+                        _bytes_download_btn(
+                            _tve["csv"],
+                            "temporal_validation_predictions.csv",
+                            tr("Download CSV", "Baixar CSV"),
+                            "text/csv",
+                            key="dl_tv_csv",
+                        )
+                    with _ex_c3:
+                        if _tve["pdf"]:
+                            _bytes_download_btn(
+                                _tve["pdf"],
+                                "temporal_validation_report.pdf",
+                                tr("Download PDF", "Baixar PDF"),
+                                "application/pdf",
+                                key="dl_tv_pdf",
+                            )
+                        else:
+                            st.caption(tr("PDF export requires fpdf library.", "Exportação PDF requer biblioteca fpdf."))
+                    with _ex_c4:
+                        _bytes_download_btn(
+                            _tve["md"],
+                            "temporal_validation_report.md",
+                            tr("Download Markdown", "Baixar Markdown"),
+                            "text/markdown",
+                            key="dl_tv_md",
+                        )
 
 # ── Footer ──
 st.divider()
