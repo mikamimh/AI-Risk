@@ -694,6 +694,12 @@ def parse_postop_timing(value: object) -> PostopTiming:
     if txt_lower in _SURVIVOR_TOKENS:
         return PostopTiming(txt, "survivor", None, None, False, False)
 
+    if txt_lower in {"no", "não", "nao"}:
+        return PostopTiming(txt, "survivor", None, None, False, False)
+
+    if txt_lower in {"yes", "sim"}:
+        return PostopTiming(txt, "event_occurred_no_day", None, None, True, True)
+
     if txt_lower == "operative":
         return PostopTiming(txt, "operative", 0, None, True, True)
 
