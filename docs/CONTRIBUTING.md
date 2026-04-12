@@ -22,12 +22,17 @@ pip install pytest pytest-cov black flake8 mypy
 
 ### 2. Project Structure
 ```
-├── app.py                    # Main Streamlit app (UI, orchestration)
+├── app.py                    # Main Streamlit app (UI, tab routing, orchestration)
 ├── ai_risk_inference.py      # Frozen-model inference core (no Streamlit deps)
 ├── modeling.py               # ML training and candidate selection
 ├── risk_data.py              # Data loading, normalization, feature engineering
 ├── euroscore.py              # EuroSCORE II formula
-├── sts_calculator.py         # STS Score WebSocket automation + disk cache
+├── sts_calculator.py         # STS Score WebSocket transport
+├── sts_cache.py              # STS Score cache and revalidation policy
+├── observability.py          # Execution report: RunReport/RunStep + renderers
+├── bundle_io.py              # Bundle serialization/deserialization
+├── subgroups.py              # Subgroup assignment and per-subgroup metrics
+├── report_text.py            # Manuscript Methods/Results text builders
 ├── stats_compare.py          # Statistical evaluation and comparison
 ├── explainability.py         # SHAP integration
 ├── model_metadata.py         # Versioning, audit trail, metadata; re-exports
@@ -44,6 +49,7 @@ pip install pytest pytest-cov black flake8 mypy
 │   ├── ARCHITECTURE.md
 │   ├── API.md
 │   ├── DATA_FORMAT.md
+│   ├── TESTING.md
 │   └── CONTRIBUTING.md
 │
 ├── tests/                    # Unit tests

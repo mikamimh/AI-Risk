@@ -150,12 +150,17 @@ All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converg
 
 | File | Role |
 |:--|:--|
-| `app.py` | Streamlit application (UI, orchestration, 10 tabs) |
+| `app.py` | Streamlit application (UI, tab routing, orchestration) |
 | `ai_risk_inference.py` | Frozen-model inference core shared by individual, batch, and temporal flows |
 | `risk_data.py` | Data loading, normalization, patient matching, feature engineering |
 | `modeling.py` | ML pipeline: preprocessing, training, candidate selection |
 | `euroscore.py` | EuroSCORE II formula implementation |
-| `sts_calculator.py` | STS Score acquisition via WebSocket automation, disk cache, retry logic |
+| `sts_calculator.py` | STS Score WebSocket transport — connects to the STS calculator website |
+| `sts_cache.py` | STS Score cache and revalidation policy: TTL, versioning, stale fallback, patient index |
+| `observability.py` | Execution report: RunReport/RunStep data structures, builders, and Streamlit renderers |
+| `bundle_io.py` | Bundle serialization/deserialization (Streamlit module-reload safety) |
+| `subgroups.py` | Subgroup assignment (surgery type, LVEF, renal function) and per-subgroup metrics |
+| `report_text.py` | Manuscript-ready Methods and Results text builders |
 | `explainability.py` | SHAP-based model explainability |
 | `stats_compare.py` | Statistical evaluation and model comparison |
 | `model_metadata.py` | Model versioning, audit trail, individual reports; re-exports from export_helpers and temporal_validation |
