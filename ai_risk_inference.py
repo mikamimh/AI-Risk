@@ -79,7 +79,6 @@ def _build_input_row(feature_columns, form: Dict[str, object]) -> pd.DataFrame:
         except (ValueError, TypeError):
             row["Suspension of Anticoagulation (day)"] = 0
 
-    out = pd.DataFrame([row])
     defaults = {
         "HF": "No",
         "Arrhythmia Remote": "No",
@@ -106,10 +105,16 @@ def _build_input_row(feature_columns, form: Dict[str, object]) -> pd.DataFrame:
         "Aortic Root Abscess": "No",
         "Suspension of Anticoagulation (day)": 0,
     }
+    # Apply defaults to the dict before constructing the DataFrame so that
+    # columns receiving string defaults are not first typed as float64 (NaN),
+    # which would trigger a pandas FutureWarning on mixed-type assignment.
     for c, v in defaults.items():
-        if c in out.columns and (pd.isna(out.at[0, c]) or str(out.at[0, c]).strip() == ""):
-            out.at[0, c] = v
+        if c in row:
+            _cur = row[c]
+            if (_cur is None or (isinstance(_cur, float) and pd.isna(_cur)) or str(_cur).strip() == ""):
+                row[c] = v
 
+    out = pd.DataFrame([row])
     return out
 
 
