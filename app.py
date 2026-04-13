@@ -1011,10 +1011,7 @@ def model_weight_table(artifacts, prepared, model_name: str, top_n: int = 20) ->
             return w.sort_values("Absolute impact", ascending=False).head(top_n), "stacking"
         return pd.DataFrame(), "opaque"
 
-    feature_names = prep.get_feature_names_out()
-    feature_names = [
-        str(n).replace("num__", "").replace("cat__onehot__", "").replace("cat__target_enc__", "") for n in feature_names
-    ]
+    feature_names = [_feat_display_name(n) for n in prep.get_feature_names_out()]
 
     if hasattr(model, "coef_"):
         vals = np.asarray(model.coef_).ravel()
@@ -1031,6 +1028,40 @@ def model_weight_table(artifacts, prepared, model_name: str, top_n: int = 20) ->
         return w.sort_values("Absolute impact", ascending=False).head(top_n), "importance"
 
     return pd.DataFrame(), "opaque"
+
+
+# ---------------------------------------------------------------------------
+# Feature display-name helper
+# ---------------------------------------------------------------------------
+# ColumnTransformer.get_feature_names_out() prefixes each feature with the
+# transformer name (e.g. "valve__", "cat__target_enc__", "num__").  These are
+# correct internally but must not appear in user-facing tables.
+# Longer/more-specific prefixes are checked first so that "cat__onehot__"
+# wins over the shorter "cat__" fallback.
+
+_FEAT_PREFIXES = (
+    "cat__onehot__",
+    "cat__target_enc__",
+    "cat__ordinal__",
+    "cat__",
+    "num__",
+    "valve__",
+    "ord__",
+)
+
+
+def _feat_display_name(name: str) -> str:
+    """Return a human-friendly label for a preprocessor output feature name.
+
+    Strips sklearn ColumnTransformer / Pipeline prefixes while leaving the
+    underlying column name unchanged.  Falls back to the raw name if no known
+    prefix is found.
+    """
+    s = str(name)
+    for prefix in _FEAT_PREFIXES:
+        if s.startswith(prefix):
+            return s[len(prefix):]
+    return s
 
 
 def _feature_group(base_feature: str) -> str:
@@ -1126,10 +1157,7 @@ def _cached_shap_global(
 
     prep = _pipe.named_steps["prep"]
     X_proc = prep.transform(_X)
-    feat_names = [
-        str(n).replace("num__", "").replace("cat__onehot__", "").replace("cat__target_enc__", "").replace("cat__target_enc__", "")
-        for n in prep.get_feature_names_out()
-    ]
+    feat_names = [_feat_display_name(n) for n in prep.get_feature_names_out()]
 
     explainer = _shap.TreeExplainer(estimator)
     shap_values = explainer.shap_values(X_proc)
@@ -1170,10 +1198,7 @@ def _cached_shap_beeswarm(
 
     prep = _pipe.named_steps["prep"]
     X_proc = prep.transform(_X)
-    feat_names = [
-        str(n).replace("num__", "").replace("cat__onehot__", "").replace("cat__target_enc__", "")
-        for n in prep.get_feature_names_out()
-    ]
+    feat_names = [_feat_display_name(n) for n in prep.get_feature_names_out()]
 
     explainer = _shap.TreeExplainer(estimator)
     shap_values = explainer.shap_values(X_proc)
@@ -1216,10 +1241,7 @@ def _cached_shap_dependence(
 
     prep = _pipe.named_steps["prep"]
     X_proc = prep.transform(_X)
-    feat_names = [
-        str(n).replace("num__", "").replace("cat__onehot__", "").replace("cat__target_enc__", "")
-        for n in prep.get_feature_names_out()
-    ]
+    feat_names = [_feat_display_name(n) for n in prep.get_feature_names_out()]
 
     explainer = _shap.TreeExplainer(estimator)
     shap_values = explainer.shap_values(X_proc)
@@ -1254,7 +1276,7 @@ def logistic_clinical_coefficients_table(artifacts, prepared, top_n: int = 20, s
         return pd.DataFrame()
 
     raw_features = artifacts.feature_columns
-    feature_names = [str(n).replace("num__", "").replace("cat__onehot__", "").replace("cat__target_enc__", "") for n in prep.get_feature_names_out()]
+    feature_names = [_feat_display_name(n) for n in prep.get_feature_names_out()]
     vals = np.asarray(model.coef_).ravel()
     rows = []
     for feat, coef in zip(feature_names, vals):
@@ -1387,7 +1409,7 @@ def explain_patient_risk(artifacts, input_features: pd.DataFrame, form_map: Dict
     arr = np.asarray(transformed)
     if arr.ndim == 2:
         arr = arr[0]
-    feature_names = [str(n).replace("num__", "").replace("cat__onehot__", "").replace("cat__target_enc__", "") for n in prep.get_feature_names_out()]
+    feature_names = [_feat_display_name(n) for n in prep.get_feature_names_out()]
     coef = np.asarray(model.coef_).ravel()
     rows = []
     for feat, val, c in zip(feature_names, arr, coef):

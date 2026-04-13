@@ -392,6 +392,26 @@ def generate_individual_report(
     def _tr(en, pt):
         return en if language == "English" else pt
 
+    def _localize_risk(label: str) -> str:
+        """Translate a risk-class English label to the report language."""
+        if language == "English":
+            return label
+        return _RISK_CLASS_PT.get(label, label)
+
+    def _display_val(val) -> str:
+        """Return a display-ready string for a form-map value.
+
+        Translates common English categorical values (Yes/No, sex, priority)
+        to Portuguese when the report language is Portuguese.  Numeric and
+        unknown values are returned as-is.
+        """
+        if isinstance(val, float) and np.isnan(val):
+            return "-"
+        s = str(val)
+        if language == "English":
+            return s
+        return _FORM_VALUE_PT.get(s, s)
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     _saved = (bundle_saved_at or "Unknown")[:19].replace("T", " ") if bundle_saved_at else "Unknown"
 
@@ -410,20 +430,22 @@ def generate_individual_report(
         "",
         f"| {_tr('Score', 'Escore')} | {_tr('Value', 'Valor')} | {_tr('Risk class', 'Classe de risco')} |",
         "|:--|:--|:--|",
-        f"| AI Risk ({model_name}) | {ia_prob*100:.2f}% | {risk_class} |",
-        f"| EuroSCORE II | {euro_prob*100:.2f}% | {_classify_risk(euro_prob)} |",
-        f"| STS PROM | {'-' if np.isnan(sts_prob) else f'{sts_prob*100:.2f}%'} | {'-' if np.isnan(sts_prob) else _classify_risk(sts_prob)} |",
+        f"| AI Risk ({model_name}) | {ia_prob*100:.2f}% | {_localize_risk(risk_class)} |",
+        f"| EuroSCORE II | {euro_prob*100:.2f}% | {_classify_risk(euro_prob, language)} |",
+        f"| STS Score PROM | {'-' if np.isnan(sts_prob) else f'{sts_prob*100:.2f}%'} | {'-' if np.isnan(sts_prob) else _classify_risk(sts_prob, language)} |",
         "",
     ]
 
     # STS sub-scores
     if sts_result:
         from sts_calculator import STS_LABELS
-        lines.append(f"### {_tr('STS Sub-scores', 'Sub-escores STS')}")
+        lines.append(f"### {_tr('STS Score Sub-scores', 'Sub-escores STS Score')}")
         lines.append("")
         lines.append(f"| {_tr('Endpoint', 'Desfecho')} | {_tr('Value', 'Valor')} |")
         lines.append("|:--|:--|")
-        for key, label in STS_LABELS.items():
+        # Use Portuguese endpoint labels when the report language is Portuguese.
+        _sts_label_map = STS_LABELS if language == "English" else _STS_LABELS_PT
+        for key, label in _sts_label_map.items():
             val = sts_result.get(key, np.nan)
             lines.append(f"| {label} | {'-' if (isinstance(val, float) and np.isnan(val)) else f'{val*100:.2f}%'} |")
         lines.append("")
@@ -458,9 +480,7 @@ def generate_individual_report(
     lines.append(f"| {_tr('Variable', 'Variável')} | {_tr('Value', 'Valor')} |")
     lines.append("|:--|:--|")
     for var_key, var_label in key_vars:
-        val = form_map.get(var_key, "-")
-        if isinstance(val, float) and np.isnan(val):
-            val = "-"
+        val = _display_val(form_map.get(var_key, "-"))
         lines.append(f"| {var_label} | {val} |")
     lines.append("")
 
@@ -500,20 +520,65 @@ def generate_individual_report(
     lines.append(f"- **{_tr('Imputation', 'Imputação')}:** {_tr('Variables not informed by the user were replaced by the training dataset median (numeric) or mode (categorical). This is a standard approach in predictive modeling, but predictions with many imputed variables should be interpreted with greater caution.', 'Variáveis não informadas pelo usuário foram substituídas pela mediana (numéricas) ou moda (categóricas) do dataset de treinamento. Esta é uma abordagem padrão em modelagem preditiva, mas predições com muitas variáveis imputadas devem ser interpretadas com maior cautela.')}")
     lines.append(f"- **{_tr('Input completeness', 'Completude da entrada')}:** {completeness['label']} ({completeness['n_informed']}/{completeness['n_total']} {_tr('informed', 'informadas')}, {completeness['n_imputed']} {_tr('imputed', 'imputadas')})")
     lines.append(f"- **{_tr('EuroSCORE II', 'EuroSCORE II')}:** {_tr('Calculated by the app from the published logistic equation (Nashef et al., 2012). Not read from the input file.', 'Calculado pelo app pela equação logística publicada (Nashef et al., 2012). Não lido do arquivo de entrada.')}")
-    lines.append(f"- **{_tr('STS Score', 'Score STS')}:** {_tr('Obtained via automated query to the official STS web calculator. The STS does not publish a documented public API; this value reflects the same calculation available to clinicians through the web interface. Not read from the input file.', 'Obtido via consulta automatizada à calculadora web oficial do STS. O STS não disponibiliza uma API pública documentada; este valor reflete o mesmo cálculo disponível aos clínicos pela interface web. Não lido do arquivo de entrada.')}")
+    lines.append(f"- **{_tr('STS Score', 'STS Score')}:** {_tr('Obtained via automated query to the official STS Score web calculator. The STS does not publish a documented public API; this value reflects the same calculation available to clinicians through the web interface. Not read from the input file.', 'Obtido via consulta automatizada à calculadora web oficial do STS Score. O STS não disponibiliza uma API pública documentada; este valor reflete o mesmo cálculo disponível aos clínicos pela interface web. Não lido do arquivo de entrada.')}")
     lines.append(f"- **{_tr('Risk factors', 'Fatores de risco')}:** {_tr('Based on the logistic regression interpretable layer. These reflect estimated statistical associations, not causal relationships.', 'Baseados na camada interpretável de regressão logística. Refletem associações estatísticas estimadas, não relações causais.')}")
 
     return "\n".join(lines)
 
 
-def _classify_risk(prob: float) -> str:
+# ---------------------------------------------------------------------------
+# Display-layer translation tables (used only in generate_individual_report)
+# ---------------------------------------------------------------------------
+
+# Risk class labels — keyed by English canonical value.
+_RISK_CLASS_PT = {"Low": "Baixo", "Intermediate": "Intermediário", "High": "Alto"}
+
+# Form-map display values that may appear in Portuguese reports.
+_FORM_VALUE_PT = {
+    # Sex
+    "Male": "Masculino",
+    "Female": "Feminino",
+    # Surgical priority
+    "Elective": "Eletiva",
+    "Urgent": "Urgente",
+    "Emergency": "Emergência",
+    "Emergent Salvage": "Emergente/Salvamento",
+    # Boolean
+    "Yes": "Sim",
+    "No": "Não",
+    # Completeness status (generated by assess_input_completeness)
+    "Complete": "Completa",
+    "Adequate": "Adequada",
+    "Partial": "Parcial",
+    "Low": "Baixa",
+}
+
+# STS Score endpoint labels in Portuguese.
+_STS_LABELS_PT = {
+    "predmort": "Mortalidade Operatória",
+    "predmm": "Morbidade e Mortalidade",
+    "predstro": "AVC",
+    "predrenf": "Insuficiência Renal",
+    "predreop": "Reoperação",
+    "predvent": "Ventilação Prolongada",
+    "preddeep": "Infecção Esternal Profunda",
+    "pred14d": "Internação Prolongada (>14 dias)",
+    "pred6d": "Internação Curta (<6 dias)",
+}
+
+
+def _classify_risk(prob: float, language: str = "English") -> str:
     if np.isnan(prob):
         return "-"
     if prob < 0.05:
-        return "Low"
-    if prob <= 0.15:
-        return "Intermediate"
-    return "High"
+        label = "Low"
+    elif prob <= 0.15:
+        label = "Intermediate"
+    else:
+        label = "High"
+    if language != "English":
+        return _RISK_CLASS_PT.get(label, label)
+    return label
 
 
 # ---------------------------------------------------------------------------

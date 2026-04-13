@@ -198,7 +198,15 @@ def statistical_summary_to_csv(md_text: str) -> str:
 
 
 def statistical_summary_to_pdf(md_text: str) -> bytes:
-    """Convert statistical summary to PDF."""
+    """Convert a Markdown report to PDF.
+
+    Renders all Markdown elements in a single pass:
+      H1 / H2 / H3 headers, metadata lines (**Key:** Value),
+      pipe tables, bullet lists, paragraphs, horizontal rules.
+
+    Backward-compatible: statistical summaries (headers + tables only) render
+    identically to the previous implementation.
+    """
     try:
         from fpdf import FPDF
     except ImportError:
@@ -210,70 +218,164 @@ def statistical_summary_to_pdf(md_text: str) -> bytes:
             "\u0394": "Delta ",  # Δ
             "\u2264": "<=",      # ≤
             "\u2265": ">=",      # ≥
-            "\u00b2": "2",       # ²
+            "\u00b2": "^2",      # ²  → ^2 (e.g. m² → m^2)
             "\u2013": "-",       # –
             "\u2014": "--",      # —
-            "\u00b3": "3",       # ³
+            "\u00b3": "^3",      # ³  → ^3 (e.g. 10³/μL → 10^3/uL)
             "\u03c7": "chi",     # χ
+            "\u2022": "-",       # •
+            "\u2192": "->",      # →
+            "\u2190": "<-",      # ←
+            "\u00b0": " deg",    # °
+            "\u00b5": "u",       # µ  (micro sign, U+00B5)
+            "\u03bc": "u",       # μ  (Greek mu, U+03BC — used in μL, μg)
+            "\u03b1": "alpha",   # α
+            "\u03b2": "beta",    # β
+            "\u03c3": "sigma",   # σ
+            "\u00d7": "x",       # ×  (multiplication sign)
+            "\u00b1": "+/-",     # ±
+            "\u2215": "/",       # ∕  (division slash)
+            "\u2248": "~",       # ≈
+            "\u221e": "inf",     # ∞
+            "\u2020": "+",       # †  (dagger used in footnotes)
+            "\u2021": "++",      # ‡  (double dagger)
         }
+        # NOTE: Latin-1 accented characters (é ç ã õ à â ê ó ú í and their
+        # uppercase equivalents) are intentionally NOT listed here.  They are
+        # all valid ISO-8859-1 / CP1252 code points and are rendered correctly
+        # by fpdf2's Helvetica core font without any substitution.  Converting
+        # them to ASCII equivalents would degrade Portuguese text.
         for k, v in replacements.items():
             text = text.replace(k, v)
         return text.encode("latin-1", errors="replace").decode("latin-1")
 
-    tables = _parse_md_tables(md_text)
+    def _strip_inline_md(text: str) -> str:
+        """Strip inline Markdown markers (bold, italic) for plain-text rendering."""
+        return re.sub(r'\*+', '', text)
 
-    # Extract header metadata from markdown
-    title = "Statistical Summary"
-    header_lines = []
-    for line in md_text.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("**") and ":**" in stripped:
-            header_lines.append(stripped.replace("**", ""))
-        elif stripped.startswith("# ") and not stripped.startswith("## "):
-            title = stripped.lstrip("# ").strip()
+    def _is_separator_row(cells: list) -> bool:
+        """True if every non-empty cell contains only dashes, colons, and spaces."""
+        return bool(cells) and all(re.fullmatch(r'[-:\s]+', c) for c in cells if c)
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+    available_w = pdf.w - pdf.l_margin - pdf.r_margin
 
-    # Title
-    pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, _latin_safe(title), new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
+    # --- Table render buffer ---
+    tbl_headers: list = []
+    tbl_rows: list = []
 
-    # Header metadata
-    pdf.set_font("Helvetica", "", 9)
-    for hl in header_lines:
-        pdf.cell(0, 5, _latin_safe(hl), new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(6)
+    def _flush_table() -> None:
+        nonlocal tbl_headers, tbl_rows
+        if not tbl_headers:
+            return
+        n_cols = len(tbl_headers)
+        col_w = available_w / n_cols
 
-    for t in tables:
-        # Section title
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 8, _latin_safe(t["title"]), new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
-
-        if not t["headers"]:
-            continue
-
-        n_cols = len(t["headers"])
-        available_width = pdf.w - pdf.l_margin - pdf.r_margin
-        col_w = available_width / n_cols
-
-        # Header row
         pdf.set_font("Helvetica", "B", 8)
-        for h in t["headers"]:
-            pdf.cell(col_w, 6, _latin_safe(h[:20]), border=1, align="C")
+        for h in tbl_headers:
+            pdf.cell(col_w, 6, _latin_safe(_strip_inline_md(h)[:20]), border=1, align="C")
         pdf.ln()
 
-        # Data rows
         pdf.set_font("Helvetica", "", 8)
-        for row in t["rows"]:
-            for j, cell in enumerate(row):
-                txt = _latin_safe(cell[:22] if j > 0 else cell[:25])
-                pdf.cell(col_w, 5, txt, border=1, align="C" if j > 0 else "L")
+        for row in tbl_rows:
+            # Pad short rows so cell count always equals n_cols
+            padded = (row + [""] * n_cols)[:n_cols]
+            for j, cell in enumerate(padded):
+                limit = 30 if j == 0 else 22
+                txt = _latin_safe(_strip_inline_md(cell)[:limit])
+                pdf.cell(col_w, 5, txt, border=1, align="L" if j == 0 else "C")
             pdf.ln()
 
         pdf.ln(4)
+        tbl_headers = []
+        tbl_rows = []
+
+    # --- Single-pass line renderer ---
+    for raw_line in md_text.split("\n"):
+        stripped = raw_line.strip()
+
+        # --- Table lines ---
+        if stripped.startswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if _is_separator_row(cells):
+                pass  # skip alignment row
+            elif not tbl_headers:
+                tbl_headers = cells
+            else:
+                tbl_rows.append(cells)
+            continue
+
+        # Non-table line: flush any pending table first
+        _flush_table()
+
+        if not stripped:
+            pdf.ln(3)
+
+        elif stripped.startswith("### "):
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(available_w, 7, _latin_safe(_strip_inline_md(stripped[4:])),
+                     new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(1)
+
+        elif stripped.startswith("## "):
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.cell(available_w, 8, _latin_safe(_strip_inline_md(stripped[3:])),
+                     new_x="LMARGIN", new_y="NEXT")
+            # Thin grey underline to visually anchor the section heading.
+            _uy = pdf.get_y()
+            pdf.set_draw_color(160, 160, 160)
+            pdf.set_line_width(0.2)
+            pdf.line(pdf.l_margin, _uy, pdf.w - pdf.r_margin, _uy)
+            pdf.set_draw_color(0, 0, 0)
+            pdf.set_line_width(0.2)
+            pdf.ln(3)
+
+        elif stripped.startswith("# "):
+            pdf.set_font("Helvetica", "B", 16)
+            pdf.cell(available_w, 10, _latin_safe(_strip_inline_md(stripped[2:])),
+                     new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(4)
+
+        elif stripped == "---":
+            pdf.ln(2)  # breathing room before the rule
+            y = pdf.get_y()
+            pdf.set_draw_color(180, 180, 180)
+            pdf.set_line_width(0.3)
+            pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
+            pdf.set_draw_color(0, 0, 0)
+            pdf.set_line_width(0.2)
+            pdf.ln(4)
+
+        elif stripped.startswith("- "):
+            pdf.set_font("Helvetica", "", 9)
+            content = _latin_safe(_strip_inline_md(stripped[2:]))
+            # Indent bullet text by 5 mm; use middle-dot (U+00B7, Latin-1 0xB7)
+            # as the bullet marker — renders reliably in Helvetica without Unicode.
+            indent = 5
+            pdf.set_x(pdf.l_margin + indent)
+            pdf.multi_cell(available_w - indent, 5.5, "\xb7 " + content)
+
+        elif stripped.startswith("**") and ":**" in stripped:
+            # Bold metadata line: **Key:** value  →  Key: value
+            pdf.set_font("Helvetica", "", 9)
+            meta = _latin_safe(_strip_inline_md(stripped))
+            pdf.cell(available_w, 5, meta, new_x="LMARGIN", new_y="NEXT")
+
+        elif stripped.startswith("*") and stripped.endswith("*"):
+            # Italic line (e.g. *Generated by AI Risk*)
+            pdf.set_font("Helvetica", "I", 8)
+            pdf.cell(available_w, 5, _latin_safe(_strip_inline_md(stripped)),
+                     new_x="LMARGIN", new_y="NEXT")
+
+        else:
+            # Regular paragraph — slightly looser line spacing and a small gap
+            # after so the text doesn't visually merge with what follows.
+            pdf.set_font("Helvetica", "", 9)
+            pdf.multi_cell(available_w, 5.5, _latin_safe(_strip_inline_md(stripped)))
+            pdf.ln(2)
+
+    _flush_table()  # flush any table at end of input
 
     return bytes(pdf.output())

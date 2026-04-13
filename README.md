@@ -25,7 +25,7 @@ The app is organised as ten tabs in the following order:
 | # | Tab | Role |
 |:--|:--|:--|
 | 1 | **Overview** | Cohort summary, grouped surgery profile, model-version details, candidate-model leaderboard (calibrated OOF metrics and per-model Youden thresholds), eligibility flow, and execution report for the current run |
-| 2 | **Prediction** | Single-patient scoring: AI Risk, EuroSCORE II, and STS Score for one case with per-variable contributions |
+| 2 | **Prediction** | Single-patient scoring: AI Risk, EuroSCORE II, and STS Score for one case with per-variable contributions; individual patient report export (Markdown / PDF / XLSX / CSV) covering scores, input completeness, clinical interpretation, risk factors, and methodological notes |
 | 3 | **Batch & Export** | (a) Training dataset export with all three scores and OOF predictions (XLSX/CSV). (b) New-patient batch prediction: upload a clinical file, receive AI Risk + EuroSCORE II + STS Score per row, download CSV/XLSX/Markdown/PDF |
 | 4 | **Comparison** | Head-to-head statistical comparison of AI Risk, EuroSCORE II, and STS Score with bootstrap 95% CI, DeLong, DCA, NRI/IDI; export PDF/XLSX/CSV/Markdown |
 | 5 | **Temporal Validation** | Apply the frozen trained model to an independently uploaded patient cohort; computes AI Risk, EuroSCORE II, and STS Score; reports metrics at the fixed 8% threshold; export XLSX/CSV/PDF |
@@ -98,6 +98,7 @@ Additional reliability mechanisms:
 - **Retries:** each fetch is retried up to 4 times with back-off before being marked as failed (transient WebSocket errors account for most failures)
 - **Stale fallback:** if a fresh fetch fails but a previously cached value exists for the same payload, that stale value is reused and flagged as `stale_fallback` in the execution record
 - **Severity classification:** partial failures (one or more patients fail but usable results remain) are reported as **warnings**; only `n_usable == 0` or `fail_ratio ≥ 0.5` are reported as **blocking errors**
+- **Dual Shiny protocol support:** the WebSocket parser handles both the legacy Shiny message format (`values.text2`) and the modern format (`method=upd / data.output.text2`), so the fetch path remains functional if the STS calculator's Shiny version changes
 
 After each STS Score batch run, a compact summary line is shown (Cache hits / Misses / Refreshed / Stale fallback / Failed) followed by a collapsible "View STS Score execution details" expander with the last phase label and any per-patient incidents.
 
@@ -204,7 +205,7 @@ All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converg
 | `explainability.py` | SHAP-based model explainability |
 | `stats_compare.py` | Statistical evaluation and model comparison |
 | `model_metadata.py` | Model versioning, audit trail, individual reports; re-exports from export_helpers and temporal_validation |
-| `export_helpers.py` | Statistical summary export: Markdown → XLSX / CSV / PDF |
+| `export_helpers.py` | Statistical summary export: Markdown → XLSX / CSV / PDF; the PDF renderer does a full single-pass render of all Markdown elements (headers, tables, bullet lists, paragraphs, horizontal rules) — used by the individual patient report, statistical summary, batch export, and temporal validation PDF downloads |
 | `temporal_validation.py` | Temporal cohort helpers: year-quarter range, overlap check, locked-model display, Markdown summary |
 | `variable_dictionary.py` | Structured variable dictionary for documentation |
 | `config/` | Centralized configuration and hyperparameters |
