@@ -643,6 +643,43 @@ def _parse_html_response(html_content: str) -> Dict[str, float]:
     return result
 
 
+def _extract_text2_html(msg_data: dict) -> Optional[str]:
+    """Extract the text2 HTML value from a Shiny WebSocket message.
+
+    Handles two protocol variants:
+      • Shiny ≤1.6 (legacy): ``{"values": {"text2": "<html>"}}``
+      • Shiny ≥1.7 / modern: ``{"method": "upd", "data": {"output": {"text2": {"html": "..."}}}}``
+    Also handles the rare case where text2 is a plain string at the top level.
+    """
+    # Modern Shiny: method=upd, data.output.text2
+    method = msg_data.get("method")
+    if method == "upd":
+        output = msg_data.get("data", {}).get("output", {})
+        text2 = output.get("text2")
+        if isinstance(text2, dict):
+            return text2.get("html")
+        if isinstance(text2, str):
+            return text2
+
+    # Legacy Shiny: values.text2
+    values = msg_data.get("values", {})
+    if isinstance(values, dict):
+        text2 = values.get("text2")
+        if isinstance(text2, dict):
+            return text2.get("html")
+        if isinstance(text2, str):
+            return text2
+
+    # Top-level text2 (uncommon but seen in some Shiny proxies)
+    text2 = msg_data.get("text2")
+    if isinstance(text2, dict):
+        return text2.get("html")
+    if isinstance(text2, str):
+        return text2
+
+    return None
+
+
 async def _query_sts_ws(sts_input: dict) -> Dict[str, float]:
     init_msg, update_msg = _prepare_ws_messages(sts_input)
 
@@ -656,30 +693,45 @@ async def _query_sts_ws(sts_input: dict) -> Dict[str, float]:
         await asyncio.sleep(1.0)
         await ws.send(update_msg)
 
+        _seen_methods: set = set()
         for _ in range(80):
             try:
                 msg = await asyncio.wait_for(ws.recv(), timeout=30)
             except asyncio.TimeoutError:
+                _sts_log.debug(
+                    "STS Score ws_timeout — methods seen: %s",
+                    sorted(_seen_methods) or "(none)",
+                )
                 return {}
 
             try:
                 msg_data = json.loads(msg)
-                # Check both possible response structures
-                values = msg_data.get("values", {})
-                text2 = values.get("text2")
-                html_val = None
-                if isinstance(text2, dict):
-                    html_val = text2.get("html")
-                elif isinstance(text2, str):
-                    html_val = text2
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            _seen_methods.add(msg_data.get("method", "(no method)"))
+
+            try:
+                html_val = _extract_text2_html(msg_data)
 
                 if html_val and ("Operative Mortality" in html_val or "Mortality" in html_val):
                     result = _parse_html_response(html_val)
                     if result and "predmort" in result:
                         return result
-            except (json.JSONDecodeError, AttributeError, KeyError):
+                    # HTML found but parsing failed — log a snippet for diagnosis
+                    _sts_log.warning(
+                        "STS Score html_parse_failure: found Mortality HTML but got keys=%s; "
+                        "snippet: %.120s",
+                        list(result.keys()),
+                        html_val[:120],
+                    )
+            except (AttributeError, KeyError):
                 continue
 
+    _sts_log.debug(
+        "STS Score ws_no_result — methods seen: %s",
+        sorted(_seen_methods) or "(none)",
+    )
     return {}
 
 

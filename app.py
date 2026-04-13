@@ -147,11 +147,11 @@ def _eligibility_summary(xlsx_path: str) -> pd.DataFrame:
     info = _cached_eligibility_info(xlsx_path)
     rows = [
         {
-            tr("Step", "Etapa"): tr("Preoperative rows read", "Linhas lidas em Preoperative"),
+            tr("Step", "Etapa"): tr("Preoperative rows read", "Linhas lidas na planilha 'Preoperative'"),
             tr("Count", "Quantidade"): int(info.get("pre_rows_before_criteria", 0)),
         },
         {
-            tr("Step", "Etapa"): tr("Excluded: missing Surgery or Procedure Date", "Excluídos: Surgery ou Procedure Date ausentes"),
+            tr("Step", "Etapa"): tr("Excluded: missing Surgery or Procedure Date", "Excluídos por ausência de 'Surgery' ou 'Procedure Date'"),
             tr("Count", "Quantidade"): int(info.get("excluded_missing_surgery_or_date", 0)),
         },
         {
@@ -159,15 +159,15 @@ def _eligibility_summary(xlsx_path: str) -> pd.DataFrame:
             tr("Count", "Quantidade"): int(info.get("pre_rows_after_criteria", 0)),
         },
         {
-            tr("Step", "Etapa"): tr("Unique patient-procedure keys in Postoperative", "Chaves paciente-procedimento únicas em Postoperative"),
+            tr("Step", "Etapa"): tr("Unique patient-procedure keys in Postoperative", "Chaves únicas na planilha 'Postoperative'"),
             tr("Count", "Quantidade"): int(info.get("post_unique_patient_date", 0)),
         },
         {
-            tr("Step", "Etapa"): tr("Matched Preoperative-Postoperative rows", "Linhas pareadas Preoperative-Postoperative"),
+            tr("Step", "Etapa"): tr("Matched Preoperative-Postoperative rows", "Linhas pareadas ('Preoperative' ↔ 'Postoperative')"),
             tr("Count", "Quantidade"): int(info.get("matched_pre_post_rows", 0)),
         },
         {
-            tr("Step", "Etapa"): tr("Excluded: no Preoperative-Postoperative match", "Excluídos: sem pareamento Preoperative-Postoperative"),
+            tr("Step", "Etapa"): tr("Excluded: no Preoperative-Postoperative match", "Excluídos sem correspondência em 'Postoperative'"),
             tr("Count", "Quantidade"): int(info.get("excluded_no_pre_post_match", 0)),
         },
     ]
@@ -2044,14 +2044,14 @@ def general_table_column_config(kind: str) -> dict:
             "sts_score": st.column_config.NumberColumn(
                 "STS",
                 help=tr(
-                    "STS Operative Mortality calculated by the app via automated query to the STS web calculator. Not read from the input file.",
-                    "Mortalidade Operatória do STS calculada pelo app via consulta automatizada à calculadora web do STS. Não lida do arquivo de entrada.",
+                    "STS Score Operative Mortality calculated by the app via automated query to the STS Score web calculator. Not read from the input file.",
+                    "Mortalidade Operatória do STS Score calculada pelo app via consulta automatizada à calculadora web do STS Score. Não lida do arquivo de entrada.",
                 ),
                 format="%.4f",
             ),
             "classe_ia": st.column_config.TextColumn(tr("IA class", "Classe IA")),
             "classe_euro": st.column_config.TextColumn(tr("EuroSCORE class", "Classe EuroSCORE")),
-            "classe_sts": st.column_config.TextColumn(tr("STS class", "Classe STS")),
+            "classe_sts": st.column_config.TextColumn(tr("STS Score class", "Classe STS Score")),
         }
     return {}
 
@@ -2856,7 +2856,7 @@ if _active_tab == 0:  # Overview
                 "Exporte os metadados para rastreamento de versões, comparação de bundles e validação externa.",
             ))
 
-    st.subheader(tr("IA Model Performance", "Desempenho dos modelos de IA"))
+    st.subheader(tr("AI Model Performance", "Desempenho dos modelos de IA"))
     st.caption(
         tr(
             "Stratified cross-validation grouped by patient (same patient never appears in both train and test folds).",
@@ -2894,7 +2894,7 @@ if _active_tab == 0:  # Overview
             tr("Source", "Origem"): [
                 tr("Cross-validated out-of-fold predictions", "Predições out-of-fold por validação cruzada"),
                 tr("Published logistic equation (Nashef et al., 2012)", "Equação logística publicada (Nashef et al., 2012)"),
-                tr("Automated query to the STS web calculator", "Consulta automatizada à calculadora web do STS"),
+                tr("Automated query to the STS Score web calculator", "Consulta automatizada à calculadora web do STS Score"),
             ],
         }
     )
@@ -3037,7 +3037,7 @@ elif _active_tab == 1:  # Individual Prediction
             if custom_surgery:
                 surgery_parts.append(custom_surgery)
             surgery = ", ".join([p for p in surgery_parts if str(p).strip()])
-            st.caption(tr("STS Score will be calculated automatically via the STS web calculator.", "O STS Score será calculado automaticamente via a calculadora web do STS."))
+            st.caption(tr("STS Score will be calculated automatically via the STS Score web calculator.", "O STS Score será calculado automaticamente via a calculadora web do STS Score."))
 
         st.markdown(tr("**Coronary artery disease**", "**Doença coronariana**"))
         cor1, cor2 = st.columns(2)
@@ -3374,12 +3374,12 @@ elif _active_tab == 1:  # Individual Prediction
             st.dataframe(out, width="stretch", column_config=general_table_column_config("patient_scores"))
             # Show all STS sub-scores if available
             if sts_result:
-                st.markdown(tr("**STS Sub-scores (web calculator)**", "**Sub-escores STS (calculadora web)**"))
+                st.markdown(tr("**STS Score Sub-scores (web calculator)**", "**Sub-escores STS Score (calculadora web)**"))
                 sts_rows = []
                 for key, label in STS_LABELS.items():
                     val = sts_result.get(key, np.nan)
                     sts_rows.append({
-                        tr("STS Endpoint", "Desfecho STS"): label,
+                        tr("STS Score Endpoint", "Desfecho STS Score"): label,
                         tr("Value", "Valor"): f"{val*100:.2f}%" if not (isinstance(val, float) and np.isnan(val)) else "-",
                     })
                 st.dataframe(pd.DataFrame(sts_rows), width="stretch", column_config=general_table_column_config("sts_subscores"))
@@ -4539,8 +4539,8 @@ elif _active_tab == 4:  # Batch & Export
 
     st.caption(
         tr(
-            "Note: All scores are calculated by the app — not read from the input file. EuroSCORE II is computed from the published logistic equation (Nashef et al., 2012). STS is obtained via automated query to the STS web calculator.",
-            "Nota: Todos os escores são calculados pelo app — não lidos do arquivo de entrada. EuroSCORE II é calculado pela equação logística publicada (Nashef et al., 2012). STS é obtido via consulta automatizada à calculadora web do STS.",
+            "Note: All scores are calculated by the app — not read from the input file. EuroSCORE II is computed from the published logistic equation (Nashef et al., 2012). STS Score is obtained via automated query to the STS Score web calculator.",
+            "Nota: Todos os escores são calculados pelo app — não lidos do arquivo de entrada. EuroSCORE II é calculado pela equação logística publicada (Nashef et al., 2012). STS Score é obtido via consulta automatizada à calculadora web do STS Score.",
         )
     )
 
@@ -4550,10 +4550,10 @@ elif _active_tab == 4:  # Batch & Export
     st.caption(
         tr(
             "Upload a CSV or Excel file with the same clinical variables used in training. "
-            "Each row will receive AI Risk, EuroSCORE II, and STS predictions. "
+            "Each row will receive AI Risk, EuroSCORE II, and STS Score predictions. "
             "Outcome column (morte_30d) is NOT required.",
             "Faça upload de um arquivo CSV ou Excel com as mesmas variáveis clínicas usadas no treinamento. "
-            "Cada linha receberá predições de AI Risk, EuroSCORE II e STS. "
+            "Cada linha receberá predições de AI Risk, EuroSCORE II e STS Score. "
             "A coluna de desfecho (morte_30d) NÃO é necessária.",
         )
     )
@@ -4613,7 +4613,7 @@ elif _active_tab == 4:  # Batch & Export
                 key="batch_show_all_models",
             )
             _include_sts = st.checkbox(
-                tr("Include STS (requires internet, ~1 min per 50 patients)", "Incluir STS (requer internet, ~1 min a cada 50 pacientes)"),
+                tr("Include STS Score (requires internet, ~1 min per 50 patients)", "Incluir STS Score (requer internet, ~1 min a cada 50 pacientes)"),
                 value=False,
                 key="batch_include_sts",
             )
@@ -4794,8 +4794,8 @@ elif _active_tab == 4:  # Batch & Export
                         st.caption(tr(
                             f"STS Score — Cache hits: {_sts_hits} | Misses: {_sts_fresh} | "
                             f"Refreshed: {_sts_refreshed} | Stale fallback: {_sts_stale} | Failed: {_sts_failed_n}",
-                            f"STS Score — Cache acertos: {_sts_hits} | Faltas: {_sts_fresh} | "
-                            f"Atualizados: {_sts_refreshed} | Fallback antigo: {_sts_stale} | Falhas: {_sts_failed_n}",
+                            f"STS Score — Cache acertos: {_sts_hits} | Novas buscas: {_sts_fresh} | "
+                            f"Atualizados: {_sts_refreshed} | Cache expirado reutilizado: {_sts_stale} | Falhas: {_sts_failed_n}",
                         ))
                         # Phase 3: execution details expander.
                         with st.expander(tr("View STS Score execution details", "Ver detalhes de execução do STS Score"), expanded=False):
