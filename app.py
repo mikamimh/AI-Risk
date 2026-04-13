@@ -4740,19 +4740,17 @@ elif _active_tab == 4:  # Batch & Export
                 if HAS_STS and _include_sts:
                     _batch_local_phase_slot.empty()
                     _sts_phase_slot = st.empty()
-                    _sts_progress = st.progress(0, text=tr(
-                        f"STS Score — Phase 1/4: checking cache: 0/{_n_total}",
-                        f"STS Score — Fase 1/4: verificando cache: 0/{_n_total}",
-                    ))
+                    _sts_progress = st.progress(0, text=tr("STS Score…", "STS Score…"))
                     _sts_last_phase: list = ["", ""]  # [label, detail]
                     try:
                         def _sts_phase_cb(phase_num, phase_total, label, detail=""):
                             _sts_last_phase[0] = label
                             _sts_last_phase[1] = detail
                             try:
+                                # Secondary / sub-status line — lighter than the macro phase slot above
                                 _sts_phase_slot.caption(tr(
-                                    f"STS Score — Phase {phase_num}/{phase_total}: {label}",
-                                    f"STS Score — Fase {phase_num}/{phase_total}: {label}",
+                                    f"↳ STS Score subphase {phase_num}/{phase_total}: {label}",
+                                    f"↳ STS Score subfase {phase_num}/{phase_total}: {label}",
                                 ))
                             except Exception:
                                 pass
@@ -5866,22 +5864,18 @@ elif _active_tab == 9:  # Temporal Validation
                             "consultando calculadora web STS Score",
                         ))
                         _tv_sts_phase_slot = st.empty()
-                        _tv_progress.progress(0.50, text=tr(
-                            "STS Score — Phase 1/4: checking cache...",
-                            "STS Score — Fase 1/4: verificando cache...",
-                        ))
+                        _tv_progress.progress(0.50, text=tr("STS Score…", "STS Score…"))
                         def _tv_sts_phase_cb(phase_num, phase_total, label, detail=""):
                             try:
+                                # Secondary / sub-status line — lighter than the macro phase slot above
                                 _tv_sts_phase_slot.caption(tr(
-                                    f"STS Score — Phase {phase_num}/{phase_total}: {label}",
-                                    f"STS Score — Fase {phase_num}/{phase_total}: {label}",
+                                    f"↳ STS Score subphase {phase_num}/{phase_total}: {label}",
+                                    f"↳ STS Score subfase {phase_num}/{phase_total}: {label}",
                                 ))
+                                # Progress bar advances but does not repeat the label (already in slot above)
                                 _tv_progress.progress(
                                     0.50 + 0.28 * (phase_num / phase_total),
-                                    text=tr(
-                                        f"STS Score — Phase {phase_num}/{phase_total}: {label}",
-                                        f"STS Score — Fase {phase_num}/{phase_total}: {label}",
-                                    ),
+                                    text=tr("STS Score…", "STS Score…"),
                                 )
                             except Exception:
                                 pass

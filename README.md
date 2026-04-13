@@ -137,6 +137,22 @@ Optional sheets/tables:
 
 A single table with all variables. Must include a `morte_30d` or `Death` column for the outcome.
 
+**Accepted `Death` / `morte_30d` column values** — the canonical timing-based format is preferred, but boolean-style labels are also accepted as a fallback:
+
+| Value(s) | Interpretation |
+|:--|:--|
+| `Operative`, `Death` | event = 1 (operative/in-hospital death) |
+| `0` | event = 1 (death on day of surgery) |
+| `1` … `30` | event = 1 (death within 30 days) |
+| `31`, `> 30`, `>30` | event = 0 (death beyond 30-day window) |
+| `-`, `--` | event = 0 (survivor, standard encoding) |
+| `Yes`, `yes`, `Y`, `y`, `True`, `true`, `Sim`, `sim` | event = 1 (boolean fallback) |
+| `No`, `no`, `N`, `n`, `False`, `false`, `Não`, `Nao`, `nao` | event = 0 (boolean fallback) |
+| blank, `nan`, `none`, `-` | missing — treated as 0 with no warning |
+| anything else | treated as 0, a warning is emitted — review those records |
+
+Timing-based values always take precedence over boolean labels. Boolean labels are only applied when the timing parser cannot interpret the value.
+
 ### Ingestion & normalization
 
 All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converge on a single normalization routine so that downstream code sees a consistent analytical dataset regardless of the input format:
@@ -191,16 +207,22 @@ Severity is classified independently of the Python exception layer: partial fail
 
 ## Progress transparency
 
-Long-running flows emit phased progress labels so the user always knows which stage is running:
+Long-running flows emit phased progress so the user always knows which stage is running. The display is hierarchical — one primary status, one optional secondary substatus:
 
-| Flow | Phases |
+- **Primary status** (`Phase N/N: label`) — the macro phase of the current flow, shown as a caption below the progress bar.
+- **Secondary substatus** (`↳ STS Score subphase N/4: label`) — shown only when an STS Score query is in progress inside a larger flow; visually lighter (indented `↳` prefix) so it reads as a detail under the primary, not a competing status.
+- **Progress bar** — advances through the full flow. During STS Score subphases the bar text shows `"STS Score…"` to avoid repeating the label already visible in the substatus line.
+- **Compact summary** — after STS Score completes: `Cache hits: N | Misses: N | Refreshed: N | Stale fallback: N | Failed: N`.
+- **Details expander** — collapsible, shows last phase, last subphase, and any per-patient incidents.
+
+| Flow | Primary phases |
 |:--|:--|
 | Training / retraining | 1/5 loading and preparing dataset → 2/5 cohort eligibility → 3/5 training candidate models → 4/5 computing scores (EuroSCORE II / STS Score) → 5/5 building reports and bundle |
 | Batch new-patient prediction — local phase | 1/2 applying AI Risk + EuroSCORE II → 2/2 consolidating results |
-| Batch new-patient prediction — STS Score phase | 1/4 checking cache → 2/4 identifying misses → 3/4 querying web calculator → 4/4 validating and consolidating results |
+| Batch new-patient prediction — STS Score subphases | ↳ 1/4 checking cache → ↳ 2/4 identifying misses → ↳ 3/4 querying web calculator → ↳ 4/4 validating and consolidating |
 | Temporal validation | 1/5 loading cohort → 2/5 applying AI Risk model → 3/5 computing EuroSCORE II → 4/5 querying STS Score web calculator → 5/5 computing metrics and consolidating |
 
-Each phase is displayed as a caption below the progress bar ("Phase N/N: label"). The caption is cleared automatically when the flow completes. A collapsible execution-detail expander is shown after each major local flow completes, reporting the last phase reached and any relevant counts or incidents.
+Primary phase captions are cleared automatically when the flow completes. A collapsible execution-detail expander is shown after each major local flow completes, reporting the last phase, last subphase, and any relevant counts or incidents.
 
 ## Session reuse
 

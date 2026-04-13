@@ -675,6 +675,13 @@ class PostopTiming:
 
 _SURVIVOR_TOKENS = {"-", "--"}
 
+# Boolean-style outcome labels used in flat CSV / batch files.
+# Applied in map_death_30d as a fallback *after* timing-based parsing
+# returns unknown — the canonical timing logic (operative, day counts,
+# >threshold) always takes precedence.
+_BOOLEAN_EVENT_TOKENS = {"yes", "y", "true", "sim"}          # → event = 1
+_BOOLEAN_SURVIVOR_TOKENS = {"no", "n", "false", "não", "nao"}  # → no event = 0
+
 
 def parse_postop_timing(value: object) -> PostopTiming:
     """Parse a postoperative timing value into a :class:`PostopTiming`.
@@ -693,12 +700,6 @@ def parse_postop_timing(value: object) -> PostopTiming:
 
     if txt_lower in _SURVIVOR_TOKENS:
         return PostopTiming(txt, "survivor", None, None, False, False)
-
-    if txt_lower in {"no", "não", "nao"}:
-        return PostopTiming(txt, "survivor", None, None, False, False)
-
-    if txt_lower in {"yes", "sim"}:
-        return PostopTiming(txt, "event_occurred_no_day", None, None, True, True)
 
     if txt_lower == "operative":
         return PostopTiming(txt, "operative", 0, None, True, True)
@@ -725,22 +726,33 @@ def parse_postop_timing(value: object) -> PostopTiming:
 def map_death_30d(value: object) -> int:
     """Map a Death column value to 30-day mortality (0 or 1).
 
-    Delegates to :func:`parse_postop_timing` for parsing, then returns
-    ``1`` if the event occurred within 30 days, ``0`` otherwise.
-    Preserves legacy behaviour: unrecognised values map to 0 with warning.
+    Resolution order:
+    1. Canonical timing logic via :func:`parse_postop_timing`:
+       survivor tokens ("-", "--") → 0; operative / day 0 → 1;
+       numeric day 1-30 → 1; day >30 or ">30" → 0; "death" → 1.
+    2. Boolean-style fallback (only when timing returns unknown):
+       yes / y / true / sim → 1;  no / n / false / não / nao → 0.
+    3. Truly unrecognised: warn and return 0 (legacy safe default).
     """
     timing = parse_postop_timing(value)
     if timing.category == "survivor":
         return 0
-    if timing.category == "unknown":
-        if timing.raw_value and timing.raw_value.lower() not in MISSING_TOKENS:
-            warnings.warn(
-                f"map_death_30d: unrecognised value '{timing.raw_value}' "
-                "— treated as 0 (survivor). Please review this record.",
-                stacklevel=2,
-            )
+    if timing.category != "unknown":
+        return int(timing.within_30d)
+    # Timing parser could not interpret the value — try boolean labels.
+    raw_lower = (timing.raw_value or "").lower()
+    if raw_lower in _BOOLEAN_EVENT_TOKENS:
+        return 1
+    if raw_lower in _BOOLEAN_SURVIVOR_TOKENS:
         return 0
-    return int(timing.within_30d)
+    # Truly unrecognised: warn and fall back to 0.
+    if timing.raw_value and raw_lower not in MISSING_TOKENS:
+        warnings.warn(
+            f"map_death_30d: unrecognised value '{timing.raw_value}' "
+            "— treated as 0 (survivor). Please review this record.",
+            stacklevel=2,
+        )
+    return 0
 
 
 def is_combined_surgery(text: object) -> int:
