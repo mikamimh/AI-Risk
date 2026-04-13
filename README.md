@@ -117,6 +117,19 @@ streamlit run app.py
 
 3. Your browser should open automatically.
 
+### Local Windows launcher (AI Risk.exe)
+
+`AI Risk.exe` is a small compiled launcher (not a bundled app — Python and all dependencies remain in the normal environment). Double-click it instead of the `.bat` file to start the app.
+
+**Python resolution order:**
+1. `.venv\Scripts\python.exe` — project virtual environment (preferred)
+2. `venv\Scripts\python.exe` — alternate venv name
+3. `python` / `python3` on the system `PATH`
+
+The launcher verifies that Streamlit is available in the resolved environment before starting. If it fails, the console window stays open with a message explaining what was found and what to fix.
+
+**To rebuild the exe** after changing `launcher.py`, run `build_exe.bat`.
+
 ## Expected data structure
 
 The app accepts multiple data formats:
