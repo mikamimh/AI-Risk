@@ -161,6 +161,8 @@ To test these scenarios, it helps to temporarily disable network access or use a
 
 Prerequisites: a `.joblib` bundle saved under a prior model version (before the most recent code change).
 
+See [BUNDLE_COMPATIBILITY.md](./BUNDLE_COMPATIBILITY.md) for the formal schema-versioning policy and [tests/test_bundle_schema_version.py](../tests/test_bundle_schema_version.py) for the automated coverage of these scenarios.
+
 | # | Scenario | Expected Result | C/O |
 |:--|:--|:--|:--:|
 | 11.1 | Load an old bundle on app startup | App loads without crash; no `AttributeError` or `KeyError` on bundle fields | **C** |
@@ -218,4 +220,4 @@ The following areas are not covered by this manual checklist and represent known
 | Multi-format ingestion (DB, Parquet) | The checklist covers XLSX/CSV but not `.db`/`.sqlite`/`.parquet` sources. These share the same normalization path but have separate loading code. |
 | Calibration correctness | No test verifies that the per-model calibration strategy (isotonic vs. sigmoid) is still applied correctly inside each CV fold after changes to `modeling.py`. |
 | Language toggle (EN/PT) | The bilingual UI is not covered. A change that breaks Portuguese labels would not be caught by any test above. Low impact for research use, but worth a spot-check after UI changes. |
-| Bundle schema versioning | There is no formal schema version field in the bundle. Test 11.5 (graceful handling of missing fields) relies on `dict.get()` defaults throughout the codebase — no automated check verifies that every new field has a safe fallback. |
+| Bundle schema versioning | A formal `bundle_schema_version` field now exists (see [BUNDLE_COMPATIBILITY.md](./BUNDLE_COMPATIBILITY.md)) and `tests/test_bundle_schema_version.py` covers legacy-load and missing-field scenarios. Gap remaining: no check enforces that **every new optional field** added to `TrainedArtifacts` has a safe fallback — still a convention, not a test. |

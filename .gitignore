@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 .ia_risk_cache/
 catboost_info/
@@ -19,6 +20,18 @@ temp/
 .venv/
 venv/
 env/
+
+# Packaged binary + PyInstaller intermediates.  The binary is produced by
+# `build_exe.bat`; only the source (app.py, launcher.py, build_exe.bat) is
+# versioned.  `build/` is the workdir PyInstaller writes into.
+AI Risk.exe
+*.exe
+build/
+dist/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
 
 .streamlit/secrets.toml
 .claude/settings.local.json

@@ -260,6 +260,51 @@ def check_temporal_overlap(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Chronological state — explicit four-way classification
+# ---------------------------------------------------------------------------
+
+# Canonical state names returned by ``check_temporal_overlap`` under the
+# ``status`` key.  Exposing them as constants keeps call-sites type-safe and
+# lets UI code dispatch on a closed set rather than on free-form strings.
+CHRONO_STATE_NO_OVERLAP: str = "no_overlap"
+CHRONO_STATE_OVERLAP: str = "overlap"
+CHRONO_STATE_RETROGRADE: str = "validation_before_training"
+CHRONO_STATE_UNKNOWN: str = "unknown"
+
+CHRONO_STATES: tuple = (
+    CHRONO_STATE_NO_OVERLAP,
+    CHRONO_STATE_OVERLAP,
+    CHRONO_STATE_RETROGRADE,
+    CHRONO_STATE_UNKNOWN,
+)
+
+
+def chronological_state_label(status: str, language: str = "English") -> str:
+    """Human-readable label for a chronological state.
+
+    Given one of the canonical status strings produced by
+    ``check_temporal_overlap`` (``no_overlap``, ``overlap``,
+    ``validation_before_training``, ``unknown``), return a short label suited
+    for UI display.  Unknown inputs fall back to the ``unknown`` label so the
+    UI never silently hides an unrecognised state.
+    """
+    en = {
+        CHRONO_STATE_NO_OVERLAP: "No overlap",
+        CHRONO_STATE_OVERLAP: "Partial overlap",
+        CHRONO_STATE_RETROGRADE: "Retrograde validation",
+        CHRONO_STATE_UNKNOWN: "Unknown chronology",
+    }
+    pt = {
+        CHRONO_STATE_NO_OVERLAP: "Sem sobreposição",
+        CHRONO_STATE_OVERLAP: "Sobreposição parcial",
+        CHRONO_STATE_RETROGRADE: "Validação retrógrada",
+        CHRONO_STATE_UNKNOWN: "Cronologia desconhecida",
+    }
+    table = en if language == "English" else pt
+    return table.get(status, table[CHRONO_STATE_UNKNOWN])
+
+
 def format_locked_model_for_display(
     metadata: dict,
     language: str = "English",

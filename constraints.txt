@@ -1,0 +1,54 @@
+# Dependency constraints — pinned versions the test suite is known to pass
+# against.  Companion to ``requirements.txt``, which remains the manifesto of
+# direct dependencies with ``>=`` lower bounds.  This file pins those same
+# top-level packages to a specific known-good version so CI and local
+# installs are reproducible.
+#
+# Scope: only direct (top-level) dependencies are pinned here.  Transitive
+# dependencies are deliberately NOT pinned — pip resolves them freshly
+# within the window allowed by these top-level pins.  Rationale: this is a
+# conservative middle-ground that protects against the main regression
+# source (major version bumps of pandas / numpy / scikit-learn / xgboost /
+# …) without the brittleness of a full transitive lock that would need to
+# be regenerated per Python version.
+#
+# Usage — install with both files applied:
+#
+#     pip install -r requirements.txt -c constraints.txt
+#
+# The versions below were captured from a working local environment whose
+# ``pytest -q`` run passes 156/156 tests.  To bump a pin: edit the value,
+# run the suite locally, push the change in its own PR, confirm CI is
+# green, merge.
+
+# Core numeric / data stack
+numpy==2.4.2
+pandas==2.3.3
+scipy==1.17.1
+scikit-learn==1.8.0
+
+# Gradient boosting
+xgboost==3.2.0
+lightgbm==4.6.0
+catboost==1.2.10
+
+# Plotting
+matplotlib==3.10.8
+
+# UI
+streamlit==1.54.0
+
+# I/O
+openpyxl==3.1.5
+pyarrow==23.0.1
+xlrd==2.0.1
+
+# STS web calculator
+websockets==16.0
+
+# Explainability
+shap==0.51.0
+
+# Reporting (PDF + Markdown tables)
+fpdf2==2.8.7
+tabulate==0.10.0

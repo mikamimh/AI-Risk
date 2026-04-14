@@ -37,6 +37,74 @@ def test_import_batch_export_module():
     assert callable(getattr(batch_export, "render", None))
 
 
+def test_import_temporal_validation_module():
+    """tabs.temporal_validation imports and exposes render()."""
+    from tabs import temporal_validation
+    assert callable(getattr(temporal_validation, "render", None))
+    # Helper moved out of app.py — verify it travelled with the tab.
+    assert callable(getattr(temporal_validation, "_sts_score_status_caption", None))
+
+
+# ---------------------------------------------------------------------------
+# 1b. Chronological-state labels — the four canonical states are exposed.
+# ---------------------------------------------------------------------------
+
+def test_chronological_state_labels_are_distinct_and_cover_all_states():
+    """All four chronological states produce a distinct, non-empty label."""
+    from temporal_validation import (
+        CHRONO_STATE_NO_OVERLAP,
+        CHRONO_STATE_OVERLAP,
+        CHRONO_STATE_RETROGRADE,
+        CHRONO_STATE_UNKNOWN,
+        CHRONO_STATES,
+        chronological_state_label,
+    )
+    assert set(CHRONO_STATES) == {
+        CHRONO_STATE_NO_OVERLAP,
+        CHRONO_STATE_OVERLAP,
+        CHRONO_STATE_RETROGRADE,
+        CHRONO_STATE_UNKNOWN,
+    }
+    for lang in ("English", "Portuguese"):
+        labels = {s: chronological_state_label(s, lang) for s in CHRONO_STATES}
+        # All four labels must be non-empty and unique within a language.
+        assert all(labels.values())
+        assert len(set(labels.values())) == len(CHRONO_STATES)
+    # English and Portuguese differ for the same state (i18n actually wired).
+    assert (
+        chronological_state_label(CHRONO_STATE_RETROGRADE, "English")
+        != chronological_state_label(CHRONO_STATE_RETROGRADE, "Portuguese")
+    )
+    # Unknown/garbage input falls back to the "unknown" label (never raises).
+    fallback = chronological_state_label("not_a_real_state", "English")
+    assert fallback == chronological_state_label(CHRONO_STATE_UNKNOWN, "English")
+
+
+def test_check_temporal_overlap_status_belongs_to_canonical_set():
+    """check_temporal_overlap must only emit one of the four canonical states."""
+    from temporal_validation import check_temporal_overlap, CHRONO_STATES
+    cases = [
+        # (train_start, train_end, val_start, val_end, expected_in_set)
+        ("2020-Q1", "2021-Q4", "2022-Q1", "2023-Q4"),   # no_overlap
+        ("2020-Q1", "2022-Q4", "2022-Q1", "2023-Q4"),   # overlap
+        ("2022-Q1", "2023-Q4", "2020-Q1", "2021-Q4"),   # retrograde
+        ("Unknown",  "Unknown",  "2022-Q1", "2023-Q4"), # unknown
+    ]
+    for ts, te, vs, ve in cases:
+        r = check_temporal_overlap(ts, te, vs, ve)
+        assert r["status"] in CHRONO_STATES, f"Bad status: {r['status']}"
+
+
+def test_model_metadata_reexports_chronological_helpers():
+    """Back-compat: model_metadata continues to re-export the new helpers."""
+    import model_metadata as mm
+    assert callable(getattr(mm, "chronological_state_label", None))
+    assert hasattr(mm, "CHRONO_STATE_NO_OVERLAP")
+    assert hasattr(mm, "CHRONO_STATE_OVERLAP")
+    assert hasattr(mm, "CHRONO_STATE_RETROGRADE")
+    assert hasattr(mm, "CHRONO_STATE_UNKNOWN")
+
+
 # ---------------------------------------------------------------------------
 # 2. TabContext instantiation
 # ---------------------------------------------------------------------------

@@ -1,0 +1,62 @@
+name: CI
+
+# Minimal, conservative CI: install project deps, run the existing pytest
+# suite on every push to main and every pull request.  The goal of this
+# workflow is exactly one thing — catch regressions automatically.  It
+# deliberately avoids linting, type-checking, multi-version matrices, or
+# coverage reporting so that the first CI iteration is reliable and fast.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref — saves minutes when a branch is
+# pushed to repeatedly in quick succession.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (Python 3.11, ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Python 3.11 is the conservative choice: every heavy wheel the
+      # project pulls in (numpy, pandas, scikit-learn, xgboost, lightgbm,
+      # catboost, scipy, pyarrow, matplotlib, streamlit, shap) ships
+      # mature manylinux wheels for it, and it is the longest-supported
+      # modern release in the scientific-Python ecosystem.  The developer
+      # machine runs 3.14, but CI picks the version with the broadest
+      # binary-wheel coverage to minimise install flakiness.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          # Re-key the pip cache on both the manifest and the constraints
+          # file so a pin bump invalidates the cache predictably.
+          cache-dependency-path: |
+            requirements.txt
+            constraints.txt
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # constraints.txt pins top-level deps to versions the test suite
+          # is known to pass against; requirements.txt remains the manifest
+          # of direct deps.  See constraints.txt for the bump procedure.
+          pip install -r requirements.txt -c constraints.txt
+          # pytest is a CI-only tool and is deliberately NOT added to
+          # requirements.txt (which is the runtime app manifest).  Pinning
+          # is avoided here — the tests do not rely on pytest-internal
+          # behaviour that has changed across recent major releases.
+          pip install pytest
+
+      - name: Run test suite
+        run: python -m pytest -q

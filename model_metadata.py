@@ -41,6 +41,11 @@ from temporal_validation import (
     build_temporal_validation_summary,
     is_surrogate_timeline,
     build_surrogate_timeline_note,
+    chronological_state_label,
+    CHRONO_STATE_NO_OVERLAP,
+    CHRONO_STATE_OVERLAP,
+    CHRONO_STATE_RETROGRADE,
+    CHRONO_STATE_UNKNOWN,
 )
 # Backward-compat alias: build_model_metadata (below) and any caller that uses
 # the private-style name both continue to work without modification.

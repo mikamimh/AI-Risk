@@ -208,6 +208,7 @@ Extracted from app.py during Phase 4. Solves Streamlit's module-reload problem: 
 - `bundle_signature(xlsx_path)` — stable cache key (file path + mtime_ns + size + model version) used by app.py to decide whether retraining is needed
 - `serialize_bundle(bundle)` — converts `PreparedData`, `TrainedArtifacts`, and `RunReport` to plain dicts before `joblib.dump`
 - `deserialize_bundle(bundle)` — reverses the above; reloads `modeling` and `observability` via `importlib.reload` to use the currently live class definitions; reconstructs `RunReport` via `RunReport.from_dict()`
+- `normalize_payload(payload)` / `validate_payload(payload)` / `BUNDLE_SCHEMA_VERSION` — explicit schema versioning for the persisted payload, with in-memory upgrade of legacy bundles. Policy and bump checklist in [BUNDLE_COMPATIBILITY.md](./BUNDLE_COMPATIBILITY.md).
 
 ### report_text.py
 **Manuscript-ready Methods and Results text builders — no Streamlit dependencies**

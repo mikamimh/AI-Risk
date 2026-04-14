@@ -299,7 +299,7 @@ A: Yes! Combine Excel sheets first, then import. Consider testing institutional 
 A: Models may have wider confidence intervals and reduced calibration. Consider collecting more data or using a simpler model (LogisticRegression). Class weighting is intentionally not applied, so that predicted probabilities reflect the true event rate.
 
 **Q: Can I export the trained model?**
-A: Yes, `ia_risk_bundle.joblib` is the pickled model bundle. Python only (use `joblib.load()`).
+A: Yes, `ia_risk_bundle.joblib` is the pickled model bundle. Python only (use `joblib.load()`). For the payload shape and backward-compatibility policy (including how bundles from older versions are handled), see [BUNDLE_COMPATIBILITY.md](./BUNDLE_COMPATIBILITY.md).
 
 **Q: How do I update the model with new data?**
 A: Delete `ia_risk_bundle.joblib` and re-run app.py with updated Excel file.

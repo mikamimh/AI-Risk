@@ -3,7 +3,14 @@
     "allow": [
       "Bash(python -c ':*)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('app.py OK'\\)\")",
-      "Bash(python -m pytest tests/ -x -q)"
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(ls *.py)",
+      "Bash(python)",
+      "Bash(ls *.toml *.cfg *.txt)",
+      "Bash(ls requirements*.txt)",
+      "Bash(pip show:*)",
+      "Bash(python -m pip list)",
+      "Bash(python -m pip show numpy xgboost scikit-learn streamlit)"
     ]
   }
 }

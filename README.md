@@ -1,5 +1,7 @@
 # AI Risk — Cardiac Surgery Risk Stratification
 
+[![CI](https://github.com/mikamimh/AI-Risk/actions/workflows/ci.yml/badge.svg)](https://github.com/mikamimh/AI-Risk/actions/workflows/ci.yml)
+
 Research tool developed as part of a master's dissertation on risk stratification in cardiovascular surgery using artificial intelligence.
 
 ## What this app does
@@ -123,20 +125,30 @@ After each STS Score batch run, a compact summary line is shown (Cache hits / Mi
 1. Install dependencies:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt -c constraints.txt
 ```
 
-2. Start the app:
+`requirements.txt` declares the direct dependencies (`>=` lower bounds); `constraints.txt` pins them to known-good versions for reproducible installs.
+
+2. Run the test suite:
+
+```bash
+python -m pytest -q
+```
+
+3. Start the app:
 
 ```bash
 streamlit run app.py
 ```
 
-3. Your browser should open automatically.
+4. Your browser should open automatically.
 
 ### Local Windows launcher (AI Risk.exe)
 
 `AI Risk.exe` is a small compiled launcher (not a bundled app — Python and all dependencies remain in the normal environment). Double-click it instead of the `.bat` file to start the app.
+
+> **Note:** `AI Risk.exe` is no longer versioned in the repository. Build it locally by running `build_exe.bat`.
 
 **Python resolution order:**
 1. `.venv\Scripts\python.exe` — project virtual environment (preferred)

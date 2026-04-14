@@ -34,6 +34,118 @@ from risk_data import PreparedData
 
 MODEL_VERSION = AppConfig.MODEL_VERSION
 
+# ---------------------------------------------------------------------------
+# Bundle schema versioning
+# ---------------------------------------------------------------------------
+# The persisted joblib payload is a dict with the shape:
+#
+#     {
+#         "bundle_schema_version": <int>,  # since v1
+#         "signature": {...},
+#         "bundle": {"prepared": {...}, "artifacts": {...}, "run_report": {...}?},
+#         "saved_at": "<iso-utc>",
+#         "training_source": "<filename>",
+#     }
+#
+# ``BUNDLE_SCHEMA_VERSION`` is the version every freshly written payload
+# carries.  Legacy payloads written before versioning was introduced do NOT
+# contain this key; ``read_payload_schema_version`` interprets their absence
+# as ``LEGACY_BUNDLE_SCHEMA_VERSION`` (0) and ``normalize_payload`` upgrades
+# them in-memory.
+#
+# Version history:
+#   0 — implicit, pre-versioning.  Inner bundle may omit any of the optional
+#       artifact fields (``oof_raw``, ``youden_thresholds``,
+#       ``best_youden_threshold``, ``calibration_method``) and ``run_report``.
+#       ``deserialize_bundle`` already tolerates these via ``.get()``.
+#   1 — current.  Adds the explicit ``bundle_schema_version`` field itself;
+#       no structural change to the inner bundle.  The inner optional-field
+#       tolerance from v0 is preserved and now *contractual*.
+BUNDLE_SCHEMA_VERSION = 1
+LEGACY_BUNDLE_SCHEMA_VERSION = 0
+
+
+class BundleSchemaError(ValueError):
+    """Raised when a payload is missing a field that is required regardless
+    of schema version (e.g. the inner ``bundle`` dict itself, or its
+    ``prepared`` / ``artifacts`` sections).  Optional fields never raise."""
+
+
+def read_payload_schema_version(payload: Dict[str, object]) -> int:
+    """Return the schema version stored on a loaded payload.
+
+    Missing / malformed → :data:`LEGACY_BUNDLE_SCHEMA_VERSION`.  The function
+    never raises: it is safe to call on arbitrary ``joblib.load`` output.
+    """
+    v = payload.get("bundle_schema_version") if isinstance(payload, dict) else None
+    if isinstance(v, bool):
+        # bool is a subclass of int — reject explicitly so a stray True/False
+        # cannot masquerade as a valid version.
+        return LEGACY_BUNDLE_SCHEMA_VERSION
+    if isinstance(v, int) and v >= 0:
+        return v
+    return LEGACY_BUNDLE_SCHEMA_VERSION
+
+
+def validate_payload(payload: Dict[str, object]) -> None:
+    """Raise :class:`BundleSchemaError` if the payload lacks truly-required
+    fields.  Optional fields are deliberately not checked here — they are
+    the responsibility of :func:`deserialize_bundle` and its ``.get()``
+    fallbacks.
+
+    Required:
+      * ``bundle`` — a dict containing ``prepared`` and ``artifacts``.
+
+    Everything else (signature, saved_at, training_source, run_report,
+    optional artifact fields) is tolerated as missing.
+    """
+    if not isinstance(payload, dict):
+        raise BundleSchemaError(f"payload must be a dict, got {type(payload).__name__}")
+    bundle = payload.get("bundle")
+    if not isinstance(bundle, dict):
+        raise BundleSchemaError("payload missing required 'bundle' dict")
+    for required in ("prepared", "artifacts"):
+        if required not in bundle:
+            raise BundleSchemaError(f"bundle missing required '{required}' section")
+
+
+def normalize_payload(payload: Dict[str, object]) -> Dict[str, object]:
+    """Return a shallow copy of ``payload`` upgraded to the current schema.
+
+    The return value always has:
+      * ``bundle_schema_version`` set to :data:`BUNDLE_SCHEMA_VERSION`
+      * ``_loaded_schema_version`` — the version actually read from disk
+        (useful for diagnostics / telemetry / user-visible compat notices).
+        This key is NOT re-persisted; callers should drop it before save.
+
+    No migration logic is currently required (v0 → v1 is purely the addition
+    of the version field; the inner ``deserialize_bundle`` already tolerates
+    every optional-field gap that existed in v0 payloads).  Future schema
+    bumps should branch on ``source_version`` here before writing the
+    upgraded fields onto ``out``.
+
+    The inner ``bundle`` dict is NOT deserialized here — callers still pass
+    ``payload["bundle"]`` through :func:`deserialize_bundle` as before.
+    """
+    validate_payload(payload)
+    out = dict(payload)
+    source_version = read_payload_schema_version(out)
+
+    # --- Migration ladder ---------------------------------------------------
+    # Each ``if source_version < N`` block upgrades from N-1 → N.  Currently
+    # the only step is 0 → 1, which is a no-op on the bytes (optional-field
+    # tolerance was already the de-facto contract) and merely stamps the
+    # explicit version.  Kept as an explicit branch so future migrations have
+    # an obvious template.
+    if source_version < 1:
+        # v0 → v1: no structural change.  Intentionally empty.
+        pass
+    # ------------------------------------------------------------------------
+
+    out["bundle_schema_version"] = BUNDLE_SCHEMA_VERSION
+    out["_loaded_schema_version"] = source_version
+    return out
+
 
 def bundle_signature(xlsx_path: str) -> Dict[str, object]:
     """Signature used as the cache key for a training source."""
