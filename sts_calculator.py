@@ -75,7 +75,16 @@ STS_PER_PATIENT_TIMEOUT_S: int = 90
 # Maximum consecutive failures before calculate_sts_batch aborts the web-query
 # phase and returns partial results.  Prevents infinite stalls when the STS
 # endpoint is down entirely.
-STS_MAX_CONSECUTIVE_FAILURES: int = 5
+# Set to 10 (was 5): with chunk_size=1 each "failure" is a single patient.
+# A transient network blip at batch-start would abort the whole run too eagerly
+# at 5; 10 gives the endpoint time to recover across the inter-failure backoff.
+STS_MAX_CONSECUTIVE_FAILURES: int = 10
+
+# Seconds to wait after each consecutive failure before retrying the next
+# patient.  Progressive: wait = min(BACKOFF_BASE * n, BACKOFF_MAX_S) where n
+# is the current consecutive-failure count.  Zero on success (counter resets).
+STS_CONSECUTIVE_FAILURE_BACKOFF_BASE_S: int = 5
+STS_CONSECUTIVE_FAILURE_BACKOFF_MAX_S: int = 30
 
 # Procedures NOT covered by the STS ACSD web calculator.
 # Keywords are matched (substring, upper-case) against surgery_pre / Surgery.
@@ -1375,6 +1384,24 @@ def calculate_sts_batch(
                         len(local_pairs) - chunk_end,
                     )
                     _batch_aborted = True
+                else:
+                    # Progressive backoff: give a flapping endpoint time to recover
+                    # before the next patient attempt.  Runs in the worker thread so
+                    # time.sleep is safe here (does not block the Streamlit event loop).
+                    import time as _tv_sleep_mod
+                    _backoff_s = min(
+                        STS_CONSECUTIVE_FAILURE_BACKOFF_BASE_S * _consecutive_failures,
+                        STS_CONSECUTIVE_FAILURE_BACKOFF_MAX_S,
+                    )
+                    if _backoff_s > 0:
+                        _sts_log.info(
+                            "STS Score consecutive failure %d/%d — "
+                            "waiting %ds before next patient",
+                            _consecutive_failures,
+                            STS_MAX_CONSECUTIVE_FAILURES,
+                            _backoff_s,
+                        )
+                        _tv_sleep_mod.sleep(_backoff_s)
             else:
                 _consecutive_failures = 0
             if progress_callback:

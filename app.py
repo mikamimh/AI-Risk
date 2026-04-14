@@ -4744,165 +4744,22 @@ elif _active_tab == 9:  # Temporal Validation
                 # The main STS UI (eligibility display) already ran in the prior rerun
                 # that started the thread; here we only show live progress + cancel.
                 if _tv_sts_ctx_valid:
-                    import threading as _tv_threading
                     import time as _tv_time_mod
 
-                    _sts_ctx   = st.session_state.get(_TV_STS_CTX, {})
-                    _sts_done  = st.session_state.get(_TV_STS_DONE)
-                    _sts_abort = st.session_state.get(_TV_STS_ABRT)
-                    _sts_prog  = st.session_state.get(_TV_STS_PROG, {})
-                    _sts_t0    = _sts_ctx.get("t0", _tv_time_mod.monotonic())
-                    _sts_batch_elapsed = int(_tv_time_mod.monotonic() - _sts_t0)
-                    _sts_n_elig_int   = _sts_ctx.get("n_eligible", 0) or 0  # int, never "?"
-                    _sts_n_ns_ctx     = _sts_ctx.get("n_not_supported", 0) or 0
-                    _sts_n_unc_ctx    = _sts_ctx.get("n_uncertain", 0) or 0
-
-                    # Per-patient timing & counters — from the shared prog dict,
-                    # updated by chunk_start_callback / chunk_done_callback in the
-                    # worker thread (GIL-safe reads of plain Python types).
-                    _pat_start_ts   = _sts_prog.get("patient_start_ts")
-                    _pat_n          = _sts_prog.get("patient_n", 0) or 0      # 0-based pending index
-                    _total_pending  = _sts_prog.get("total_pending", 0) or 0  # non-cache patients
-                    _pat_id_disp    = _sts_prog.get("patient_id", "") or ""
-                    _net_completed  = _sts_prog.get("net_completed", 0) or 0  # network → success
-                    _net_failed     = _sts_prog.get("net_failed", 0) or 0     # network → failure
-                    _pat_elapsed    = (
-                        int(_tv_time_mod.monotonic() - _pat_start_ts)
-                        if _pat_start_ts is not None else None
+                    # Check completion in main execution context first.
+                    # When the thread signals done the fragment fires st.rerun(scope="app"),
+                    # which brings us here; we collect results and rerun once more into
+                    # the display/restore section — no further sleep or polling needed.
+                    _sts_done_precheck = st.session_state.get(_TV_STS_DONE)
+                    _thread_finished = (
+                        _sts_done_precheck is not None and _sts_done_precheck.is_set()
                     )
 
-                    # Derived counters (valid once total_pending is known)
-                    _cache_hits   = max(0, _sts_n_elig_int - _total_pending) if _total_pending > 0 else 0
-                    _completed    = _cache_hits + _net_completed   # patients with a valid STS score
-                    _failed       = _net_failed
-                    _skipped      = _sts_n_ns_ctx + _sts_n_unc_ctx
-                    # Current patient's 1-based position among ALL eligible patients
-                    _cur_pat_num  = _cache_hits + _pat_n + 1 if _total_pending > 0 else "?"
-                    # Patients still waiting for a network query (excluding current)
-                    _remaining    = max(0, _total_pending - _pat_n - 1) if _total_pending > 0 else "?"
-
-                    # Progress bar: fraction of eligible patients fully processed.
-                    # patient_n is set just BEFORE the current patient's query, so
-                    # (cache_hits + patient_n) = count of patients that have already
-                    # completed (in cache or via network) — the current one is in flight.
-                    if _sts_n_elig_int > 0 and _total_pending > 0:
-                        _prog_frac = min(1.0, (_cache_hits + _pat_n) / _sts_n_elig_int)
-                    elif _sts_n_elig_int > 0 and _total_pending == 0 and _pat_start_ts is None:
-                        _prog_frac = 0.10  # still in cache-check phase
-                    else:
-                        _prog_frac = 0.50  # fallback before first callback fires
-                    _sts_prog_bar = st.progress(
-                        _prog_frac,
-                        text=tr(
-                            f"STS Score — {_completed}/{_sts_n_elig_int} processed…",
-                            f"STS Score — {_completed}/{_sts_n_elig_int} processados…",
-                        ),
-                    )
-
-                    # ── Cancel button ─────────────────────────────────────────────────
-                    _sts_cancel_col, _sts_info_col = st.columns([2, 5])
-                    _sts_cancel_clicked = _sts_cancel_col.button(
-                        tr("Cancel STS run", "Cancelar consulta STS"),
-                        key="tv_cancel_sts_btn",
-                        type="secondary",
-                        help=tr(
-                            f"Stop after the current patient finishes or reaches the "
-                            f"{STS_PER_PATIENT_TIMEOUT_S} s per-patient limit "
-                            f"(total across all retry attempts). "
-                            "Partial results and all AI Risk / EuroSCORE II results are preserved.",
-                            f"Interromper após o paciente atual concluir ou atingir o limite "
-                            f"de {STS_PER_PATIENT_TIMEOUT_S} s por paciente "
-                            f"(total incluindo todas as tentativas). "
-                            "Resultados parciais e todos os resultados de AI Risk / EuroSCORE II são preservados.",
-                        ),
-                        disabled=(_tv_sts_state == "cancelling"),
-                    )
-                    if _sts_cancel_clicked and _sts_abort is not None:
-                        _sts_abort.set()
-                        st.session_state[_TV_STS_ST] = "cancelling"
-                        _tv_sts_state = "cancelling"
-
-                    # ── Status line: full operational counters ────────────────────────
-                    # "patient N/E | completed C | failed F | skipped S | remaining R
-                    #  | current: Ps/90s | batch: Bs | phase: …"
-                    if _pat_elapsed is not None and _total_pending > 0:
-                        _query_time_disp = tr(
-                            f"current query: {_pat_elapsed}/{STS_PER_PATIENT_TIMEOUT_S} s",
-                            f"consulta atual: {_pat_elapsed}/{STS_PER_PATIENT_TIMEOUT_S} s",
-                        )
-                        _pat_num_disp = tr(
-                            f"patient {_cur_pat_num}/{_sts_n_elig_int}"
-                            + (f" · id: {_pat_id_disp}" if _pat_id_disp else ""),
-                            f"paciente {_cur_pat_num}/{_sts_n_elig_int}"
-                            + (f" · id: {_pat_id_disp}" if _pat_id_disp else ""),
-                        )
-                    else:
-                        _query_time_disp = tr(
-                            f"batch elapsed: {_sts_batch_elapsed} s",
-                            f"lote: {_sts_batch_elapsed} s",
-                        )
-                        _pat_num_disp = _sts_prog.get("detail", tr("initialising…", "iniciando…"))
-
-                    _sts_state_label = (
-                        tr("Cancelling", "Cancelando")
-                        if _tv_sts_state == "cancelling"
-                        else tr("Running", "Em execução")
-                    )
-                    _sts_info_col.caption(
-                        tr(
-                            f"STS — {_sts_state_label}: "
-                            f"{_pat_num_disp} · "
-                            f"completed {_completed} · failed {_failed} · skipped {_skipped} · remaining {_remaining} · "
-                            f"{_query_time_disp} · batch: {_sts_batch_elapsed} s · "
-                            f"phase: {_sts_prog.get('phase', '…')}",
-                            f"STS — {_sts_state_label}: "
-                            f"{_pat_num_disp} · "
-                            f"concluídos {_completed} · falhas {_failed} · ignorados {_skipped} · restantes {_remaining} · "
-                            f"{_query_time_disp} · lote: {_sts_batch_elapsed} s · "
-                            f"fase: {_sts_prog.get('phase', '…')}",
-                        )
-                    )
-
-                    # ── Cancellation warning ──────────────────────────────────────────
-                    # Shown only when state == "cancelling".
-                    # States clearly: abort check fires after the current patient
-                    # completes — maximum remaining wait is STS_PER_PATIENT_TIMEOUT_S
-                    # seconds (per-patient global limit covering all retries).
-                    if _tv_sts_state == "cancelling":
-                        if _pat_elapsed is not None and _total_pending > 0:
-                            _cancel_ctx = tr(
-                                f"patient {_cur_pat_num}/{_sts_n_elig_int} · "
-                                f"current query: {_pat_elapsed}/{STS_PER_PATIENT_TIMEOUT_S} s "
-                                f"(global limit, all retries) · "
-                                f"batch: {_sts_batch_elapsed} s",
-                                f"paciente {_cur_pat_num}/{_sts_n_elig_int} · "
-                                f"consulta atual: {_pat_elapsed}/{STS_PER_PATIENT_TIMEOUT_S} s "
-                                f"(limite global, todas as tentativas) · "
-                                f"lote: {_sts_batch_elapsed} s",
-                            )
-                        else:
-                            _cancel_ctx = tr(
-                                f"batch elapsed: {_sts_batch_elapsed} s",
-                                f"lote: {_sts_batch_elapsed} s",
-                            )
-                        st.warning(tr(
-                            f"Cancellation requested — waiting for the current in-flight "
-                            f"STS query to finish or reach the {STS_PER_PATIENT_TIMEOUT_S} s "
-                            f"per-patient limit (total across all retry attempts). "
-                            f"No new queries will start. Partial results will be preserved. "
-                            f"· {_cancel_ctx}",
-                            f"Cancelamento solicitado — aguardando a consulta STS atual "
-                            f"terminar ou atingir o limite de {STS_PER_PATIENT_TIMEOUT_S} s "
-                            f"por paciente (total incluindo todas as tentativas). "
-                            f"Nenhuma nova consulta será iniciada. Resultados parciais preservados. "
-                            f"· {_cancel_ctx}",
-                        ))
-
-                    # Poll: check if thread finished
-                    if _sts_done is not None and _sts_done.is_set():
+                    if _thread_finished:
                         # ── Thread done: collect results ──────────────────────────────
-                        _sts_prog_bar.empty()
-                        _sts_status_slot.empty()
+                        _sts_ctx   = st.session_state.get(_TV_STS_CTX, {})
+                        _sts_abort = st.session_state.get(_TV_STS_ABRT)
+                        _sts_t0    = _sts_ctx.get("t0", _tv_time_mod.monotonic())
 
                         _sts_raw_results = list(st.session_state.get(_TV_STS_RES, []))
                         _sts_eligible_idx = _sts_ctx.get("eligible_idx", [])
@@ -5093,11 +4950,143 @@ elif _active_tab == 9:  # Temporal Validation
                         # display/restore section which runs on the next rerun.
                         st.rerun()
                     else:
-                        # Thread still running — poll again after a short sleep.
-                        # 1 s interval gives a responsive feel while keeping
-                        # full-page rerenders to a comfortable pace.
-                        _tv_time_mod.sleep(1.0)
-                        st.rerun()
+                        # ── Thread still running — show live progress via fragment ──────
+                        # @st.fragment(run_every=1.0) reruns only this component every
+                        # second, so the rest of the page is not re-executed on each tick.
+                        # When the worker thread signals done, the fragment fires
+                        # st.rerun(scope="app") to trigger result collection above.
+                        @st.fragment(run_every=1.0)
+                        def _tv_sts_polling_fragment():
+                            import time as _frag_time
+                            _sts_ctx_f   = st.session_state.get(_TV_STS_CTX, {})
+                            _sts_done_f  = st.session_state.get(_TV_STS_DONE)
+                            _sts_abort_f = st.session_state.get(_TV_STS_ABRT)
+                            _sts_prog_f  = st.session_state.get(_TV_STS_PROG, {})
+                            _frag_state  = st.session_state.get(_TV_STS_ST, "idle")
+                            _sts_t0_f    = _sts_ctx_f.get("t0", _frag_time.monotonic())
+                            _batch_elapsed_f   = int(_frag_time.monotonic() - _sts_t0_f)
+                            _sts_n_elig_f      = _sts_ctx_f.get("n_eligible", 0) or 0
+                            _sts_n_ns_f        = _sts_ctx_f.get("n_not_supported", 0) or 0
+                            _sts_n_unc_f       = _sts_ctx_f.get("n_uncertain", 0) or 0
+
+                            _pat_start_f   = _sts_prog_f.get("patient_start_ts")
+                            _pat_n_f       = _sts_prog_f.get("patient_n", 0) or 0
+                            _total_pend_f  = _sts_prog_f.get("total_pending", 0) or 0
+                            _pat_id_f      = _sts_prog_f.get("patient_id", "") or ""
+                            _net_comp_f    = _sts_prog_f.get("net_completed", 0) or 0
+                            _net_fail_f    = _sts_prog_f.get("net_failed", 0) or 0
+                            _pat_elapsed_f = (
+                                int(_frag_time.monotonic() - _pat_start_f)
+                                if _pat_start_f is not None else None
+                            )
+
+                            _cache_hits_f  = max(0, _sts_n_elig_f - _total_pend_f) if _total_pend_f > 0 else 0
+                            _completed_f   = _cache_hits_f + _net_comp_f
+                            _failed_f      = _net_fail_f
+                            _skipped_f     = _sts_n_ns_f + _sts_n_unc_f
+                            _cur_num_f     = _cache_hits_f + _pat_n_f + 1 if _total_pend_f > 0 else "?"
+                            _remaining_f   = max(0, _total_pend_f - _pat_n_f - 1) if _total_pend_f > 0 else "?"
+
+                            # Progress bar
+                            if _sts_n_elig_f > 0 and _total_pend_f > 0:
+                                _prog_frac_f = min(1.0, (_cache_hits_f + _pat_n_f) / _sts_n_elig_f)
+                                _prog_text_f = tr(
+                                    f"STS Score — {_completed_f} of {_sts_n_elig_f} processed ({_prog_frac_f:.0%})",
+                                    f"STS Score — {_completed_f} de {_sts_n_elig_f} processados ({_prog_frac_f:.0%})",
+                                )
+                            elif _sts_n_elig_f > 0 and _total_pend_f == 0 and _pat_start_f is None:
+                                _prog_frac_f = 0.10
+                                _prog_text_f = tr(
+                                    f"STS Score — checking cache ({_sts_n_elig_f} eligible patients)…",
+                                    f"STS Score — verificando cache ({_sts_n_elig_f} pacientes elegíveis)…",
+                                )
+                            else:
+                                _prog_frac_f = 0.05
+                                _prog_text_f = tr("STS Score — starting…", "STS Score — iniciando…")
+                            st.progress(_prog_frac_f, text=_prog_text_f)
+
+                            # Cancel button
+                            _can_col_f, _inf_col_f = st.columns([2, 5])
+                            _cancel_clicked_f = _can_col_f.button(
+                                tr("Cancel STS run", "Cancelar consulta STS"),
+                                key="tv_cancel_sts_btn",
+                                type="secondary",
+                                help=tr(
+                                    f"Stop after the current patient finishes or reaches the "
+                                    f"{STS_PER_PATIENT_TIMEOUT_S} s per-patient limit "
+                                    f"(total across all retry attempts). "
+                                    "Partial results and all AI Risk / EuroSCORE II results are preserved.",
+                                    f"Interromper após o paciente atual concluir ou atingir o limite "
+                                    f"de {STS_PER_PATIENT_TIMEOUT_S} s por paciente "
+                                    f"(total incluindo todas as tentativas). "
+                                    "Resultados parciais e todos os resultados de AI Risk / EuroSCORE II são preservados.",
+                                ),
+                                disabled=(_frag_state == "cancelling"),
+                            )
+                            if _cancel_clicked_f and _sts_abort_f is not None:
+                                _sts_abort_f.set()
+                                st.session_state[_TV_STS_ST] = "cancelling"
+                                _frag_state = "cancelling"
+
+                            # Status line
+                            _batch_str_f = tr(
+                                f"batch: {_batch_elapsed_f} s",
+                                f"lote: {_batch_elapsed_f} s",
+                            )
+                            if _pat_elapsed_f is not None and _total_pend_f > 0:
+                                _time_disp_f = tr(
+                                    f"current query: {_pat_elapsed_f}/{STS_PER_PATIENT_TIMEOUT_S} s · {_batch_str_f}",
+                                    f"consulta atual: {_pat_elapsed_f}/{STS_PER_PATIENT_TIMEOUT_S} s · {_batch_str_f}",
+                                )
+                                _pat_num_f = tr(
+                                    f"patient {_cur_num_f}/{_sts_n_elig_f}"
+                                    + (f" · id: {_pat_id_f}" if _pat_id_f else ""),
+                                    f"paciente {_cur_num_f}/{_sts_n_elig_f}"
+                                    + (f" · id: {_pat_id_f}" if _pat_id_f else ""),
+                                )
+                            else:
+                                _time_disp_f = _batch_str_f
+                                _pat_num_f = _sts_prog_f.get("detail", tr("initialising…", "iniciando…"))
+
+                            _state_lbl_f = (
+                                tr("Cancelling", "Cancelando")
+                                if _frag_state == "cancelling"
+                                else tr("Running", "Em execução")
+                            )
+                            _inf_col_f.caption(tr(
+                                f"STS — {_state_lbl_f}: "
+                                f"{_pat_num_f} · "
+                                f"completed {_completed_f} · failed {_failed_f} · skipped {_skipped_f} · remaining {_remaining_f} · "
+                                f"{_time_disp_f} · "
+                                f"phase: {_sts_prog_f.get('phase', '…')}",
+                                f"STS — {_state_lbl_f}: "
+                                f"{_pat_num_f} · "
+                                f"concluídos {_completed_f} · falhas {_failed_f} · ignorados {_skipped_f} · restantes {_remaining_f} · "
+                                f"{_time_disp_f} · "
+                                f"fase: {_sts_prog_f.get('phase', '…')}",
+                            ))
+
+                            # Cancellation warning
+                            if _frag_state == "cancelling":
+                                st.warning(tr(
+                                    f"Cancellation requested — waiting for the current in-flight "
+                                    f"STS query to finish or reach the {STS_PER_PATIENT_TIMEOUT_S} s "
+                                    f"per-patient limit (total across all retry attempts). "
+                                    f"No new queries will start. Partial results will be preserved. "
+                                    f"· {_pat_num_f} · {_time_disp_f}",
+                                    f"Cancelamento solicitado — aguardando a consulta STS atual "
+                                    f"terminar ou atingir o limite de {STS_PER_PATIENT_TIMEOUT_S} s "
+                                    f"por paciente (total incluindo todas as tentativas). "
+                                    f"Nenhuma nova consulta será iniciada. Resultados parciais preservados. "
+                                    f"· {_pat_num_f} · {_time_disp_f}",
+                                ))
+
+                            # When done, trigger a full-page rerun so the main code
+                            # can collect and store results (above, _thread_finished branch).
+                            if _sts_done_f is not None and _sts_done_f.is_set():
+                                st.rerun(scope="app")
+
+                        _tv_sts_polling_fragment()
 
                 if _tv_run:
                     # ── Reset residual STS thread state from any previous run ──────────
@@ -5260,6 +5249,38 @@ elif _active_tab == 9:  # Temporal Validation
                                             if e["eligibility"] != "supported"]
                                 st.dataframe(pd.DataFrame(_non_sup),
                                              width="stretch", hide_index=True)
+
+                        # ── Eligibility export ──────────────────────────────────────────
+                        # Available immediately after eligibility is classified — before
+                        # the STS batch starts, while it runs, after it completes/cancels.
+                        if _tv_sts_eligibility_log:
+                            _elig_df_export = pd.DataFrame(_tv_sts_eligibility_log)
+                            _elig_dl_c1, _elig_dl_c2 = st.columns(2)
+                            with _elig_dl_c1:
+                                st.download_button(
+                                    label=tr(
+                                        "Download STS eligibility (CSV)",
+                                        "Baixar elegibilidade STS (CSV)",
+                                    ),
+                                    data=_elig_df_export.to_csv(index=False).encode("utf-8"),
+                                    file_name="sts_eligibility.csv",
+                                    mime="text/csv",
+                                    key="tv_elig_dl_csv_run",
+                                )
+                            with _elig_dl_c2:
+                                _elig_xlsx_buf = BytesIO()
+                                with pd.ExcelWriter(_elig_xlsx_buf, engine="openpyxl") as _ew:
+                                    _elig_df_export.to_excel(_ew, sheet_name="eligibility", index=False)
+                                st.download_button(
+                                    label=tr(
+                                        "Download STS eligibility (XLSX)",
+                                        "Baixar elegibilidade STS (XLSX)",
+                                    ),
+                                    data=_elig_xlsx_buf.getvalue(),
+                                    file_name="sts_eligibility.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key="tv_elig_dl_xlsx_run",
+                                )
 
                         if _tv_n_eligible == 0:
                             st.info(tr(
@@ -5505,27 +5526,95 @@ elif _active_tab == 9:  # Temporal Validation
                     _tv_progress.progress(1.0, text=tr("Done.", "Concluído."))
                     _tv_phase_slot.empty()
                     with st.expander(tr("View execution details", "Ver detalhes de execução"), expanded=False):
-                        _sts_elig_n = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "supported"])
-                        _sts_skip_n = len([e for e in _tv_sts_eligibility_log if e["eligibility"] != "supported"])
+                        _sts_elig_n  = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "supported"])
+                        _sts_ns_n    = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "not_supported"])
+                        _sts_unc_n   = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "uncertain"])
+                        _sts_skip_n  = _sts_ns_n + _sts_unc_n
+
+                        # ── Per-step patient counts ───────────────────────────────────────
+                        st.markdown(tr("**Pipeline provenance**", "**Proveniência do pipeline**"))
                         st.caption(tr(
-                            f"Cohort: {len(_tv_data)} patients | "
-                            f"Temporal axis: {'de-identified surrogate' if _tv_is_surrogate else 'standard'} | "
-                            f"AI Risk incidents: {len(_tv_ai_incidents) if _tv_ai_incidents else 0} | "
-                            f"STS Score: {'available' if _tv_sts_ok else 'not available'} | "
-                            f"STS eligible: {_sts_elig_n} · skipped: {_sts_skip_n}",
-                            f"Coorte: {len(_tv_data)} pacientes | "
-                            f"Eixo temporal: {'substituto desidentificado' if _tv_is_surrogate else 'padrão'} | "
-                            f"Incidentes de AI Risk: {len(_tv_ai_incidents) if _tv_ai_incidents else 0} | "
-                            f"STS Score: {'disponível' if _tv_sts_ok else 'não disponível'} | "
-                            f"STS elegíveis: {_sts_elig_n} · ignorados: {_sts_skip_n}",
+                            "Loading: `prepare_master_dataset` (risk_data.py)  \n"
+                            "Surgery class: `classify_sts_eligibility` (sts_calculator.py)  \n"
+                            "STS inputs: `build_sts_input_from_row` (sts_calculator.py)  \n"
+                            "AI Risk: `apply_frozen_model_to_temporal_cohort` (ai_risk_inference.py)  \n"
+                            "EuroSCORE II: `euroscore_from_row` (euroscore.py)",
+                            "Carregamento: `prepare_master_dataset` (risk_data.py)  \n"
+                            "Classe cirúrgica: `classify_sts_eligibility` (sts_calculator.py)  \n"
+                            "Inputs STS: `build_sts_input_from_row` (sts_calculator.py)  \n"
+                            "AI Risk: `apply_frozen_model_to_temporal_cohort` (ai_risk_inference.py)  \n"
+                            "EuroSCORE II: `euroscore_from_row` (euroscore.py)",
+                        ))
+                        st.markdown(tr("**Per-step patient counts**", "**Contagem de pacientes por etapa**"))
+                        st.caption(tr(
+                            f"After `prepare_master_dataset`: **{len(_tv_data)}** patients "
+                            f"({_tv_events} events, event rate {_tv_rate:.1%})  \n"
+                            f"STS eligibility (`classify_sts_eligibility`):  \n"
+                            f"  · supported: **{_sts_elig_n}** (will be queried)  \n"
+                            f"  · not_supported: **{_sts_ns_n}** (aorta/Bentall/dissection — skipped)  \n"
+                            f"  · uncertain: **{_sts_unc_n}** (OBSERVATION ADMIT or unmapped — skipped)  \n"
+                            f"  · total classified: **{len(_tv_sts_eligibility_log)}**  \n"
+                            f"AI Risk inference incidents: {len(_tv_ai_incidents) if _tv_ai_incidents else 0}  \n"
+                            f"STS Score available: {'yes' if _tv_sts_ok else 'no'}  \n"
+                            f"Temporal axis: {'de-identified surrogate' if _tv_is_surrogate else 'standard'}",
+                            f"Após `prepare_master_dataset`: **{len(_tv_data)}** pacientes "
+                            f"({_tv_events} eventos, taxa {_tv_rate:.1%})  \n"
+                            f"Elegibilidade STS (`classify_sts_eligibility`):  \n"
+                            f"  · suportados: **{_sts_elig_n}** (serão consultados)  \n"
+                            f"  · não suportados: **{_sts_ns_n}** (aorta/Bentall/dissecção — ignorados)  \n"
+                            f"  · incertos: **{_sts_unc_n}** (OBSERVATION ADMIT ou sem mapeamento — ignorados)  \n"
+                            f"  · total classificados: **{len(_tv_sts_eligibility_log)}**  \n"
+                            f"Incidentes de AI Risk: {len(_tv_ai_incidents) if _tv_ai_incidents else 0}  \n"
+                            f"STS Score disponível: {'sim' if _tv_sts_ok else 'não'}  \n"
+                            f"Eixo temporal: {'substituto desidentificado' if _tv_is_surrogate else 'padrão'}",
+                        ))
+
+                        # ── Cache / signature audit ───────────────────────────────────────
+                        st.markdown(tr("**Cache / signature audit**", "**Auditoria de cache / assinatura**"))
+                        st.caption(tr(
+                            f"Upload content hash: `{_tv_file_content_hash}`  \n"
+                            f"Context sig: `{_tv_context_sig}`  \n"
+                            f"Model: `{forced_model}` · threshold: `{_tv_locked_threshold:.4f}` · "
+                            f"STS mode: `{'on' if (HAS_STS and bool(_tv_include_sts)) else 'off'}`  \n"
+                            f"Missing-value tokens: `MISSING_TOKENS` (risk_data.py)  \n"
+                            f"Numeric coercion: `_maybe_numeric` / `clean_features` (modeling.py)",
+                            f"Hash do conteúdo: `{_tv_file_content_hash}`  \n"
+                            f"Assinatura: `{_tv_context_sig}`  \n"
+                            f"Modelo: `{forced_model}` · limiar: `{_tv_locked_threshold:.4f}` · "
+                            f"Modo STS: `{'ligado' if (HAS_STS and bool(_tv_include_sts)) else 'desligado'}`  \n"
+                            f"Tokens de ausência: `MISSING_TOKENS` (risk_data.py)  \n"
+                            f"Coerção numérica: `_maybe_numeric` / `clean_features` (modeling.py)",
                         ))
                         if _tv_sts_eligibility_log:
                             st.markdown(tr("**STS eligibility log:**", "**Log de elegibilidade STS:**"))
-                            st.dataframe(
-                                pd.DataFrame(_tv_sts_eligibility_log),
-                                width="stretch",
-                                hide_index=True,
-                            )
+                            _elig_df_det = pd.DataFrame(_tv_sts_eligibility_log)
+                            st.dataframe(_elig_df_det, width="stretch", hide_index=True)
+                            _elig_det_c1, _elig_det_c2 = st.columns(2)
+                            with _elig_det_c1:
+                                st.download_button(
+                                    label=tr(
+                                        "Download STS eligibility (CSV)",
+                                        "Baixar elegibilidade STS (CSV)",
+                                    ),
+                                    data=_elig_df_det.to_csv(index=False).encode("utf-8"),
+                                    file_name="sts_eligibility.csv",
+                                    mime="text/csv",
+                                    key="tv_elig_dl_csv_det",
+                                )
+                            with _elig_det_c2:
+                                _elig_det_xlsx = BytesIO()
+                                with pd.ExcelWriter(_elig_det_xlsx, engine="openpyxl") as _ew2:
+                                    _elig_df_det.to_excel(_ew2, sheet_name="eligibility", index=False)
+                                st.download_button(
+                                    label=tr(
+                                        "Download STS eligibility (XLSX)",
+                                        "Baixar elegibilidade STS (XLSX)",
+                                    ),
+                                    data=_elig_det_xlsx.getvalue(),
+                                    file_name="sts_eligibility.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key="tv_elig_dl_xlsx_det",
+                                )
 
                     # ── Persist result state for tab-navigation session cache ──
                     # Saves only the computed data (no export bytes).  Export bytes
@@ -5601,41 +5690,53 @@ elif _active_tab == 9:  # Temporal Validation
                             "Clique em **Executar validação temporal** para recomputar.",
                         ))
 
-                        # ── Exclusive STS outcome message ──────────────────────────────
+                        # ── Exclusive STS outcome message + structured summary ──────────
                         # Only one of these branches fires; order mirrors severity.
-                        _saved_outcome = _saved.get("sts_outcome", "")
+                        _saved_outcome     = _saved.get("sts_outcome", "")
                         _saved_n_completed = _saved.get("sts_n_completed", 0)
+                        _saved_n_failed    = _saved.get("sts_n_failed", 0)
                         _saved_n_total_ctx = _saved.get("sts_n_total_ctx", 0)
-                        _saved_summary = _saved.get("sts_summary_line", "")
+                        _saved_n_cancelled = _saved.get("sts_n_cancelled_r", 0)
+                        _saved_summary     = _saved.get("sts_summary_line", "")
                         _saved_fail_details = _saved.get("sts_fail_details", "")
-                        _saved_sts_status = _saved.get("sts_status", "")
+                        _saved_sts_status  = _saved.get("sts_status", "")
+
+                        # Compute skipped breakdown from eligibility log (available here)
+                        _sum_elig = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "supported"])
+                        _sum_ns   = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "not_supported"])
+                        _sum_unc  = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "uncertain"])
+                        _sum_skip = _sum_ns + _sum_unc
 
                         if _saved_outcome == "cancelled":
                             st.warning(tr(
-                                f"STS execution cancelled by user. "
-                                f"Partial results preserved ({_saved_n_completed} completed). "
-                                f"AI Risk and EuroSCORE II are available for all {_saved_n_total_ctx} patients.",
-                                f"Execução STS cancelada pelo usuário. "
-                                f"Resultados parciais preservados ({_saved_n_completed} concluídos). "
-                                f"AI Risk e EuroSCORE II disponíveis para todos os {_saved_n_total_ctx} pacientes.",
+                                "STS execution cancelled by user — partial results preserved.",
+                                "Execução STS cancelada pelo usuário — resultados parciais preservados.",
                             ))
                         elif _saved_outcome == "batch_aborted":
                             st.warning(tr(
-                                "STS Score batch aborted after consecutive failures — "
+                                "STS batch aborted after consecutive failures — "
                                 "the web calculator may be unreachable. Partial results preserved.",
                                 "Lote STS abortado por falhas consecutivas — "
                                 "a calculadora web pode estar inacessível. Resultados parciais preservados.",
                             ))
                         elif _saved_outcome == "no_eligible":
-                            # Message already shown inline during the run; no repeat needed.
-                            pass
+                            pass  # shown inline during the run
                         elif _saved_outcome == "no_sts":
-                            # User ran with STS disabled; the scoring-options label already explains.
-                            pass
-                        # "completed" with no issues → no banner needed; results speak for themselves.
+                            pass  # scoring-options label already explains
 
-                        if _saved_summary:
-                            st.caption(_saved_summary)
+                        # Structured summary — shown for cancelled / batch_aborted / completed
+                        # when the eligibility log is available.
+                        if _saved_outcome in ("cancelled", "batch_aborted", "completed") and _tv_sts_eligibility_log:
+                            _sm_c1, _sm_c2, _sm_c3, _sm_c4, _sm_c5 = st.columns(5)
+                            _sm_c1.metric(tr("STS eligible",  "Elegíveis STS"),  _sum_elig)
+                            _sm_c2.metric(tr("Completed",     "Concluídos"),     _saved_n_completed)
+                            _sm_c3.metric(tr("Failed",        "Falhas"),         _saved_n_failed)
+                            _sm_c4.metric(tr("Skipped",       "Ignorados"),      _sum_skip)
+                            _sm_c5.metric(
+                                tr("Cancelled remaining", "Cancelados restantes"),
+                                _saved_n_cancelled,
+                            )
+
                         if _saved_sts_status:
                             st.caption(tr(
                                 f"STS Score cache status: {_saved_sts_status}",
@@ -5655,6 +5756,97 @@ elif _active_tab == 9:  # Temporal Validation
                             ))
                             if _saved_fail_details:
                                 st.markdown(_saved_fail_details)
+
+                        # ── Execution details (restored from session) ──────────────────
+                        with st.expander(tr("View execution details", "Ver detalhes de execução"), expanded=False):
+                            _rst_elig_n  = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "supported"])
+                            _rst_ns_n    = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "not_supported"])
+                            _rst_unc_n   = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "uncertain"])
+                            _rst_skip_n  = _rst_ns_n + _rst_unc_n
+
+                            st.markdown(tr("**Pipeline provenance**", "**Proveniência do pipeline**"))
+                            st.caption(tr(
+                                "Loading: `prepare_master_dataset` (risk_data.py)  \n"
+                                "Surgery class: `classify_sts_eligibility` (sts_calculator.py)  \n"
+                                "STS inputs: `build_sts_input_from_row` (sts_calculator.py)  \n"
+                                "AI Risk: `apply_frozen_model_to_temporal_cohort` (ai_risk_inference.py)  \n"
+                                "EuroSCORE II: `euroscore_from_row` (euroscore.py)",
+                                "Carregamento: `prepare_master_dataset` (risk_data.py)  \n"
+                                "Classe cirúrgica: `classify_sts_eligibility` (sts_calculator.py)  \n"
+                                "Inputs STS: `build_sts_input_from_row` (sts_calculator.py)  \n"
+                                "AI Risk: `apply_frozen_model_to_temporal_cohort` (ai_risk_inference.py)  \n"
+                                "EuroSCORE II: `euroscore_from_row` (euroscore.py)",
+                            ))
+                            st.markdown(tr("**Per-step patient counts**", "**Contagem de pacientes por etapa**"))
+                            st.caption(tr(
+                                f"After `prepare_master_dataset`: **{len(_tv_data)}** patients "
+                                f"({_tv_cohort_summary.get('n_events', '?')} events, "
+                                f"event rate {_tv_cohort_summary.get('event_rate', 0):.1%})  \n"
+                                f"STS eligibility (`classify_sts_eligibility`):  \n"
+                                f"  · supported: **{_rst_elig_n}** (will be queried)  \n"
+                                f"  · not_supported: **{_rst_ns_n}** (aorta/Bentall/dissection — skipped)  \n"
+                                f"  · uncertain: **{_rst_unc_n}** (OBSERVATION ADMIT or unmapped — skipped)  \n"
+                                f"  · total classified: **{len(_tv_sts_eligibility_log)}**  \n"
+                                f"AI Risk inference incidents: {len(_tv_ai_incidents) if _tv_ai_incidents else 0}  \n"
+                                f"STS Score available: {'yes' if _tv_sts_ok else 'no'}  \n"
+                                f"Temporal axis: {'de-identified surrogate' if _tv_is_surrogate else 'standard'}",
+                                f"Após `prepare_master_dataset`: **{len(_tv_data)}** pacientes "
+                                f"({_tv_cohort_summary.get('n_events', '?')} eventos, "
+                                f"taxa {_tv_cohort_summary.get('event_rate', 0):.1%})  \n"
+                                f"Elegibilidade STS (`classify_sts_eligibility`):  \n"
+                                f"  · suportados: **{_rst_elig_n}** (serão consultados)  \n"
+                                f"  · não suportados: **{_rst_ns_n}** (aorta/Bentall/dissecção — ignorados)  \n"
+                                f"  · incertos: **{_rst_unc_n}** (OBSERVATION ADMIT ou sem mapeamento — ignorados)  \n"
+                                f"  · total classificados: **{len(_tv_sts_eligibility_log)}**  \n"
+                                f"Incidentes de AI Risk: {len(_tv_ai_incidents) if _tv_ai_incidents else 0}  \n"
+                                f"STS Score disponível: {'sim' if _tv_sts_ok else 'não'}  \n"
+                                f"Eixo temporal: {'substituto desidentificado' if _tv_is_surrogate else 'padrão'}",
+                            ))
+                            st.markdown(tr("**Cache / signature audit**", "**Auditoria de cache / assinatura**"))
+                            st.caption(tr(
+                                f"Upload content hash: `{_tv_file_content_hash}`  \n"
+                                f"Context sig: `{_tv_context_sig}`  \n"
+                                f"Model: `{forced_model}` · threshold: `{_tv_locked_threshold:.4f}` · "
+                                f"STS mode: `{'on' if (HAS_STS and bool(_tv_include_sts)) else 'off'}`  \n"
+                                f"Missing-value tokens: `MISSING_TOKENS` (risk_data.py)  \n"
+                                f"Numeric coercion: `_maybe_numeric` / `clean_features` (modeling.py)",
+                                f"Hash do conteúdo: `{_tv_file_content_hash}`  \n"
+                                f"Assinatura: `{_tv_context_sig}`  \n"
+                                f"Modelo: `{forced_model}` · limiar: `{_tv_locked_threshold:.4f}` · "
+                                f"Modo STS: `{'ligado' if (HAS_STS and bool(_tv_include_sts)) else 'desligado'}`  \n"
+                                f"Tokens de ausência: `MISSING_TOKENS` (risk_data.py)  \n"
+                                f"Coerção numérica: `_maybe_numeric` / `clean_features` (modeling.py)",
+                            ))
+                            if _tv_sts_eligibility_log:
+                                st.markdown(tr("**STS eligibility log:**", "**Log de elegibilidade STS:**"))
+                                _elig_df_rst = pd.DataFrame(_tv_sts_eligibility_log)
+                                st.dataframe(_elig_df_rst, width="stretch", hide_index=True)
+                                _elig_rst_c1, _elig_rst_c2 = st.columns(2)
+                                with _elig_rst_c1:
+                                    st.download_button(
+                                        label=tr(
+                                            "Download STS eligibility (CSV)",
+                                            "Baixar elegibilidade STS (CSV)",
+                                        ),
+                                        data=_elig_df_rst.to_csv(index=False).encode("utf-8"),
+                                        file_name="sts_eligibility.csv",
+                                        mime="text/csv",
+                                        key="tv_elig_dl_csv_rst",
+                                    )
+                                with _elig_rst_c2:
+                                    _elig_rst_xlsx = BytesIO()
+                                    with pd.ExcelWriter(_elig_rst_xlsx, engine="openpyxl") as _ew3:
+                                        _elig_df_rst.to_excel(_ew3, sheet_name="eligibility", index=False)
+                                    st.download_button(
+                                        label=tr(
+                                            "Download STS eligibility (XLSX)",
+                                            "Baixar elegibilidade STS (XLSX)",
+                                        ),
+                                        data=_elig_rst_xlsx.getvalue(),
+                                        file_name="sts_eligibility.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        key="tv_elig_dl_xlsx_rst",
+                                    )
 
                     # ── 7. Display results ──
                     st.divider()
@@ -5809,13 +6001,21 @@ elif _active_tab == 9:  # Temporal Validation
                     plt.close(_fig_dist)
 
                     # 8.5 Decision Curve Analysis
+                    # Build a shared row mask: keep only rows where morte_30d AND
+                    # every score column are non-null.  Per-column dropna() would
+                    # produce arrays of different lengths → shapes mismatch in
+                    # net_benefit.  Using a common mask guarantees y and every
+                    # preds array are aligned to identical rows.
                     _tv_dca_scores = {}
+                    _dca_mask = _tv_data["morte_30d"].notna()
                     for _sc in _tv_score_cols:
-                        _sub = _tv_data[["morte_30d", _sc]].dropna()
-                        if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
-                            _tv_dca_scores[_tv_rename.get(_sc, _sc)] = _sub[_sc].values
+                        _dca_mask = _dca_mask & _tv_data[_sc].notna()
+                    _tv_dca_sub = _tv_data.loc[_dca_mask]
+                    for _sc in _tv_score_cols:
+                        if len(_tv_dca_sub) >= 10 and _tv_dca_sub["morte_30d"].nunique() >= 2:
+                            _tv_dca_scores[_tv_rename.get(_sc, _sc)] = _tv_dca_sub[_sc].values
                     if _tv_dca_scores:
-                        _tv_dca_y = _tv_data.loc[_tv_data[_tv_score_cols[0]].notna(), "morte_30d"].values
+                        _tv_dca_y = _tv_dca_sub["morte_30d"].values
                         _tv_thresholds = np.linspace(0.01, 0.30, 30)
                         _tv_dca_df = decision_curve(_tv_dca_y, _tv_dca_scores, _tv_thresholds)
 
