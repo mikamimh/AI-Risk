@@ -120,6 +120,13 @@ Additional reliability mechanisms:
 
 After each STS Score batch run, a compact summary line is shown (Cache hits / Misses / Refreshed / Stale fallback / Failed) followed by a collapsible "View STS Score execution details" expander with the last phase label and any per-patient incidents.
 
+**Batch-abort protection and audit trail:** If `STS_MAX_CONSECUTIVE_FAILURES` (10) chunks in a row produce no valid result, the batch is aborted automatically — this prevents an unreachable endpoint from blocking the UI for the full cohort duration. Rows that were never queried due to the abort are classified as `batch_abort` in the failure log (distinct from `fetch` failures that were actively attempted). Partial results computed before the abort are preserved. The UI surfaces:
+- An execution summary block (counts by outcome: cached / fresh+refreshed / stale\_fallback / query\_failed / build\_input\_failed / unqueried\_abort)
+- A `st.warning` banner when the batch was aborted, showing how many rows were not queried
+- A per-chunk log expander (auto-expanded on abort) with success/failure counts per chunk and the exact chunk that triggered the abort
+
+These attributes are exposed on `calculate_sts_batch` for programmatic access: `failure_log`, `last_execution_log`, `chunk_log`, `_batch_aborted`, `_abort_before_query_count`.
+
 ## How to run
 
 1. Install dependencies:

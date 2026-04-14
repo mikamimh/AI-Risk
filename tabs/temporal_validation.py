@@ -559,6 +559,8 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _tv_exec_log = getattr(calculate_sts_batch, "last_execution_log", [])
                         _tv_fail_log = getattr(calculate_sts_batch, "failure_log", [])
                         _batch_aborted_ctx = getattr(calculate_sts_batch, "_batch_aborted", False)
+                        _abort_before_query_count = getattr(calculate_sts_batch, "_abort_before_query_count", 0)
+                        _tv_chunk_log = getattr(calculate_sts_batch, "chunk_log", [])
                         _sts_cancelled_r = (
                             _sts_ctx.get("n_total", 0)
                             - sum(1 for r in _sts_raw_results if r and "predmort" in r)
@@ -721,6 +723,10 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             "sts_n_total_ctx": _sts_n_total_int,
                             "sts_n_cancelled_r": _sts_cancelled_r,
                             "sts_fail_details": _fail_details_str,
+                            # ── STS audit fields ──────────────────────────────────────
+                            "batch_aborted": bool(_batch_aborted_ctx),
+                            "abort_before_query_count": int(_abort_before_query_count),
+                            "chunk_log": list(_tv_chunk_log),
                         }
                         st.session_state["_tv_result_sig"]   = _tv_context_sig_r
                         st.session_state[_TV_STS_ST]         = "idle"  # clear running state
@@ -1382,7 +1388,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             f"After `prepare_master_dataset`: **{len(_tv_data)}** patients "
                             f"({_tv_events} events, event rate {_tv_rate:.1%})  \n"
                             f"STS eligibility (`classify_sts_eligibility`):  \n"
-                            f"  · supported: **{_sts_elig_n}** (will be queried)  \n"
+                            f"  · supported: **{_sts_elig_n}** (eligible for query)  \n"
                             f"  · not_supported: **{_sts_ns_n}** (aorta/Bentall/dissection — skipped)  \n"
                             f"  · uncertain: **{_sts_unc_n}** (OBSERVATION ADMIT or unmapped — skipped)  \n"
                             f"  · total classified: **{len(_tv_sts_eligibility_log)}**  \n"
@@ -1392,7 +1398,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             f"Após `prepare_master_dataset`: **{len(_tv_data)}** pacientes "
                             f"({_tv_events} eventos, taxa {_tv_rate:.1%})  \n"
                             f"Elegibilidade STS (`classify_sts_eligibility`):  \n"
-                            f"  · suportados: **{_sts_elig_n}** (serão consultados)  \n"
+                            f"  · suportados: **{_sts_elig_n}** (elegíveis para consulta)  \n"
                             f"  · não suportados: **{_sts_ns_n}** (aorta/Bentall/dissecção — ignorados)  \n"
                             f"  · incertos: **{_sts_unc_n}** (OBSERVATION ADMIT ou sem mapeamento — ignorados)  \n"
                             f"  · total classificados: **{len(_tv_sts_eligibility_log)}**  \n"
@@ -1433,11 +1439,77 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             f"Coerção numérica: `_maybe_numeric` / `clean_features` (modeling.py)",
                         ))
 
+                        # ── STS execution summary ─────────────────────────────────────────
+                        if _tv_exec_log:
+                            _exec_counts: dict = {}
+                            for _er in _tv_exec_log:
+                                # Group by status for successful outcomes (fresh/refreshed/
+                                # cached/stale_fallback) and by stage for failed outcomes
+                                # (build_input/fetch/batch_abort).  Grouping by stage alone
+                                # would collapse all successes under "done", making the
+                                # "cached", "fresh", and "stale_fallback" display counts
+                                # permanently zero.
+                                _estatus = getattr(_er, "status", None) or "unknown"
+                                _estage  = getattr(_er, "stage",  None) or ""
+                                if _estatus == "failed" and _estage in ("build_input", "fetch", "batch_abort"):
+                                    _key = _estage
+                                else:
+                                    _key = _estatus
+                                _exec_counts[_key] = _exec_counts.get(_key, 0) + 1
+                            _n_score_present = int(_tv_data["sts_score"].notna().sum()) if "sts_score" in _tv_data.columns else 0
+                            _n_exec_abort = sum(1 for _fe in _tv_fail_log if _fe.get("stage") == "batch_abort")
+                            st.markdown(tr("**STS execution summary**", "**Resumo de execução STS**"))
+                            st.caption(
+                                tr(
+                                    f"· cached (session/disk): **{_exec_counts.get('cached', 0)}**  \n"
+                                    f"· freshly queried: **{_exec_counts.get('fresh', 0) + _exec_counts.get('refreshed', 0)}**  \n"
+                                    f"· stale fallback used: **{_exec_counts.get('stale_fallback', 0)}**  \n"
+                                    f"· query failed (fetched but invalid): **{_exec_counts.get('fetch', 0)}**  \n"
+                                    f"· input build failed: **{_exec_counts.get('build_input', 0)}**  \n"
+                                    f"· unqueried due to batch abort: **{_abort_before_query_count}**  \n"
+                                    f"· STS score present in final output: **{_n_score_present}**  \n"
+                                    f"_Note: 'STS Score available: yes' means at least one eligible patient has "
+                                    f"a score, not that all eligible patients do._",
+                                    f"· em cache (sessão/disco): **{_exec_counts.get('cached', 0)}**  \n"
+                                    f"· consultados com sucesso: **{_exec_counts.get('fresh', 0) + _exec_counts.get('refreshed', 0)}**  \n"
+                                    f"· fallback de cache antigo usado: **{_exec_counts.get('stale_fallback', 0)}**  \n"
+                                    f"· falha na consulta: **{_exec_counts.get('fetch', 0)}**  \n"
+                                    f"· falha na construção do input: **{_exec_counts.get('build_input', 0)}**  \n"
+                                    f"· não consultados por aborto do lote: **{_abort_before_query_count}**  \n"
+                                    f"· STS Score presente na saída final: **{_n_score_present}**  \n"
+                                    f"_Nota: 'STS Score disponível: sim' significa que ao menos um paciente elegível "
+                                    f"tem escore, não que todos os elegíveis o têm._",
+                                )
+                            )
+
+                        # ── Batch-abort warning ───────────────────────────────────────────
+                        if _batch_aborted_ctx and not (_tv_sts_state == "cancelling" if "_tv_sts_state" in dir() else False):
+                            st.warning(
+                                tr(
+                                    f"⚠️ **STS batch incomplete:** execution stopped after repeated "
+                                    f"chunk failures (likely endpoint unreachable). "
+                                    f"{_abort_before_query_count} eligible patient(s) were not queried. "
+                                    f"Final STS summaries reflect only the successfully queried subset. "
+                                    f"Re-run when the STS endpoint is reachable to obtain a complete result.",
+                                    f"⚠️ **Lote STS incompleto:** execução interrompida após falhas repetidas "
+                                    f"(endpoint provavelmente inacessível). "
+                                    f"{_abort_before_query_count} paciente(s) elegível(is) não foram consultados. "
+                                    f"Os resumos STS refletem apenas o subconjunto consultado com sucesso. "
+                                    f"Execute novamente quando o endpoint STS estiver acessível.",
+                                )
+                            )
+
                         # ── STS fail log (only shown when failures exist) ──────────────────
                         if _tv_fail_log:
+                            _n_abort_rows = sum(1 for _fe in _tv_fail_log if _fe.get("stage") == "batch_abort")
+                            _n_query_rows = len(_tv_fail_log) - _n_abort_rows
                             st.markdown(tr(
-                                f"**STS per-patient failures ({len(_tv_fail_log)})**",
-                                f"**Falhas STS por paciente ({len(_tv_fail_log)})**",
+                                f"**STS per-patient failures ({len(_tv_fail_log)})**"
+                                + (f" — {_n_abort_rows} not queried (batch abort), {_n_query_rows} query/parse failures"
+                                   if _n_abort_rows else ""),
+                                f"**Falhas STS por paciente ({len(_tv_fail_log)})**"
+                                + (f" — {_n_abort_rows} não consultados (aborto do lote), {_n_query_rows} falhas de consulta/parse"
+                                   if _n_abort_rows else ""),
                             ))
                             _fail_rows = []
                             for _fe in _tv_fail_log:
@@ -1451,6 +1523,31 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     tr("stale_cache","cache_antigo"):  _fe.get("used_previous_cache", ""),
                                 })
                             st.dataframe(pd.DataFrame(_fail_rows), width="stretch", hide_index=True)
+
+                        # ── Chunk-level execution log ─────────────────────────────────────
+                        if _tv_chunk_log:
+                            _n_abort_chunks = sum(1 for _cl in _tv_chunk_log if _cl.get("aborted_after_this_chunk"))
+                            with st.expander(
+                                tr(
+                                    f"STS chunk execution log ({len(_tv_chunk_log)} chunk(s)"
+                                    + (f", aborted after chunk {_n_abort_chunks}" if _n_abort_chunks else "") + ")",
+                                    f"Log de execução por chunk STS ({len(_tv_chunk_log)} chunk(s)"
+                                    + (f", abortado após chunk {_n_abort_chunks}" if _n_abort_chunks else "") + ")",
+                                ),
+                                expanded=bool(_n_abort_chunks),
+                            ):
+                                _chunk_display_rows = []
+                                for _cl in _tv_chunk_log:
+                                    _chunk_display_rows.append({
+                                        tr("chunk_index", "chunk_index"):       _cl.get("chunk_index", ""),
+                                        tr("row_count",   "n_pacientes"):       _cl.get("row_count", ""),
+                                        tr("success",     "sucesso"):           _cl.get("success_count", 0),
+                                        tr("failure",     "falha"):             _cl.get("failure_count", 0),
+                                        tr("exc_type",    "tipo_excecao"):      _cl.get("exception_type") or "",
+                                        tr("exc_msg",     "msg_excecao"):       (_cl.get("exception_message") or "")[:80],
+                                        tr("aborted",     "abortou_aqui"):      _cl.get("aborted_after_this_chunk", False),
+                                    })
+                                st.dataframe(pd.DataFrame(_chunk_display_rows), width="stretch", hide_index=True)
 
                         # ── STS eligibility log ───────────────────────────────────────────
                         if _tv_sts_eligibility_log:
@@ -1525,6 +1622,10 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         "sts_n_total_ctx": _tv_n,
                         "sts_n_cancelled_r": 0,
                         "sts_fail_details": _tv_inline_fail_details,
+                        # ── STS audit fields ────────────────────────────────────────
+                        "batch_aborted": False,
+                        "abort_before_query_count": 0,
+                        "chunk_log": list(getattr(calculate_sts_batch, "chunk_log", [])),
                     }
                     st.session_state["_tv_result_sig"] = _tv_context_sig
 
@@ -1550,6 +1651,9 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _tv_sts_eligibility_log = _saved.get("sts_eligibility_log", [])
                         _tv_is_surrogate = _saved.get("surrogate_timeline", False)
                         _tv_prepare_info = _saved.get("prepare_info", {})
+                        _batch_aborted_ctx = _saved.get("batch_aborted", False)
+                        _abort_before_query_count = _saved.get("abort_before_query_count", 0)
+                        _tv_chunk_log = _saved.get("chunk_log", [])
 
                         st.success(tr(
                             "Temporal validation results restored from session — "
@@ -1705,7 +1809,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 f"({_tv_cohort_summary.get('n_events', '?')} events, "
                                 f"event rate {_tv_cohort_summary.get('event_rate', 0):.1%})  \n"
                                 f"STS eligibility (`classify_sts_eligibility`):  \n"
-                                f"  · supported: **{_rst_elig_n}** (will be queried)  \n"
+                                f"  · supported: **{_rst_elig_n}** (eligible for query)  \n"
                                 f"  · not_supported: **{_rst_ns_n}** (aorta/Bentall/dissection — skipped)  \n"
                                 f"  · uncertain: **{_rst_unc_n}** (OBSERVATION ADMIT or unmapped — skipped)  \n"
                                 f"  · total classified: **{len(_tv_sts_eligibility_log)}**  \n"
@@ -1716,7 +1820,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 f"({_tv_cohort_summary.get('n_events', '?')} eventos, "
                                 f"taxa {_tv_cohort_summary.get('event_rate', 0):.1%})  \n"
                                 f"Elegibilidade STS (`classify_sts_eligibility`):  \n"
-                                f"  · suportados: **{_rst_elig_n}** (serão consultados)  \n"
+                                f"  · suportados: **{_rst_elig_n}** (elegíveis para consulta)  \n"
                                 f"  · não suportados: **{_rst_ns_n}** (aorta/Bentall/dissecção — ignorados)  \n"
                                 f"  · incertos: **{_rst_unc_n}** (OBSERVATION ADMIT ou sem mapeamento — ignorados)  \n"
                                 f"  · total classificados: **{len(_tv_sts_eligibility_log)}**  \n"

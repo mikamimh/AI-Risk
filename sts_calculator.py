@@ -1162,6 +1162,9 @@ def calculate_sts_batch(
     calculate_sts_batch.last_error = None
     calculate_sts_batch.failure_log = []
     calculate_sts_batch.last_execution_log = []
+    calculate_sts_batch._batch_aborted = False           # type: ignore[attr-defined]
+    calculate_sts_batch._abort_before_query_count = 0    # type: ignore[attr-defined]
+    calculate_sts_batch.chunk_log = []                    # type: ignore[attr-defined]
 
     if not HAS_WEBSOCKETS:
         return [{} for _ in rows]
@@ -1306,12 +1309,24 @@ def calculate_sts_batch(
             pass
     fetched: Dict[int, Dict[str, float]] = {}
     _batch_aborted = False  # set True if consecutive failures or user abort
+    # ``_abort_before_query`` tracks which *local* (pending-list) indices were
+    # marked as unqueried because the batch was aborted before their turn.
+    # Phase C uses this set to distinguish "never reached" from "tried and failed".
+    _abort_before_query: set = set()
+    # Capture the consecutive-failure count that triggered the abort so Phase C
+    # can embed it in the per-row failure reason.
+    _abort_consecutive_failures: int = 0
+    _abort_reason_type: str = ""  # "consecutive_failures" | "user_cancel"
+    # Structured per-chunk execution log.  Each dict records the outcome of one
+    # chunk (with chunk_size=1, one chunk == one patient).
+    chunk_log: list = []
     if pending:
         local_pairs = [
             (local_i, pending[local_i][1]) for local_i in range(len(pending))
         ]
         inner_failure_log: list = []
         _consecutive_failures = 0
+        _chunk_index = 0
         for chunk_start in range(0, len(local_pairs), chunk_size):
             # Check cooperative abort (user-requested cancellation).
             if abort_event is not None and abort_event.is_set():
@@ -1322,16 +1337,23 @@ def calculate_sts_batch(
                     len(local_pairs) - chunk_start,
                 )
                 _batch_aborted = True
+                _abort_reason_type = "user_cancel"
+                _abort_consecutive_failures = _consecutive_failures
                 for local_i, _ in local_pairs[chunk_start:]:
                     fetched.setdefault(local_i, {})
+                    _abort_before_query.add(local_i)
                 break
             if _batch_aborted:
                 # Fill remaining as empty so Phase C can handle them via fallback.
                 for local_i, _ in local_pairs[chunk_start:]:
                     fetched.setdefault(local_i, {})
+                    _abort_before_query.add(local_i)
                 break
             chunk_end = min(chunk_start + chunk_size, len(local_pairs))
             chunk = local_pairs[chunk_start:chunk_end]
+            chunk_patient_ids = [
+                pending[local_i][5] for local_i, _ in chunk if local_i < len(pending)
+            ]
             # Fire chunk_start_callback before the network query so the caller
             # (e.g. the temporal-validation polling handler) can record the
             # per-patient start timestamp.  With chunk_size==1 this fires once
@@ -1344,6 +1366,8 @@ def calculate_sts_batch(
                 except Exception:
                     pass
             chunk_had_success = False
+            _chunk_exc_type: Optional[str] = None
+            _chunk_exc_msg: Optional[str] = None
             try:
                 chunk_results = _run_async(
                     _calculate_sts_chunk_async(
@@ -1362,9 +1386,16 @@ def calculate_sts_batch(
                         chunk_had_success = True
             except Exception as e:
                 last_error = e
+                _chunk_exc_type = type(e).__name__
+                _chunk_exc_msg = str(e)
                 _sts_log.warning("STS Score batch chunk error: %s", e)
                 for local_i, _ in chunk:
                     fetched.setdefault(local_i, {})
+            # Chunk success/failure counts for the structured log.
+            _chunk_success = sum(
+                1 for local_i, _ in chunk if fetched.get(local_i, {}).get("predmort") is not None
+            )
+            _chunk_failure = len(chunk) - _chunk_success
             # Fire chunk_done_callback so callers can track running
             # completed/failed counts for live progress display.
             if chunk_done_callback is not None:
@@ -1374,6 +1405,7 @@ def calculate_sts_batch(
                     pass
             # Consecutive-failure abort: if a whole chunk produced no valid
             # results and no network success, treat it as a failure tick.
+            _aborted_after_this_chunk = False
             if not chunk_had_success:
                 _consecutive_failures += 1
                 if _consecutive_failures >= STS_MAX_CONSECUTIVE_FAILURES:
@@ -1384,6 +1416,9 @@ def calculate_sts_batch(
                         len(local_pairs) - chunk_end,
                     )
                     _batch_aborted = True
+                    _abort_reason_type = "consecutive_failures"
+                    _abort_consecutive_failures = _consecutive_failures
+                    _aborted_after_this_chunk = True
                 else:
                     # Progressive backoff: give a flapping endpoint time to recover
                     # before the next patient attempt.  Runs in the worker thread so
@@ -1404,12 +1439,26 @@ def calculate_sts_batch(
                         _tv_sleep_mod.sleep(_backoff_s)
             else:
                 _consecutive_failures = 0
+            chunk_log.append({
+                "chunk_index":            _chunk_index,
+                "chunk_start":            chunk_start,
+                "row_count":              len(chunk),
+                "patient_ids":            chunk_patient_ids,
+                "success_count":          _chunk_success,
+                "failure_count":          _chunk_failure,
+                "exception_type":         _chunk_exc_type,
+                "exception_message":      _chunk_exc_msg,
+                "aborted_after_this_chunk": _aborted_after_this_chunk,
+            })
+            _chunk_index += 1
             if progress_callback:
                 try:
                     progress_callback(done_base + chunk_end, total)
                 except Exception:
                     pass
     calculate_sts_batch._batch_aborted = _batch_aborted  # type: ignore[attr-defined]
+    calculate_sts_batch._abort_before_query_count = len(_abort_before_query)  # type: ignore[attr-defined]
+    calculate_sts_batch.chunk_log = chunk_log  # type: ignore[attr-defined]
 
     # Phase C: validate, persist, and classify each pending row.
     if phase_callback is not None:
@@ -1446,7 +1495,53 @@ def calculate_sts_batch(
             results[orig_i] = dict(result)
             continue
 
-        # Fetch failed -> stale fallback or total failure.
+        # --- Batch-abort path ---------------------------------------------------
+        # This row was never queried because the batch was aborted before reaching
+        # it.  We still attempt a stale-cache fallback (requirement D: preserve
+        # partial success) before marking it as unqueried.
+        if local_i in _abort_before_query:
+            if _abort_reason_type == "user_cancel":
+                _abort_row_reason = (
+                    "Batch cancelled by user; row not queried."
+                )
+            else:
+                _abort_row_reason = (
+                    f"Batch aborted after {_abort_consecutive_failures} consecutive "
+                    f"chunk failures; row not queried."
+                )
+            fallback_entry = _sts_cache.find_stale_fallback(
+                pid_str, input_hash, prior_entry
+            )
+            if fallback_entry is not None:
+                # A stale result exists — use it so earlier cached data is not lost.
+                rec = _sts_cache.make_stale_fallback_record(
+                    fallback_entry, pid_str, input_hash,
+                    f"batch_abort: {_abort_row_reason}", retry_attempted=False,
+                )
+                execution_log.append(rec)
+                failure_log.append({
+                    "idx": orig_i, "patient_id": pid_str, "status": rec.status,
+                    "stage": "batch_abort",
+                    "reason": _abort_row_reason,
+                    "retry_attempted": False, "used_previous_cache": True,
+                })
+                results[orig_i] = dict(fallback_entry.get("result") or {})
+            else:
+                rec = _sts_cache.make_failed_record(
+                    pid_str, input_hash, "batch_abort",
+                    _abort_row_reason, retry_attempted=False,
+                )
+                execution_log.append(rec)
+                failure_log.append({
+                    "idx": orig_i, "patient_id": pid_str, "status": rec.status,
+                    "stage": "batch_abort",
+                    "reason": _abort_row_reason,
+                    "retry_attempted": False, "used_previous_cache": False,
+                })
+                results[orig_i] = {}
+            continue
+
+        # --- Normal fetch-failure path ------------------------------------------
         fallback_entry = _sts_cache.find_stale_fallback(
             pid_str, input_hash, prior_entry
         )
@@ -1485,4 +1580,6 @@ def calculate_sts_batch(
 calculate_sts_batch.last_error = None
 calculate_sts_batch.failure_log = []
 calculate_sts_batch.last_execution_log = []
-calculate_sts_batch._batch_aborted = False  # type: ignore[attr-defined]
+calculate_sts_batch._batch_aborted = False          # type: ignore[attr-defined]
+calculate_sts_batch._abort_before_query_count = 0   # type: ignore[attr-defined]
+calculate_sts_batch.chunk_log = []                   # type: ignore[attr-defined]
