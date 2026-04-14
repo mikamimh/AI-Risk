@@ -67,6 +67,36 @@ WS_HEADERS = [
     ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
 ]
 
+# Maximum wall-clock seconds for a single-patient STS query (connect + all messages).
+# The inner message loop allows up to 80 × 30 s = 2 400 s without this cap —
+# this guard prevents multi-hour stalls for unreachable/unresponsive endpoints.
+STS_PER_PATIENT_TIMEOUT_S: int = 90
+
+# Maximum consecutive failures before calculate_sts_batch aborts the web-query
+# phase and returns partial results.  Prevents infinite stalls when the STS
+# endpoint is down entirely.
+STS_MAX_CONSECUTIVE_FAILURES: int = 5
+
+# Procedures NOT covered by the STS ACSD web calculator.
+# Keywords are matched (substring, upper-case) against surgery_pre / Surgery.
+_STS_UNSUPPORTED_KEYWORDS: frozenset = frozenset([
+    "DISSECTION",
+    "ANEURISM",
+    "ANEURYSM",
+    "BENTALL",
+    "AORTIC ROOT REPLACEMENT",
+    "AORTIC ROOT REPAIR",
+    "AORTIC REPAIR",
+    "AORTIC RECONSTRUCTION",
+    "AORTA REPAIR",
+])
+
+# Surgical-priority values that cannot be safely mapped to an STS urgency field.
+_STS_UNMAPPABLE_PRIORITY: frozenset = frozenset([
+    "OBSERVATION ADMIT",
+    "OBSERVATION",
+])
+
 PROCID_TO_PROC = {
     1: "Isolated CABG",
     2: "Isolated AVR",
@@ -284,6 +314,23 @@ def _map_copd(val) -> str:
 
 
 def _map_urgency(val) -> str:
+    """Map a surgical-priority string to the STS urgency field value.
+
+    DESIGN NOTE — OBSERVATION ADMIT
+    --------------------------------
+    ``OBSERVATION ADMIT`` (and similar observation-admission strings) is an
+    *admission type*, not a surgical urgency level.  It has **no** defined
+    mapping to the STS ACSD urgency field and must NOT reach this function.
+    ``classify_sts_eligibility()`` is the single authoritative gatekeeper:
+    it classifies any row whose ``surgical_priority`` is ``OBSERVATION ADMIT``
+    as ``"uncertain"`` and the caller is expected to skip such rows before
+    ever calling ``build_sts_input_from_row``.
+
+    Unrecognised values that slip through despite the gatekeeper fall back to
+    ``"Elective"`` (the most conservative STS default) so the batch does not
+    crash — but they will also have been flagged as ``uncertain`` and skipped
+    in the temporal-validation flow.
+    """
     v = str(val).strip() if val else ""
     mapping = {
         "Elective": "Elective",
@@ -297,7 +344,62 @@ def _map_urgency(val) -> str:
         "Salvamento": "Emergent Salvage",
         "Emergent Salvage": "Emergent Salvage",
     }
-    return mapping.get(v, "Elective")
+    result = mapping.get(v)
+    if result is None:
+        _sts_log.debug(
+            "_map_urgency: unrecognised priority %r — defaulting to Elective. "
+            "Row should have been caught by classify_sts_eligibility().",
+            v,
+        )
+        return "Elective"
+    return result
+
+
+def classify_sts_eligibility(row: dict) -> tuple:
+    """Classify a patient row for STS ACSD web-calculator eligibility.
+
+    Returns:
+        (status, reason) where *status* is one of:
+
+        ``"supported"``
+            Procedure is a standard cardiac operation covered by the STS ACSD
+            calculator (CABG, AVR, MVR, MV Repair, and combinations).
+
+        ``"not_supported"``
+            Procedure is outside STS ACSD scope — aortic dissection repair,
+            aortic aneurysm repair, Bentall-de Bono procedure, or similar.
+            These cases should be skipped before calling the web calculator.
+
+        ``"uncertain"``
+            Procedure mapping could not be confirmed (empty field, unrecognised
+            string, or unmappable priority).  The caller may choose to attempt
+            the query or skip conservatively.
+    """
+    surgery = str(row.get("surgery_pre") or row.get("Surgery") or "").strip().upper()
+    priority = str(row.get("surgical_priority") or row.get("Surgical Priority") or "").strip().upper()
+
+    # --- hard exclusions ---
+    for kw in _STS_UNSUPPORTED_KEYWORDS:
+        if kw in surgery:
+            return ("not_supported", f"procedure outside STS ACSD scope: {surgery!r}")
+
+    # --- priority edge cases ---
+    if priority in _STS_UNMAPPABLE_PRIORITY:
+        return ("uncertain", f"surgical priority not directly mappable to STS urgency: {priority!r}")
+
+    # --- known-supported procedure families ---
+    has_cabg = "CABG" in surgery or "OPCAB" in surgery
+    has_avr = "AVR" in surgery
+    has_mvr = "MVR" in surgery
+    has_mv_repair = "MV REPAIR" in surgery or "MITRAL REPAIR" in surgery or "PLASTIA MITRAL" in surgery
+
+    if has_cabg or has_avr or has_mvr or has_mv_repair:
+        return ("supported", "standard cardiac procedure covered by STS ACSD")
+
+    if not surgery:
+        return ("uncertain", "surgery type not specified")
+
+    return ("uncertain", f"procedure not confirmed as STS-supported: {surgery!r}")
 
 
 def build_sts_input_from_row(row: dict) -> dict:
@@ -680,7 +782,8 @@ def _extract_text2_html(msg_data: dict) -> Optional[str]:
     return None
 
 
-async def _query_sts_ws(sts_input: dict) -> Dict[str, float]:
+async def _query_sts_ws_inner(sts_input: dict) -> Dict[str, float]:
+    """Core WebSocket query — called exclusively through _query_sts_ws."""
     init_msg, update_msg = _prepare_ws_messages(sts_input)
 
     async with websockets.connect(
@@ -733,6 +836,26 @@ async def _query_sts_ws(sts_input: dict) -> Dict[str, float]:
         sorted(_seen_methods) or "(none)",
     )
     return {}
+
+
+async def _query_sts_ws(sts_input: dict) -> Dict[str, float]:
+    """Query the STS Score WebSocket with a hard per-patient timeout.
+
+    Wraps ``_query_sts_ws_inner`` in ``asyncio.wait_for`` so a single patient
+    can never stall for more than ``STS_PER_PATIENT_TIMEOUT_S`` seconds regardless
+    of how many WebSocket messages the server sends.
+    """
+    try:
+        return await asyncio.wait_for(
+            _query_sts_ws_inner(sts_input),
+            timeout=STS_PER_PATIENT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        _sts_log.warning(
+            "STS Score per-patient hard timeout (%ds) exceeded — returning empty result",
+            STS_PER_PATIENT_TIMEOUT_S,
+        )
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -840,8 +963,25 @@ def calculate_sts(
 calculate_sts.last_execution_log = []  # type: ignore[attr-defined]
 
 
-async def _calculate_sts_chunk_async(rows_with_indices: list, max_concurrent: int = 2, max_retries: int = 2, failure_log: list = None) -> dict:
-    """Calculate STS for a chunk of rows. Returns {index: result_dict}."""
+async def _calculate_sts_chunk_async(
+    rows_with_indices: list,
+    max_concurrent: int = 2,
+    max_retries: int = 2,
+    failure_log: list = None,
+    patient_timeout_s: Optional[int] = None,
+) -> dict:
+    """Calculate STS for a chunk of rows. Returns {index: result_dict}.
+
+    Args:
+        patient_timeout_s: if set, the TOTAL wall-clock budget for a single
+            patient across ALL retry attempts.  Each individual ``_query_sts_ws``
+            call already carries its own per-attempt timeout; this outer cap
+            ensures that the combined time (query + retries + back-off sleeps)
+            never exceeds ``patient_timeout_s`` seconds.  When this fires the
+            patient is recorded as failed in ``failure_log``.  Pass
+            ``STS_PER_PATIENT_TIMEOUT_S`` to make "90 s per patient" literally
+            true regardless of retry count.
+    """
     sem = asyncio.Semaphore(max_concurrent)
     results: dict = {}
 
@@ -881,7 +1021,28 @@ async def _calculate_sts_chunk_async(rows_with_indices: list, max_concurrent: in
                 reason += f" (last error: {last_err})"
             failure_log.append({"idx": idx, "name": patient_name, "surgery": surgery, "reason": reason})
 
-    tasks = [_calc_one(idx, row) for idx, row in rows_with_indices]
+    async def _calc_one_bounded(idx: int, row: dict):
+        """Wraps _calc_one with a total per-patient wall-clock cap."""
+        patient_name = row.get("Name", row.get("Nome", f"Row {idx+1}")) if row else f"Row {idx+1}"
+        try:
+            await asyncio.wait_for(_calc_one(idx, row), timeout=patient_timeout_s)
+        except asyncio.TimeoutError:
+            if idx not in results:
+                results[idx] = {}
+            if failure_log is not None:
+                failure_log.append({
+                    "idx": idx,
+                    "name": patient_name,
+                    "reason": (
+                        f"per-patient timeout exceeded ({patient_timeout_s} s total "
+                        "across all retry attempts)"
+                    ),
+                })
+
+    if patient_timeout_s is not None:
+        tasks = [_calc_one_bounded(idx, row) for idx, row in rows_with_indices]
+    else:
+        tasks = [_calc_one(idx, row) for idx, row in rows_with_indices]
     await asyncio.gather(*tasks, return_exceptions=True)
     return results
 
@@ -929,6 +1090,9 @@ def calculate_sts_batch(
     chunk_size: int = 5,
     patient_ids: Optional[List[Optional[str]]] = None,
     use_cache: bool = True,
+    abort_event=None,
+    chunk_start_callback=None,
+    chunk_done_callback=None,
 ) -> list:
     """Calculate STS Score risk scores for a batch of patient rows.
 
@@ -965,6 +1129,24 @@ def calculate_sts_batch(
         use_cache: if False, bypass the STS Score cache entirely and run
             the legacy chunked async path (no hashing, no persistence,
             no execution log).
+        abort_event: optional ``threading.Event``.  When set (by an external
+            thread or UI callback), the fetch loop stops after the current
+            chunk completes and sets ``_batch_aborted = True``.  Already-fetched
+            results and cache hits are preserved.  A ``None`` value means no
+            cooperative cancellation is requested.
+        chunk_start_callback: optional callable(patient_idx: int, total_pending: int,
+            patient_id: str | None) fired in the worker thread immediately before
+            the network query for each chunk/patient begins.  When chunk_size==1,
+            this fires once per patient and can be used to record the patient-level
+            start timestamp in a shared progress dict for UI display.  Exceptions
+            in the callback are silently swallowed so they cannot abort the batch.
+        chunk_done_callback: optional callable(patient_idx: int, total_pending: int,
+            success: bool) fired immediately after each chunk/patient network query
+            completes.  ``success`` is True when at least one row in the chunk
+            returned a valid ``predmort`` value.  With chunk_size==1 this fires
+            once per patient and lets the caller track running completed/failed
+            counts in a shared dict for live UI display.  Exceptions silently
+            swallowed.
     """
     # Reset public diagnostic attributes up front so the UI always sees
     # the current call's state even on early returns.
@@ -1114,30 +1296,93 @@ def calculate_sts_batch(
         except Exception:
             pass
     fetched: Dict[int, Dict[str, float]] = {}
+    _batch_aborted = False  # set True if consecutive failures or user abort
     if pending:
         local_pairs = [
             (local_i, pending[local_i][1]) for local_i in range(len(pending))
         ]
         inner_failure_log: list = []
+        _consecutive_failures = 0
         for chunk_start in range(0, len(local_pairs), chunk_size):
+            # Check cooperative abort (user-requested cancellation).
+            if abort_event is not None and abort_event.is_set():
+                _sts_log.info(
+                    "STS Score batch cooperative abort requested — "
+                    "stopping after chunk %d; %d rows remain unqueried",
+                    chunk_start // chunk_size,
+                    len(local_pairs) - chunk_start,
+                )
+                _batch_aborted = True
+                for local_i, _ in local_pairs[chunk_start:]:
+                    fetched.setdefault(local_i, {})
+                break
+            if _batch_aborted:
+                # Fill remaining as empty so Phase C can handle them via fallback.
+                for local_i, _ in local_pairs[chunk_start:]:
+                    fetched.setdefault(local_i, {})
+                break
             chunk_end = min(chunk_start + chunk_size, len(local_pairs))
             chunk = local_pairs[chunk_start:chunk_end]
+            # Fire chunk_start_callback before the network query so the caller
+            # (e.g. the temporal-validation polling handler) can record the
+            # per-patient start timestamp.  With chunk_size==1 this fires once
+            # per patient, making the "90 s per patient" timeout observable.
+            if chunk_start_callback is not None:
+                try:
+                    _cb_local_i = local_pairs[chunk_start][0]
+                    _cb_pid = pending[_cb_local_i][5] if _cb_local_i < len(pending) else None
+                    chunk_start_callback(chunk_start, len(local_pairs), _cb_pid)
+                except Exception:
+                    pass
+            chunk_had_success = False
             try:
                 chunk_results = _run_async(
-                    _calculate_sts_chunk_async(chunk, max_retries=4, failure_log=inner_failure_log)
+                    _calculate_sts_chunk_async(
+                        chunk,
+                        max_retries=4,
+                        failure_log=inner_failure_log,
+                        # Global per-patient timeout: covers ALL retry attempts so
+                        # "STS_PER_PATIENT_TIMEOUT_S seconds per patient" is
+                        # literally true regardless of how many retries are attempted.
+                        patient_timeout_s=STS_PER_PATIENT_TIMEOUT_S,
+                    )
                 )
                 for local_i, result in chunk_results.items():
                     fetched[local_i] = result or {}
+                    if result and "predmort" in result:
+                        chunk_had_success = True
             except Exception as e:
                 last_error = e
                 _sts_log.warning("STS Score batch chunk error: %s", e)
                 for local_i, _ in chunk:
                     fetched.setdefault(local_i, {})
+            # Fire chunk_done_callback so callers can track running
+            # completed/failed counts for live progress display.
+            if chunk_done_callback is not None:
+                try:
+                    chunk_done_callback(chunk_start, len(local_pairs), chunk_had_success)
+                except Exception:
+                    pass
+            # Consecutive-failure abort: if a whole chunk produced no valid
+            # results and no network success, treat it as a failure tick.
+            if not chunk_had_success:
+                _consecutive_failures += 1
+                if _consecutive_failures >= STS_MAX_CONSECUTIVE_FAILURES:
+                    _sts_log.warning(
+                        "STS Score batch aborted after %d consecutive chunk failures — "
+                        "endpoint may be unreachable; %d rows remain unqueried",
+                        _consecutive_failures,
+                        len(local_pairs) - chunk_end,
+                    )
+                    _batch_aborted = True
+            else:
+                _consecutive_failures = 0
             if progress_callback:
                 try:
                     progress_callback(done_base + chunk_end, total)
                 except Exception:
                     pass
+    calculate_sts_batch._batch_aborted = _batch_aborted  # type: ignore[attr-defined]
 
     # Phase C: validate, persist, and classify each pending row.
     if phase_callback is not None:
@@ -1213,3 +1458,4 @@ def calculate_sts_batch(
 calculate_sts_batch.last_error = None
 calculate_sts_batch.failure_log = []
 calculate_sts_batch.last_execution_log = []
+calculate_sts_batch._batch_aborted = False  # type: ignore[attr-defined]

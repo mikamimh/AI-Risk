@@ -33,6 +33,52 @@ import pandas as pd
 _QUARTER_TO_MONTH = {"Q1": 1, "Q2": 4, "Q3": 7, "Q4": 10}
 _QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
 
+# ---------------------------------------------------------------------------
+# Surrogate / de-identified timeline detection
+# ---------------------------------------------------------------------------
+
+# Years above this threshold are treated as artificially shifted for patient
+# de-identification and should NOT be interpreted as real clinical dates.
+SURROGATE_YEAR_THRESHOLD: int = 2050
+
+
+def is_surrogate_timeline(data: pd.DataFrame) -> bool:
+    """Return True when the dataset appears to use a de-identified surrogate year.
+
+    Datasets produced under temporal de-identification shift calendar years to
+    an artificial range (e.g. 2111–2195) that is recognisably not real clinical
+    time.  This helper detects that pattern so the UI can add an appropriate
+    disclaimer without blocking execution.
+    """
+    if "surgery_year" not in data.columns:
+        return False
+    years = pd.to_numeric(data["surgery_year"], errors="coerce").dropna()
+    return bool((not years.empty) and (years.max() > SURROGATE_YEAR_THRESHOLD))
+
+
+def build_surrogate_timeline_note(language: str = "English") -> str:
+    """Return a formatted UI note explaining a de-identified surrogate timeline.
+
+    Should be shown whenever ``is_surrogate_timeline`` returns True so that
+    readers do not misinterpret shifted years as real procedure dates.
+    """
+    if language == "English":
+        return (
+            "**De-identified surrogate timeline detected.** "
+            "Calendar years shown (e.g. 2111\u20132195) were artificially shifted for patient "
+            "privacy and do **not** represent real clinical procedure dates. "
+            "Temporal ordering and overlap checks use only the relative sequence encoded in "
+            "`surgery_year` + `surgery_quarter` — the absolute year values carry no clinical meaning."
+        )
+    return (
+        "**Linha do tempo substituta desidentificada detectada.** "
+        "Os anos exibidos (ex: 2111\u20132195) foram deslocados artificialmente para proteger a "
+        "privacidade dos pacientes e **não** representam datas clínicas reais. "
+        "A ordenação temporal e a verificação de sobreposição utilizam apenas a sequência relativa "
+        "codificada em `surgery_year` + `surgery_quarter` — os valores absolutos dos anos não têm "
+        "significado clínico."
+    )
+
 
 # ---------------------------------------------------------------------------
 # Year-quarter timestamp helpers (private)
@@ -118,8 +164,26 @@ def check_temporal_overlap(
     """Compare training and validation temporal ranges for overlap.
 
     Accepts year-quarter strings (``"2024-Q1"``) or plain years (``"2024"``).
-    Returns dict with keys: overlap, status, severity, message_en, message_pt.
+    Returns dict with keys:
+
+    overlap, status, severity, message_en, message_pt, surrogate_timeline.
+
+    ``surrogate_timeline`` is True when one or both ranges contain years above
+    ``SURROGATE_YEAR_THRESHOLD`` — the UI should show a de-identification
+    disclaimer and not interpret absolute year values clinically.
     """
+    # Detect de-identified surrogate years in either range.
+    def _max_year(yq: str) -> Optional[int]:
+        if not yq or yq == "Unknown":
+            return None
+        try:
+            return int(yq.split("-")[0])
+        except Exception:
+            return None
+
+    _years = [_max_year(y) for y in [training_start, training_end, validation_start, validation_end]]
+    surrogate = any(y is not None and y > SURROGATE_YEAR_THRESHOLD for y in _years)
+
     result = {
         "training_range": (training_start, training_end),
         "validation_range": (validation_start, validation_end),
@@ -128,6 +192,7 @@ def check_temporal_overlap(
         "severity": "info",
         "message_en": "",
         "message_pt": "",
+        "surrogate_timeline": surrogate,
     }
     t_start = _yq_to_timestamp(training_start)
     t_end = _yq_to_end_timestamp(training_end)
@@ -141,47 +206,53 @@ def check_temporal_overlap(
         result["message_pt"] = "Não foi possível interpretar os períodos — verificação de sobreposição ignorada."
         return result
 
+    # Surrogate-aware labels: clarify that absolute years are de-identified.
+    _surr_note_en = " (de-identified surrogate years — not real clinical dates)" if surrogate else ""
+    _surr_note_pt = " (anos substitutos desidentificados — não são datas clínicas reais)" if surrogate else ""
+
     if v_end < t_start:
         result["status"] = "validation_before_training"
         result["severity"] = "error"
         result["message_en"] = (
-            f"The validation cohort ({validation_start} — {validation_end}) is entirely "
-            f"BEFORE the training cohort ({training_start} — {training_end}). "
-            "This is NOT temporal validation — it is retrograde validation and "
+            f"The validation cohort surrogate range ({validation_start} \u2014 {validation_end}){_surr_note_en} "
+            f"is entirely BEFORE the training cohort surrogate range ({training_start} \u2014 {training_end}). "
+            "This is NOT temporal validation \u2014 it is retrograde validation and "
             "severely compromises methodological validity."
         )
         result["message_pt"] = (
-            f"A coorte de validação ({validation_start} — {validation_end}) é inteiramente "
-            f"ANTERIOR à coorte de treinamento ({training_start} — {training_end}). "
-            "Isso NÃO é validação temporal — é validação retrógrada e "
+            f"O intervalo substituto da coorte de validação ({validation_start} \u2014 {validation_end}){_surr_note_pt} "
+            f"é inteiramente ANTERIOR ao intervalo substituto da coorte de treinamento ({training_start} \u2014 {training_end}). "
+            "Isso NÃO é validação temporal \u2014 é validação retrógrada e "
             "compromete gravemente a validade metodológica."
         )
     elif v_start > t_end:
         result["status"] = "no_overlap"
         result["severity"] = "success"
         result["message_en"] = (
-            f"No temporal overlap detected. The validation cohort ({validation_start} — {validation_end}) "
-            f"is strictly after the training cohort ({training_start} — {training_end}) "
-            "— ideal for temporal validation."
+            f"No temporal overlap detected. "
+            f"Validation cohort surrogate range ({validation_start} \u2014 {validation_end}) "
+            f"is strictly after training cohort surrogate range ({training_start} \u2014 {training_end})"
+            f"{_surr_note_en} \u2014 ideal for temporal validation."
         )
         result["message_pt"] = (
-            f"Sem sobreposição temporal detectada. A coorte de validação ({validation_start} — {validation_end}) "
-            f"é estritamente posterior à coorte de treinamento ({training_start} — {training_end}) "
-            "— ideal para validação temporal."
+            f"Sem sobreposição temporal detectada. "
+            f"Intervalo substituto da coorte de validação ({validation_start} \u2014 {validation_end}) "
+            f"é estritamente posterior ao da coorte de treinamento ({training_start} \u2014 {training_end})"
+            f"{_surr_note_pt} \u2014 ideal para validação temporal."
         )
     else:
         result["overlap"] = True
         result["status"] = "overlap"
         result["severity"] = "warning"
         result["message_en"] = (
-            f"Temporal overlap detected between training ({training_start} — {training_end}) "
-            f"and validation ({validation_start} — {validation_end}). "
+            f"Temporal overlap detected between training ({training_start} \u2014 {training_end}) "
+            f"and validation ({validation_start} \u2014 {validation_end}){_surr_note_en}. "
             "Patients in the overlapping period may have been used for training, "
             "which weakens the validity of temporal validation."
         )
         result["message_pt"] = (
-            f"Sobreposição temporal detectada entre treinamento ({training_start} — {training_end}) "
-            f"e validação ({validation_start} — {validation_end}). "
+            f"Sobreposição temporal detectada entre treinamento ({training_start} \u2014 {training_end}) "
+            f"e validação ({validation_start} \u2014 {validation_end}){_surr_note_pt}. "
             "Pacientes no período sobreposto podem ter sido usados no treinamento, "
             "o que enfraquece a validade da validação temporal."
         )

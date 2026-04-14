@@ -80,6 +80,22 @@ The STS Score is obtained by **automated interaction with the official STS Risk 
 
 **Supported procedures:** Isolated CABG, Isolated AVR, Isolated MVR, AVR+CABG, MVR+CABG, MV Repair, MV Repair+CABG.
 
+**STS eligibility pre-classification:** Before any network query is attempted, each patient row is passed through `classify_sts_eligibility()`, the single authoritative gatekeeper for STS admission. It assigns one of three statuses:
+
+| Status | Meaning | Action |
+|:--|:--|:--|
+| `supported` | CABG, AVR, MVR, MV Repair, or combinations thereof | Queried normally |
+| `not_supported` | Aortic dissection, aneurism, aneurysm, Bentall, aortic root replacement, or similar unsupported variants | Skipped — STS calculator does not support these procedures |
+| `uncertain` | OBSERVATION ADMIT, blank surgery string, or other unmappable priority | Always skipped — never silently mapped to any urgency category |
+
+**OBSERVATION ADMIT rule:** This admission type is classified as `uncertain` and skipped by `classify_sts_eligibility()`. It is **never** silently mapped to `Elective` or any other urgency category. `classify_sts_eligibility()` is the sole authority on whether a row reaches the STS calculator.
+
+A compact eligibility summary is shown before querying begins: `STS eligibility: N supported · N not supported (skipped) · N uncertain — OBSERVATION ADMIT or unmapped priority (skipped)`.
+
+**Per-patient timeout:** Each STS query is bounded by a 90-second hard cap (via `asyncio.wait_for`). Before this safeguard was added, the inner WebSocket loop could run up to 80 message cycles × 30 s each = 2 400 s per patient, multiplied by up to 4 retries, making large cohorts non-interactive for hours. Patients that time out return an empty result (`{}`) and are recorded as failures in the execution log.
+
+**Cooperative cancellation (Temporal Validation):** While the STS Score batch is running in the Temporal Validation tab, a **Cancel STS run** button is shown alongside the live progress indicator. Clicking it sets a `threading.Event` abort flag; the batch stops after the current chunk completes (cooperative, not preemptive). Partial results computed before cancellation are preserved and used for analysis. Each row in the final result carries a status label: `completed`, `failed`, `skipped`, or `cancelled_remaining`.
+
 **Limitations:**
 - ~1–3% of patients may fail due to ambiguous procedure mapping
 - Results may differ slightly from manual entry due to field mapping approximations
@@ -257,6 +273,10 @@ The Temporal Validation tab applies the frozen trained model to an **independent
 - Performance metrics are reported at the fixed 8% threshold
 - Export options: XLSX (full results table), CSV (predictions), PDF (summary report)
 - Results persist in session state for tab-navigation reuse (see "Session reuse" above)
+
+**Surrogate timeline detection:** If the `surgery_year` column contains values above 2050, the dataset is automatically identified as using a **de-identified surrogate timeline** (e.g., MIMIC-IV re-identifies dates as 2111–2195). In this case: (a) the chronological overlap check uses the surrogate years without comparing them to real training dates; (b) all date range displays include a notice — *"de-identified surrogate timeline — not real clinical dates"*; and (c) the range label changes from "Date range" to "Surrogate range". This prevents de-identified years from being misread as real clinical dates.
+
+**STS mode selector:** A checkbox allows the user to include or exclude STS Score from the temporal validation run. When unchecked, STS queries are skipped entirely and the analysis proceeds with AI Risk and EuroSCORE II only. The checkbox defaults to enabled when `websockets` is installed.
 
 ## Decision threshold
 

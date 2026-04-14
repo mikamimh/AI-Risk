@@ -39,6 +39,8 @@ from temporal_validation import (
     check_temporal_overlap,
     format_locked_model_for_display,
     build_temporal_validation_summary,
+    is_surrogate_timeline,
+    build_surrogate_timeline_note,
 )
 # Backward-compat alias: build_model_metadata (below) and any caller that uses
 # the private-style name both continue to work without modification.
