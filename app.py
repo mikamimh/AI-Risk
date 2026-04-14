@@ -4462,7 +4462,8 @@ elif _active_tab == 9:  # Temporal Validation
         _tv_ext = Path(_tv_file.name).suffix.lower()
         _tv_temp_path = TEMP_DATA_DIR / f"temporal_validation{_tv_ext}"
         TEMP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _tv_temp_path.write_bytes(_tv_file.getvalue())
+        _tv_file_bytes = _tv_file.getvalue()          # captured once; reused for content hash
+        _tv_temp_path.write_bytes(_tv_file_bytes)
 
         # ── 3. Prepare temporal dataset ──
         _tv_error = None
@@ -4571,7 +4572,11 @@ elif _active_tab == 9:  # Temporal Validation
                 # cache automatically — prevents showing STS results when STS is off
                 # or vice versa.
                 import hashlib as _tv_hl
-                _tv_file_sig = getattr(_tv_file, "file_id", None) or f"{_tv_file.name}_{_tv_file.size}"
+                # Content-addressed signature: immune to filename, size, or Streamlit
+                # file_id changes.  If the bytes change the sig changes; if not, it
+                # doesn't matter — the result is correctly reusable.
+                _tv_file_content_hash = _tv_hl.sha256(_tv_file_bytes).hexdigest()[:24]
+                _tv_file_sig = _tv_file_content_hash
                 # Read STS checkbox state from session before the widget renders
                 # (session_state already holds the current value at this rerun).
                 _tv_include_sts_sig = st.session_state.get("tv_include_sts", HAS_STS)
@@ -4589,6 +4594,31 @@ elif _active_tab == 9:  # Temporal Validation
                     and "_tv_result" in st.session_state
                     and st.session_state.get("_tv_result_sig") == _tv_context_sig
                 )
+
+                # ── Debug: cache-key audit ──────────────────────────────────────────
+                # Temporary — lets the user confirm that a changed file produces a
+                # new signature.  Remove once the cache behaviour is verified.
+                with st.expander(
+                    tr("Cache key audit (debug)", "Auditoria de chave de cache (debug)"),
+                    expanded=False,
+                ):
+                    _cache_status_label = (
+                        tr("HIT — restoring previous result", "HIT — restaurando resultado anterior")
+                        if _tv_has_cached
+                        else tr("MISS — fresh run required", "MISS — nova execução necessária")
+                    )
+                    st.caption(
+                        tr(
+                            f"Upload content hash: `{_tv_file_content_hash}` | "
+                            f"Context sig: `{_tv_context_sig}` | "
+                            f"STS mode: `{'on' if (HAS_STS and bool(_tv_include_sts_sig)) else 'off'}` | "
+                            f"Cache: **{_cache_status_label}**",
+                            f"Hash do conteúdo: `{_tv_file_content_hash}` | "
+                            f"Assinatura de contexto: `{_tv_context_sig}` | "
+                            f"Modo STS: `{'ligado' if (HAS_STS and bool(_tv_include_sts_sig)) else 'desligado'}` | "
+                            f"Cache: **{_cache_status_label}**",
+                        )
+                    )
 
                 # ── 4c. STS mode selector ──
                 st.divider()
@@ -4687,6 +4717,27 @@ elif _active_tab == 9:  # Temporal Validation
                     and not _tv_run   # Fresh button click takes priority
                 )
                 _tv_sts_just_completed = False
+
+                # ── Stale-state purge ───────────────────────────────────────────────
+                # When the upload content changes (new _tv_context_sig) any previously
+                # cached result or in-progress STS ctx is stale.  Purge proactively so
+                # it can NEVER bleed into the current run — even if the user navigates
+                # away and back without pressing Run.
+                # Guard: only purge when there IS a saved sig that differs (avoids
+                # wiping state on the very first upload where nothing was saved yet).
+                _stale_saved_sig = st.session_state.get("_tv_result_sig")
+                if (
+                    _stale_saved_sig is not None
+                    and _stale_saved_sig != _tv_context_sig
+                    and not _tv_sts_ctx_valid   # don't purge while a valid run is live
+                ):
+                    for _sk in (
+                        "_tv_result", "_tv_result_sig",
+                        _TV_STS_CTX, _TV_STS_CSIG,
+                        _TV_STS_ST, _TV_STS_DONE, _TV_STS_ABRT,
+                        _TV_STS_RES, _TV_STS_PROG,
+                    ):
+                        st.session_state.pop(_sk, None)
 
                 # ── STS polling handler ─────────────────────────────────────────────
                 # Runs on every Streamlit rerun while the STS worker thread is active.
