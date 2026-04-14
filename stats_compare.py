@@ -336,16 +336,54 @@ def _fast_delong(predictions_sorted_transposed: np.ndarray, label_1_count: int) 
     return aucs, delongcov
 
 
+# Minimum class counts required for a stable DeLong covariance estimate.
+# np.cov over v01 / v10 needs at least two samples per class; with a single
+# positive (or single negative) the covariance collapses to a 0/0 or 1/inf
+# shape and raises the three warnings seen on n=24 / events=1 cohorts
+# ("Degrees of freedom <= 0", "divide by zero", "invalid value in multiply").
+# Two is the hard mathematical floor, not a clinical-sufficiency threshold.
+_DELONG_MIN_PER_CLASS = 2
+_DELONG_SKIP_REASON_SPARSE = (
+    "DeLong not computed: fewer than 2 events or fewer than 2 non-events "
+    "in validation cohort."
+)
+_DELONG_SKIP_REASON_DEGENERATE_VAR = (
+    "DeLong not computed: non-positive variance of the AUC difference."
+)
+
+
 def delong_roc_test(y: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> Dict[str, float]:
+    """DeLong test for two correlated ROC AUCs on the same cohort.
+
+    Returns a dict with ``AUC_1``, ``AUC_2``, ``delta_auc``, ``z``, ``p``,
+    plus a ``reason`` field (``None`` on success, a short human-readable
+    string when the test is skipped for a methodological reason).  Sparse
+    validation cohorts — fewer than :data:`_DELONG_MIN_PER_CLASS` positives
+    or negatives — are skipped up front to avoid numpy RuntimeWarnings from
+    the covariance step; callers receive ``p = NaN`` and the reason string
+    and are expected to render an em dash / footnote instead of a p-value.
+    """
     y = np.asarray(y).astype(int)
     p1 = np.asarray(p1)
     p2 = np.asarray(p2)
+    label_1_count = int(y.sum())
+    label_0_count = int(y.size - label_1_count)
+
+    # Hard safety rule: the DeLong covariance is only defined when each
+    # class contributes at least two observations.  Guard before touching
+    # numpy so no RuntimeWarning is emitted for sparse cohorts.
+    if label_1_count < _DELONG_MIN_PER_CLASS or label_0_count < _DELONG_MIN_PER_CLASS:
+        return {
+            "AUC_1": np.nan,
+            "AUC_2": np.nan,
+            "delta_auc": np.nan,
+            "z": np.nan,
+            "p": np.nan,
+            "reason": _DELONG_SKIP_REASON_SPARSE,
+        }
+
     order = np.argsort(-y)
-    y_sorted = y[order]
     preds = np.vstack([p1[order], p2[order]])
-    label_1_count = int(y_sorted.sum())
-    if label_1_count == 0 or label_1_count == len(y_sorted):
-        return {"AUC_1": np.nan, "AUC_2": np.nan, "delta_auc": np.nan, "z": np.nan, "p": np.nan}
 
     aucs, cov = _fast_delong(preds, label_1_count)
     diff = float(aucs[0] - aucs[1])
@@ -354,10 +392,24 @@ def delong_roc_test(y: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> Dict[str, 
     else:
         var = float(cov[0, 0] + cov[1, 1] - 2 * cov[0, 1])
     if var <= 0:
-        return {"AUC_1": float(aucs[0]), "AUC_2": float(aucs[1]), "delta_auc": diff, "z": np.nan, "p": np.nan}
+        return {
+            "AUC_1": float(aucs[0]),
+            "AUC_2": float(aucs[1]),
+            "delta_auc": diff,
+            "z": np.nan,
+            "p": np.nan,
+            "reason": _DELONG_SKIP_REASON_DEGENERATE_VAR,
+        }
     z = diff / np.sqrt(var)
     pval = float(2 * norm.sf(abs(z)))
-    return {"AUC_1": float(aucs[0]), "AUC_2": float(aucs[1]), "delta_auc": diff, "z": float(z), "p": pval}
+    return {
+        "AUC_1": float(aucs[0]),
+        "AUC_2": float(aucs[1]),
+        "delta_auc": diff,
+        "z": float(z),
+        "p": pval,
+        "reason": None,
+    }
 
 
 def net_benefit(y: np.ndarray, p: np.ndarray, threshold: float) -> float:
@@ -532,13 +584,19 @@ def pairwise_score_comparison(
             "Delta_AUC_IC95_sup": bs["ci_high"],
             "Bootstrap_p": bs["p"],
             "DeLong_p": dl["p"],
+            # ``DeLong_skip_reason`` is non-null only when the test was not
+            # computed for a methodological reason (e.g. <2 events or <2
+            # non-events).  Consumers can render this as a footnote; when
+            # DeLong_p is a number, this column is empty.
+            "DeLong_skip_reason": dl.get("reason"),
             "NRI": nri["NRI total"],
             "IDI": idi["IDI"],
         })
 
     cols = [
         "Comparison", "n", "Delta_AUC", "Delta_AUC_IC95_inf",
-        "Delta_AUC_IC95_sup", "Bootstrap_p", "DeLong_p", "NRI", "IDI",
+        "Delta_AUC_IC95_sup", "Bootstrap_p", "DeLong_p", "DeLong_skip_reason",
+        "NRI", "IDI",
     ]
     if not rows:
         return pd.DataFrame(columns=cols)

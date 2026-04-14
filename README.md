@@ -285,6 +285,7 @@ The Temporal Validation tab applies the frozen trained model to an **independent
 - Performance metrics are reported at the fixed 8% threshold
 - Export options: XLSX (full results table), CSV (predictions), PDF (summary report)
 - Results persist in session state for tab-navigation reuse (see "Session reuse" above)
+- Pairwise ROC comparison uses both bootstrap ΔAUC with 95% CI (always applicable) and the DeLong test. DeLong is **suppressed** when the validation cohort has fewer than 2 events or fewer than 2 non-events — its covariance estimate is mathematically undefined below that floor. In that case the report shows an em dash ('—') for the DeLong p-value with a short footnote explaining the skip, and the bootstrap ΔAUC remains the primary comparison statistic.
 
 **Surrogate timeline detection:** If the `surgery_year` column contains values above 2050, the dataset is automatically identified as using a **de-identified surrogate timeline** (e.g., MIMIC-IV re-identifies dates as 2111–2195). In this case: (a) the chronological overlap check uses the surrogate years without comparing them to real training dates; (b) all date range displays include a notice — *"de-identified surrogate timeline — not real clinical dates"*; and (c) the range label changes from "Date range" to "Surrogate range". This prevents de-identified years from being misread as real clinical dates.
 

@@ -1871,7 +1871,33 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     _tv_pw_display[_fc] = _tv_pw_display[_fc].map(
                                         lambda v: f"{v:.4f}" if pd.notna(v) else "—"
                                     )
+                            # DeLong is suppressed for sparse cohorts (<2 events
+                            # or <2 non-events) — drop the internal reason column
+                            # from the visible table and surface it as a caption
+                            # below so the p-value cell shows an em dash with
+                            # explanatory context instead of silently failing.
+                            _tv_pw_skip_notes = []
+                            if "DeLong_skip_reason" in _tv_pw_display.columns:
+                                _tv_pw_skip_notes = [
+                                    r for r in _tv_pw_display["DeLong_skip_reason"].tolist()
+                                    if isinstance(r, str) and r
+                                ]
+                                _tv_pw_display = _tv_pw_display.drop(columns=["DeLong_skip_reason"])
                             st.dataframe(_tv_pw_display, width="stretch", hide_index=True)
+                            if _tv_pw_skip_notes:
+                                st.caption(
+                                    tr(
+                                        "DeLong p-value shown as '—' for one or more comparisons: "
+                                        "the validation cohort has fewer than 2 events or fewer than "
+                                        "2 non-events, below the minimum required for a stable "
+                                        "variance estimate. Bootstrap ΔAUC with 95% CI remains valid.",
+                                        "Valor-p de DeLong exibido como '—' em uma ou mais comparações: "
+                                        "a coorte de validação tem menos de 2 eventos ou menos de 2 "
+                                        "não-eventos, abaixo do mínimo necessário para uma estimativa "
+                                        "estável de variância. O ΔAUC por bootstrap com IC95% "
+                                        "permanece válido.",
+                                    )
+                                )
 
                     # 7.4 Risk categories
                     if not _tv_risk_cat.empty:
