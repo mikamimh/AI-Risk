@@ -4850,6 +4850,7 @@ elif _active_tab == 9:  # Temporal Validation
                         _tv_val_start     = _sts_ctx["val_start"]
                         _tv_val_end       = _sts_ctx["val_end"]
                         _tv_context_sig_r = _sts_ctx.get("ctx_sig", _tv_context_sig)
+                        _tv_prepare_info  = _sts_ctx.get("prepare_info", {})
 
                         _tv_data["class_ia"]  = _tv_data["ia_risk"].map(class_risk)
                         _tv_data["class_euro"] = _tv_data["euroscore_calc"].map(class_risk)
@@ -4934,6 +4935,7 @@ elif _active_tab == 9:  # Temporal Validation
                             "locked_threshold": float(_tv_locked_threshold),
                             "sts_eligibility_log": list(_tv_sts_eligibility_log),
                             "surrogate_timeline": bool(_tv_is_surrogate),
+                            "prepare_info": dict(_tv_prepare_info),
                             # ── STS outcome fields (for exclusive message display) ──────
                             "sts_outcome": _sts_outcome,          # "completed"|"cancelled"|"batch_aborted"|"no_sts"|"no_eligible"
                             "sts_summary_line": _sts_summary_line,
@@ -5409,6 +5411,7 @@ elif _active_tab == 9:  # Temporal Validation
                                 "is_surrogate":  _tv_is_surrogate,
                                 "locked_threshold": _tv_locked_threshold,
                                 "ai_incidents":  list(_tv_ai_incidents) if _tv_ai_incidents else [],
+                                "prepare_info":  dict(_tv_prepared.info) if _tv_prepared is not None else {},
                                 "t0":            _tv_time_mod.monotonic(),
                             }
                             st.session_state[_TV_STS_CSIG]  = _tv_context_sig
@@ -5523,6 +5526,7 @@ elif _active_tab == 9:  # Temporal Validation
                         "n_low": int(_comp_counts.get("low", 0)),
                     }
 
+                    _tv_prepare_info = dict(_tv_prepared.info) if _tv_prepared is not None else {}
                     _tv_progress.progress(1.0, text=tr("Done.", "Concluído."))
                     _tv_phase_slot.empty()
                     with st.expander(tr("View execution details", "Ver detalhes de execução"), expanded=False):
@@ -5531,7 +5535,7 @@ elif _active_tab == 9:  # Temporal Validation
                         _sts_unc_n   = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "uncertain"])
                         _sts_skip_n  = _sts_ns_n + _sts_unc_n
 
-                        # ── Per-step patient counts ───────────────────────────────────────
+                        # ── Pipeline provenance ───────────────────────────────────────────
                         st.markdown(tr("**Pipeline provenance**", "**Proveniência do pipeline**"))
                         st.caption(tr(
                             "Loading: `prepare_master_dataset` (risk_data.py)  \n"
@@ -5545,6 +5549,57 @@ elif _active_tab == 9:  # Temporal Validation
                             "AI Risk: `apply_frozen_model_to_temporal_cohort` (ai_risk_inference.py)  \n"
                             "EuroSCORE II: `euroscore_from_row` (euroscore.py)",
                         ))
+
+                        # ── Cohort assembly breakdown ─────────────────────────────────────
+                        st.markdown(tr("**Cohort assembly**", "**Montagem da coorte**"))
+                        _pi = _tv_prepare_info
+                        if _pi.get("source_type") == "flat":
+                            st.caption(tr(
+                                f"Source: flat CSV/Parquet — no merge steps.  \n"
+                                f"Rows loaded: **{_pi.get('n_rows', len(_tv_data))}**  \n"
+                                f"_(Intermediate merge/filter counts are only available for XLSX uploads.)_",
+                                f"Fonte: CSV/Parquet plano — sem etapas de mesclagem.  \n"
+                                f"Linhas carregadas: **{_pi.get('n_rows', len(_tv_data))}**  \n"
+                                f"_(Contagens intermediárias só estão disponíveis para uploads XLSX.)_",
+                            ))
+                        elif _pi.get("pre_rows_before_criteria", 0) > 0:
+                            _pi_excl_crit = _pi.get("excluded_missing_surgery_or_date", 0)
+                            _pi_excl_match = _pi.get("excluded_no_pre_post_match", 0)
+                            st.caption(tr(
+                                f"Preoperative rows (raw): **{_pi.get('pre_rows_before_criteria')}**  \n"
+                                f"After surgery/date filter: **{_pi.get('pre_rows_after_criteria')}** "
+                                f"(excluded: {_pi_excl_crit})  \n"
+                                f"Unique pre-op patient–date pairs: **{_pi.get('pre_unique_patient_date_after_criteria')}**  \n"
+                                f"Post-op unique patient–date pairs: **{_pi.get('post_unique_patient_date')}**  \n"
+                                f"After pre–post inner join: **{_pi.get('matched_pre_post_rows')}** "
+                                f"(unmatched: {_pi_excl_match})  \n"
+                                f"Echocardiogram rows joined: **{_pi.get('echo_rows', '?')}**  \n"
+                                f"Final cohort (after normalization): **{len(_tv_data)}** patients  \n"
+                                f"Outcome encoding: `Death` → `morte_30d` via `map_death_30d`  \n"
+                                f"⚠ Note: `Death = \"0\"` is interpreted as operative death on day 0 "
+                                f"(not as boolean false). See canonical semantics note below.",
+                                f"Linhas pré-operatórias (brutas): **{_pi.get('pre_rows_before_criteria')}**  \n"
+                                f"Após filtro cirurgia/data: **{_pi.get('pre_rows_after_criteria')}** "
+                                f"(excluídos: {_pi_excl_crit})  \n"
+                                f"Pares paciente–data pré-op únicos: **{_pi.get('pre_unique_patient_date_after_criteria')}**  \n"
+                                f"Pares paciente–data pós-op únicos: **{_pi.get('post_unique_patient_date')}**  \n"
+                                f"Após junção interna pré–pós: **{_pi.get('matched_pre_post_rows')}** "
+                                f"(sem correspondência: {_pi_excl_match})  \n"
+                                f"Linhas de ecocardiograma: **{_pi.get('echo_rows', '?')}**  \n"
+                                f"Coorte final (após normalização): **{len(_tv_data)}** pacientes  \n"
+                                f"Codificação do desfecho: `Death` → `morte_30d` via `map_death_30d`  \n"
+                                f"⚠ Nota: `Death = \"0\"` é interpretado como morte operatória no dia 0 "
+                                f"(não como falso booleano). Ver nota de semântica canônica abaixo.",
+                            ))
+                        else:
+                            st.caption(tr(
+                                f"Final cohort: **{len(_tv_data)}** patients  \n"
+                                f"_(Detailed intermediate counts not available for this source format.)_",
+                                f"Coorte final: **{len(_tv_data)}** pacientes  \n"
+                                f"_(Contagens intermediárias detalhadas não disponíveis para este formato.)_",
+                            ))
+
+                        # ── Per-step patient counts ───────────────────────────────────────
                         st.markdown(tr("**Per-step patient counts**", "**Contagem de pacientes por etapa**"))
                         st.caption(tr(
                             f"After `prepare_master_dataset`: **{len(_tv_data)}** patients "
@@ -5569,6 +5624,21 @@ elif _active_tab == 9:  # Temporal Validation
                             f"Eixo temporal: {'substituto desidentificado' if _tv_is_surrogate else 'padrão'}",
                         ))
 
+                        # ── Outcome semantics note ────────────────────────────────────────
+                        st.markdown(tr("**Outcome encoding semantics**", "**Semântica da codificação do desfecho**"))
+                        st.caption(tr(
+                            "Note: `Death = \"0\"` is interpreted canonically as **operative death on day 0**, "
+                            "not as boolean false (survivor). This is handled by `map_death_30d` / "
+                            "`parse_postop_timing` in `risk_data.py`. Day 0 = day of surgery → event = 1.  \n"
+                            "Survivor tokens: `\"No\"`, `\"Não\"`, `\"Nao\"`, `\"-\"`, `\"--\"` → 0.  \n"
+                            "Event tokens: `\"Yes\"`, `\"Sim\"`, `\"Death\"`, `\"1\"`, `\"0\"` (day 0) → 1.",
+                            "Nota: `Death = \"0\"` é interpretado canonicamente como **morte operatória no dia 0**, "
+                            "não como falso booleano (sobrevivente). Isso é tratado por `map_death_30d` / "
+                            "`parse_postop_timing` em `risk_data.py`. Dia 0 = dia da cirurgia → evento = 1.  \n"
+                            "Tokens de sobrevivente: `\"No\"`, `\"Não\"`, `\"Nao\"`, `\"-\"`, `\"--\"` → 0.  \n"
+                            "Tokens de evento: `\"Yes\"`, `\"Sim\"`, `\"Death\"`, `\"1\"`, `\"0\"` (dia 0) → 1.",
+                        ))
+
                         # ── Cache / signature audit ───────────────────────────────────────
                         st.markdown(tr("**Cache / signature audit**", "**Auditoria de cache / assinatura**"))
                         st.caption(tr(
@@ -5585,6 +5655,27 @@ elif _active_tab == 9:  # Temporal Validation
                             f"Tokens de ausência: `MISSING_TOKENS` (risk_data.py)  \n"
                             f"Coerção numérica: `_maybe_numeric` / `clean_features` (modeling.py)",
                         ))
+
+                        # ── STS fail log (only shown when failures exist) ──────────────────
+                        if _tv_fail_log:
+                            st.markdown(tr(
+                                f"**STS per-patient failures ({len(_tv_fail_log)})**",
+                                f"**Falhas STS por paciente ({len(_tv_fail_log)})**",
+                            ))
+                            _fail_rows = []
+                            for _fe in _tv_fail_log:
+                                _fail_rows.append({
+                                    tr("patient_id", "patient_id"):    _fe.get("patient_id") or _fe.get("name") or "?",
+                                    tr("row_index",  "linha"):         _fe.get("idx", ""),
+                                    tr("status",     "status"):        _fe.get("status", "failed"),
+                                    tr("stage",      "etapa"):         _fe.get("stage") or "",
+                                    tr("reason",     "motivo"):        _fe.get("reason", "?"),
+                                    tr("retry",      "tentou_retry"):  _fe.get("retry_attempted", ""),
+                                    tr("stale_cache","cache_antigo"):  _fe.get("used_previous_cache", ""),
+                                })
+                            st.dataframe(pd.DataFrame(_fail_rows), width="stretch", hide_index=True)
+
+                        # ── STS eligibility log ───────────────────────────────────────────
                         if _tv_sts_eligibility_log:
                             st.markdown(tr("**STS eligibility log:**", "**Log de elegibilidade STS:**"))
                             _elig_df_det = pd.DataFrame(_tv_sts_eligibility_log)
@@ -5648,6 +5739,7 @@ elif _active_tab == 9:  # Temporal Validation
                         "locked_threshold": float(_tv_locked_threshold),
                         "sts_eligibility_log": list(_tv_sts_eligibility_log),
                         "surrogate_timeline": bool(_tv_is_surrogate),
+                        "prepare_info": dict(_tv_prepared.info) if _tv_prepared is not None else {},
                         # ── STS outcome fields (for exclusive message display) ──────────
                         "sts_outcome": _tv_inline_sts_outcome,
                         "sts_summary_line": "",
@@ -5680,6 +5772,7 @@ elif _active_tab == 9:  # Temporal Validation
                         _tv_locked_threshold = _saved.get("locked_threshold", _tv_locked_threshold)
                         _tv_sts_eligibility_log = _saved.get("sts_eligibility_log", [])
                         _tv_is_surrogate = _saved.get("surrogate_timeline", False)
+                        _tv_prepare_info = _saved.get("prepare_info", {})
 
                         st.success(tr(
                             "Temporal validation results restored from session — "
@@ -5751,11 +5844,11 @@ elif _active_tab == 9:  # Temporal Validation
                             ))
                         if _tv_fail_log:
                             st.warning(tr(
-                                f"STS Score per-patient failures: {len(_tv_fail_log)} patient(s).",
-                                f"Falhas STS Score por paciente: {len(_tv_fail_log)} paciente(s).",
+                                f"STS Score per-patient failures: {len(_tv_fail_log)} patient(s). "
+                                "See **View execution details** below for the full failure log.",
+                                f"Falhas STS Score por paciente: {len(_tv_fail_log)} paciente(s). "
+                                "Veja **Ver detalhes de execução** abaixo para o log completo de falhas.",
                             ))
-                            if _saved_fail_details:
-                                st.markdown(_saved_fail_details)
 
                         # ── Execution details (restored from session) ──────────────────
                         with st.expander(tr("View execution details", "Ver detalhes de execução"), expanded=False):
@@ -5764,6 +5857,7 @@ elif _active_tab == 9:  # Temporal Validation
                             _rst_unc_n   = len([e for e in _tv_sts_eligibility_log if e["eligibility"] == "uncertain"])
                             _rst_skip_n  = _rst_ns_n + _rst_unc_n
 
+                            # ── Pipeline provenance ───────────────────────────────────────
                             st.markdown(tr("**Pipeline provenance**", "**Proveniência do pipeline**"))
                             st.caption(tr(
                                 "Loading: `prepare_master_dataset` (risk_data.py)  \n"
@@ -5777,6 +5871,57 @@ elif _active_tab == 9:  # Temporal Validation
                                 "AI Risk: `apply_frozen_model_to_temporal_cohort` (ai_risk_inference.py)  \n"
                                 "EuroSCORE II: `euroscore_from_row` (euroscore.py)",
                             ))
+
+                            # ── Cohort assembly breakdown ─────────────────────────────────
+                            st.markdown(tr("**Cohort assembly**", "**Montagem da coorte**"))
+                            _pi_r = _tv_prepare_info
+                            if _pi_r.get("source_type") == "flat":
+                                st.caption(tr(
+                                    f"Source: flat CSV/Parquet — no merge steps.  \n"
+                                    f"Rows loaded: **{_pi_r.get('n_rows', len(_tv_data))}**  \n"
+                                    f"_(Intermediate merge/filter counts are only available for XLSX uploads.)_",
+                                    f"Fonte: CSV/Parquet plano — sem etapas de mesclagem.  \n"
+                                    f"Linhas carregadas: **{_pi_r.get('n_rows', len(_tv_data))}**  \n"
+                                    f"_(Contagens intermediárias só estão disponíveis para uploads XLSX.)_",
+                                ))
+                            elif _pi_r.get("pre_rows_before_criteria", 0) > 0:
+                                _pi_r_excl_crit  = _pi_r.get("excluded_missing_surgery_or_date", 0)
+                                _pi_r_excl_match = _pi_r.get("excluded_no_pre_post_match", 0)
+                                st.caption(tr(
+                                    f"Preoperative rows (raw): **{_pi_r.get('pre_rows_before_criteria')}**  \n"
+                                    f"After surgery/date filter: **{_pi_r.get('pre_rows_after_criteria')}** "
+                                    f"(excluded: {_pi_r_excl_crit})  \n"
+                                    f"Unique pre-op patient–date pairs: **{_pi_r.get('pre_unique_patient_date_after_criteria')}**  \n"
+                                    f"Post-op unique patient–date pairs: **{_pi_r.get('post_unique_patient_date')}**  \n"
+                                    f"After pre–post inner join: **{_pi_r.get('matched_pre_post_rows')}** "
+                                    f"(unmatched: {_pi_r_excl_match})  \n"
+                                    f"Echocardiogram rows joined: **{_pi_r.get('echo_rows', '?')}**  \n"
+                                    f"Final cohort (after normalization): **{len(_tv_data)}** patients  \n"
+                                    f"Outcome encoding: `Death` → `morte_30d` via `map_death_30d`  \n"
+                                    f"⚠ Note: `Death = \"0\"` is interpreted as operative death on day 0 "
+                                    f"(not as boolean false). See canonical semantics note below.",
+                                    f"Linhas pré-operatórias (brutas): **{_pi_r.get('pre_rows_before_criteria')}**  \n"
+                                    f"Após filtro cirurgia/data: **{_pi_r.get('pre_rows_after_criteria')}** "
+                                    f"(excluídos: {_pi_r_excl_crit})  \n"
+                                    f"Pares paciente–data pré-op únicos: **{_pi_r.get('pre_unique_patient_date_after_criteria')}**  \n"
+                                    f"Pares paciente–data pós-op únicos: **{_pi_r.get('post_unique_patient_date')}**  \n"
+                                    f"Após junção interna pré–pós: **{_pi_r.get('matched_pre_post_rows')}** "
+                                    f"(sem correspondência: {_pi_r_excl_match})  \n"
+                                    f"Linhas de ecocardiograma: **{_pi_r.get('echo_rows', '?')}**  \n"
+                                    f"Coorte final (após normalização): **{len(_tv_data)}** pacientes  \n"
+                                    f"Codificação do desfecho: `Death` → `morte_30d` via `map_death_30d`  \n"
+                                    f"⚠ Nota: `Death = \"0\"` é interpretado como morte operatória no dia 0 "
+                                    f"(não como falso booleano). Ver nota de semântica canônica abaixo.",
+                                ))
+                            else:
+                                st.caption(tr(
+                                    f"Final cohort: **{len(_tv_data)}** patients  \n"
+                                    f"_(Detailed intermediate counts not available for this source format.)_",
+                                    f"Coorte final: **{len(_tv_data)}** pacientes  \n"
+                                    f"_(Contagens intermediárias detalhadas não disponíveis para este formato.)_",
+                                ))
+
+                            # ── Per-step patient counts ───────────────────────────────────
                             st.markdown(tr("**Per-step patient counts**", "**Contagem de pacientes por etapa**"))
                             st.caption(tr(
                                 f"After `prepare_master_dataset`: **{len(_tv_data)}** patients "
@@ -5802,6 +5947,23 @@ elif _active_tab == 9:  # Temporal Validation
                                 f"STS Score disponível: {'sim' if _tv_sts_ok else 'não'}  \n"
                                 f"Eixo temporal: {'substituto desidentificado' if _tv_is_surrogate else 'padrão'}",
                             ))
+
+                            # ── Outcome semantics note ────────────────────────────────────
+                            st.markdown(tr("**Outcome encoding semantics**", "**Semântica da codificação do desfecho**"))
+                            st.caption(tr(
+                                "Note: `Death = \"0\"` is interpreted canonically as **operative death on day 0**, "
+                                "not as boolean false (survivor). This is handled by `map_death_30d` / "
+                                "`parse_postop_timing` in `risk_data.py`. Day 0 = day of surgery → event = 1.  \n"
+                                "Survivor tokens: `\"No\"`, `\"Não\"`, `\"Nao\"`, `\"-\"`, `\"--\"` → 0.  \n"
+                                "Event tokens: `\"Yes\"`, `\"Sim\"`, `\"Death\"`, `\"1\"`, `\"0\"` (day 0) → 1.",
+                                "Nota: `Death = \"0\"` é interpretado canonicamente como **morte operatória no dia 0**, "
+                                "não como falso booleano (sobrevivente). Isso é tratado por `map_death_30d` / "
+                                "`parse_postop_timing` em `risk_data.py`. Dia 0 = dia da cirurgia → evento = 1.  \n"
+                                "Tokens de sobrevivente: `\"No\"`, `\"Não\"`, `\"Nao\"`, `\"-\"`, `\"--\"` → 0.  \n"
+                                "Tokens de evento: `\"Yes\"`, `\"Sim\"`, `\"Death\"`, `\"1\"`, `\"0\"` (dia 0) → 1.",
+                            ))
+
+                            # ── Cache / signature audit ───────────────────────────────────
                             st.markdown(tr("**Cache / signature audit**", "**Auditoria de cache / assinatura**"))
                             st.caption(tr(
                                 f"Upload content hash: `{_tv_file_content_hash}`  \n"
@@ -5817,6 +5979,27 @@ elif _active_tab == 9:  # Temporal Validation
                                 f"Tokens de ausência: `MISSING_TOKENS` (risk_data.py)  \n"
                                 f"Coerção numérica: `_maybe_numeric` / `clean_features` (modeling.py)",
                             ))
+
+                            # ── STS fail log (only shown when failures exist) ──────────────
+                            if _tv_fail_log:
+                                st.markdown(tr(
+                                    f"**STS per-patient failures ({len(_tv_fail_log)})**",
+                                    f"**Falhas STS por paciente ({len(_tv_fail_log)})**",
+                                ))
+                                _fail_rows_r = []
+                                for _fe_r in _tv_fail_log:
+                                    _fail_rows_r.append({
+                                        tr("patient_id", "patient_id"):    _fe_r.get("patient_id") or _fe_r.get("name") or "?",
+                                        tr("row_index",  "linha"):         _fe_r.get("idx", ""),
+                                        tr("status",     "status"):        _fe_r.get("status", "failed"),
+                                        tr("stage",      "etapa"):         _fe_r.get("stage") or "",
+                                        tr("reason",     "motivo"):        _fe_r.get("reason", "?"),
+                                        tr("retry",      "tentou_retry"):  _fe_r.get("retry_attempted", ""),
+                                        tr("stale_cache","cache_antigo"):  _fe_r.get("used_previous_cache", ""),
+                                    })
+                                st.dataframe(pd.DataFrame(_fail_rows_r), width="stretch", hide_index=True)
+
+                            # ── STS eligibility log ───────────────────────────────────────
                             if _tv_sts_eligibility_log:
                                 st.markdown(tr("**STS eligibility log:**", "**Log de elegibilidade STS:**"))
                                 _elig_df_rst = pd.DataFrame(_tv_sts_eligibility_log)
