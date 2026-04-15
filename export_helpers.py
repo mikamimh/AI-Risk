@@ -267,25 +267,72 @@ def statistical_summary_to_pdf(md_text: str) -> bytes:
     tbl_rows: list = []
 
     def _flush_table() -> None:
+        """Render the buffered table with proportional column widths.
+
+        Column-width strategy
+        ─────────────────────
+        Each column is allocated width proportional to the length of its
+        header label, with the *first* column (Score / Comparison) given
+        extra weight because it holds the longest label text.  The widths
+        are then scaled so the total equals ``available_w``.
+
+        Font-size strategy
+        ──────────────────
+        * n_cols ≤ 6  → 8 pt  (normal table)
+        * n_cols ≤ 9  → 7 pt  (split sub-table after our column reduction)
+        * n_cols > 9  → 6 pt  (fallback for any remaining wide tables)
+
+        The approximate character capacity per mm is derived from the
+        Helvetica core font metrics (empirically ≈ 0.24 mm/pt × font_pt).
+        Cells are truncated to fit, preventing overlap.
+        """
         nonlocal tbl_headers, tbl_rows
         if not tbl_headers:
             return
         n_cols = len(tbl_headers)
-        col_w = available_w / n_cols
 
-        pdf.set_font("Helvetica", "B", 8)
-        for h in tbl_headers:
-            pdf.cell(col_w, 6, _latin_safe(_strip_inline_md(h)[:20]), border=1, align="C")
+        # ── Choose font size based on column count ────────────────────────
+        if n_cols <= 6:
+            font_sz = 8
+        elif n_cols <= 9:
+            font_sz = 7
+        else:
+            font_sz = 6
+        # Empirical Helvetica character width (mm) at given pt size
+        char_w_mm = font_sz * 0.24
+        row_h_hdr = 5.5 if font_sz >= 8 else 5.0
+        row_h_dat = 5.0 if font_sz >= 8 else 4.5
+
+        # ── Proportional column widths ─────────────────────────────────────
+        # Weight = max(header_length, 4).
+        # First column gets 1.6× its natural weight (Score/Comparison labels).
+        weights = []
+        for i, h in enumerate(tbl_headers):
+            w = max(4, len(_strip_inline_md(h)))
+            if i == 0:
+                w = int(w * 1.6)
+            weights.append(w)
+        total_weight = sum(weights)
+        col_widths = [available_w * wt / total_weight for wt in weights]
+
+        # ── Header row ────────────────────────────────────────────────────
+        pdf.set_font("Helvetica", "B", font_sz)
+        for h, cw in zip(tbl_headers, col_widths):
+            max_chars = max(3, int(cw / char_w_mm))
+            txt = _latin_safe(_strip_inline_md(h)[:max_chars])
+            pdf.cell(cw, row_h_hdr, txt, border=1, align="C")
         pdf.ln()
 
-        pdf.set_font("Helvetica", "", 8)
+        # ── Data rows ─────────────────────────────────────────────────────
+        pdf.set_font("Helvetica", "", font_sz)
         for row in tbl_rows:
             # Pad short rows so cell count always equals n_cols
             padded = (row + [""] * n_cols)[:n_cols]
-            for j, cell in enumerate(padded):
-                limit = 30 if j == 0 else 22
-                txt = _latin_safe(_strip_inline_md(cell)[:limit])
-                pdf.cell(col_w, 5, txt, border=1, align="L" if j == 0 else "C")
+            for j, (cell, cw) in enumerate(zip(padded, col_widths)):
+                max_chars = max(3, int(cw / char_w_mm))
+                txt = _latin_safe(_strip_inline_md(cell)[:max_chars])
+                pdf.cell(cw, row_h_dat, txt, border=1,
+                         align="L" if j == 0 else "C")
             pdf.ln()
 
         pdf.ln(4)

@@ -573,6 +573,182 @@ def build_sts_input_from_row(row: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Pre-flight payload validation
+# ---------------------------------------------------------------------------
+
+_VALID_PROCIDS = {"1", "2", "3", "4", "5", "6", "7", "8"}
+_VALID_GENDERS = {"Male", "Female"}
+_VALID_STATUSES = {"Elective", "Urgent", "Emergent", "Emergent Salvage"}
+
+
+# ---------------------------------------------------------------------------
+# Typed STS query exception hierarchy
+# ---------------------------------------------------------------------------
+
+class StsQueryError(Exception):
+    """Base class for all STS WebSocket query failures.
+
+    Subclasses carry a precise failure category so callers can decide whether
+    a failure is endpoint-level (connection/timeout) or application-level
+    (empty response / parse failure) without inspecting the error message.
+    Only endpoint-level failures count toward the batch-abort consecutive-
+    failure threshold; application-level failures indicate the endpoint is
+    reachable and should not penalise the abort counter.
+    """
+
+
+class StsEndpointUnreachableError(StsQueryError):
+    """TCP/TLS connection to the STS endpoint could not be established.
+
+    Covers: connection refused, DNS resolution failure, TLS handshake error,
+    ``websockets.exceptions.WebSocketException`` at connect time, and any
+    unclassified transport-level error.  A persistent run of these errors
+    reliably indicates the endpoint is down or blocked.
+    """
+
+
+class StsSessionTimeoutError(StsQueryError):
+    """WebSocket session or per-message timeout.
+
+    Fires when:
+    * ``asyncio.wait_for(ws.recv(), 30)`` expires mid-session, or
+    * the outer per-patient hard timeout (``STS_PER_PATIENT_TIMEOUT_S``)
+      fires before any result arrives.
+
+    Likely causes: severe endpoint overload, rate limiting, or network
+    packet loss on an established connection.  May recover if load drops.
+    Counts toward the abort counter because the endpoint is functionally
+    unreachable from the caller's perspective.
+    """
+
+
+class StsEmptyResponseError(StsQueryError):
+    """The endpoint was reachable and responded, but no valid result arrived.
+
+    Fires after all 80 ``recv()`` rounds without encountering an HTML block
+    that contains a parseable STS result.  The server returned data for the
+    session, but none matched the expected result format.  Does **not**
+    count toward the abort counter — the endpoint is reachable.
+    """
+
+
+class StsParseError(StsQueryError):
+    """An HTML block containing 'Mortality' was received but could not be parsed.
+
+    The STS service returned a response fragment matching the expected
+    pattern for a risk table, but ``_parse_html_response`` could not extract
+    a numeric ``predmort`` value from it.  Does **not** count toward the abort
+    counter — the transport and Shiny session both succeeded.
+    """
+
+
+class StsConnectError(StsEndpointUnreachableError):
+    """TCP/TLS/DNS failure before the WebSocket handshake begins.
+
+    Covers: ConnectionRefusedError, ConnectionResetError, OSError, and any
+    other transport-layer exception raised while ``websockets.connect()`` is
+    establishing the underlying TCP connection.  A persistent run of these
+    errors reliably indicates the host is unreachable or the port is not
+    listening.  Counts toward the abort counter.
+    """
+
+
+class StsHandshakeError(StsEndpointUnreachableError):
+    """WebSocket upgrade or session initialisation failed.
+
+    Covers: ``websockets.exceptions.InvalidHandshake``, unexpected HTTP
+    responses during the WebSocket upgrade, and any
+    ``websockets.exceptions.WebSocketException`` raised during the opening
+    handshake (before the first application message).  Counts toward the
+    abort counter.
+    """
+
+
+class StsConnectionClosedError(StsEndpointUnreachableError):
+    """The WebSocket connection was closed by the server mid-session.
+
+    Fires when ``websockets.exceptions.ConnectionClosed`` (or a subclass) is
+    raised *after* the handshake succeeded and at least one message exchange
+    has begun.  Distinct from ``StsConnectError`` (the handshake never
+    completed) and ``StsEmptyResponseError`` (80 messages received normally,
+    no result).  Counts toward the abort counter.
+    """
+
+
+# ---------------------------------------------------------------------------
+# websockets exception class aliases (safe under HAS_WEBSOCKETS = False)
+# ---------------------------------------------------------------------------
+# Except-clause class expressions are evaluated at runtime, so referencing
+# websockets.exceptions.* directly would raise NameError when the library is
+# not installed.  We alias them here to a harmless sentinel so the except
+# clauses in _query_sts_ws_inner compile and run regardless of availability.
+
+if HAS_WEBSOCKETS:
+    # The exception classes are exported from the top-level websockets namespace.
+    # websockets.exceptions also re-exports them, but the top-level attributes
+    # are more reliably available across websockets versions.
+    _WS_ConnectionClosed: type = websockets.ConnectionClosed          # type: ignore[attr-defined]
+    _WS_WebSocketException: type = websockets.WebSocketException      # type: ignore[attr-defined]
+    _WS_InvalidHandshake: type = websockets.InvalidHandshake          # type: ignore[attr-defined]
+else:
+    # Unreachable sentinels — _query_sts_ws_inner is never called without websockets.
+    _WS_ConnectionClosed = type("_WS_ConnectionClosed_sentinel", (), {})      # type: ignore[assignment]
+    _WS_WebSocketException = type("_WS_WebSocketException_sentinel", (), {})  # type: ignore[assignment]
+    _WS_InvalidHandshake = type("_WS_InvalidHandshake_sentinel", (), {})      # type: ignore[assignment]
+
+
+def validate_sts_input(d: dict) -> list:
+    """Validate an STS input dict produced by ``build_sts_input_from_row``.
+
+    Returns a list of human-readable error strings.  An empty list means the
+    payload is ready to send.  All four checks are always evaluated so the
+    caller sees the full set of problems at once.
+
+    Required fields checked:
+    * ``age``   — must be a number in [1, 110]
+    * ``procid``— must be one of "1"–"8"
+    * ``gender``— must be "Male" or "Female"
+    * ``status``— must be one of the four STS urgency values
+    """
+    errors: list = []
+
+    # age: non-empty and numeric in plausible human range
+    age_raw = d.get("age", "")
+    if not age_raw:
+        errors.append("age: missing")
+    else:
+        try:
+            age_val = float(age_raw)
+            if not (1 <= age_val <= 110):
+                errors.append(f"age: out of range ({age_raw!r}); expected 1–110")
+        except (ValueError, TypeError):
+            errors.append(f"age: not numeric ({age_raw!r})")
+
+    # procid: must be one of the eight STS procedure codes
+    procid = d.get("procid", "")
+    if procid not in _VALID_PROCIDS:
+        errors.append(
+            f"procid: invalid value ({procid!r}); expected one of {sorted(_VALID_PROCIDS)}"
+        )
+
+    # gender: STS accepts exactly two values
+    gender = d.get("gender", "")
+    if gender not in _VALID_GENDERS:
+        errors.append(
+            f"gender: invalid value ({gender!r}); expected 'Male' or 'Female'"
+        )
+
+    # status: must map to a known STS urgency level
+    status = d.get("status", "")
+    if status not in _VALID_STATUSES:
+        errors.append(
+            f"status: invalid value ({status!r}); expected one of {sorted(_VALID_STATUSES)}"
+        )
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # WebSocket communication
 # ---------------------------------------------------------------------------
 
@@ -792,59 +968,133 @@ def _extract_text2_html(msg_data: dict) -> Optional[str]:
 
 
 async def _query_sts_ws_inner(sts_input: dict) -> Dict[str, float]:
-    """Core WebSocket query — called exclusively through _query_sts_ws."""
+    """Core WebSocket query — called exclusively through _query_sts_ws.
+
+    Returns a dict with STS risk fields on success.
+
+    Raises:
+        StsConnectError: TCP/DNS failure before the WebSocket handshake.
+        StsHandshakeError: WebSocket upgrade or session initialisation failed.
+        StsConnectionClosedError: Server closed the connection mid-session.
+        StsEndpointUnreachableError: Other unclassified transport error.
+        StsSessionTimeoutError: ``ws.recv()`` timed out mid-session.
+        StsEmptyResponseError: 80 messages received without a parseable result.
+        StsParseError: HTML result block received but ``predmort`` not extractable.
+    """
     init_msg, update_msg = _prepare_ws_messages(sts_input)
 
-    async with websockets.connect(
-        WS_URL,
-        additional_headers=WS_HEADERS,
-        open_timeout=30,
-        close_timeout=10,
-    ) as ws:
-        await ws.send(init_msg)
-        await asyncio.sleep(1.0)
-        await ws.send(update_msg)
+    # Phase tracker: updated as the connection progresses so the outer except
+    # clauses can raise the most specific subclass.
+    # Values: "connect" → "pre_send" → "recv"
+    _phase = "connect"
 
-        _seen_methods: set = set()
-        for _ in range(80):
-            try:
-                msg = await asyncio.wait_for(ws.recv(), timeout=30)
-            except asyncio.TimeoutError:
-                _sts_log.debug(
-                    "STS Score ws_timeout — methods seen: %s",
-                    sorted(_seen_methods) or "(none)",
-                )
-                return {}
+    try:
+        async with websockets.connect(
+            WS_URL,
+            additional_headers=WS_HEADERS,
+            open_timeout=30,
+            close_timeout=10,
+        ) as ws:
+            _phase = "pre_send"
+            await ws.send(init_msg)
+            await asyncio.sleep(1.0)
+            await ws.send(update_msg)
+            _phase = "recv"
 
-            try:
-                msg_data = json.loads(msg)
-            except (json.JSONDecodeError, ValueError):
-                continue
-
-            _seen_methods.add(msg_data.get("method", "(no method)"))
-
-            try:
-                html_val = _extract_text2_html(msg_data)
-
-                if html_val and ("Operative Mortality" in html_val or "Mortality" in html_val):
-                    result = _parse_html_response(html_val)
-                    if result and "predmort" in result:
-                        return result
-                    # HTML found but parsing failed — log a snippet for diagnosis
-                    _sts_log.warning(
-                        "STS Score html_parse_failure: found Mortality HTML but got keys=%s; "
-                        "snippet: %.120s",
-                        list(result.keys()),
-                        html_val[:120],
+            _seen_methods: set = set()
+            for _ in range(80):
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                except asyncio.TimeoutError:
+                    _sts_log.debug(
+                        "STS Score ws_timeout (StsSessionTimeoutError) — methods seen: %s",
+                        sorted(_seen_methods) or "(none)",
                     )
-            except (AttributeError, KeyError):
-                continue
+                    raise StsSessionTimeoutError(
+                        f"recv timeout after 30 s; methods seen: "
+                        f"{sorted(_seen_methods) or '(none)'}"
+                    )
 
-    _sts_log.debug(
-        "STS Score ws_no_result — methods seen: %s",
-        sorted(_seen_methods) or "(none)",
-    )
-    return {}
+                try:
+                    msg_data = json.loads(msg)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                _seen_methods.add(msg_data.get("method", "(no method)"))
+
+                try:
+                    html_val = _extract_text2_html(msg_data)
+
+                    if html_val and ("Operative Mortality" in html_val or "Mortality" in html_val):
+                        result = _parse_html_response(html_val)
+                        if result and "predmort" in result:
+                            return result
+                        # HTML received but predmort not extractable — raise for classification
+                        _sts_log.warning(
+                            "STS Score html_parse_failure (StsParseError): "
+                            "found Mortality HTML but got keys=%s; snippet: %.120s",
+                            list(result.keys()),
+                            html_val[:120],
+                        )
+                        raise StsParseError(
+                            f"html_parse_failure: keys={list(result.keys())}; "
+                            f"snippet={html_val[:80]!r}"
+                        )
+                except StsQueryError:
+                    raise  # propagate typed errors; do not suppress
+                except (AttributeError, KeyError):
+                    continue
+
+            _sts_log.debug(
+                "STS Score ws_no_result (StsEmptyResponseError) — methods seen: %s",
+                sorted(_seen_methods) or "(none)",
+            )
+            raise StsEmptyResponseError(
+                f"80 messages received without a valid result; "
+                f"methods seen: {sorted(_seen_methods) or '(none)'}"
+            )
+
+    except StsQueryError:
+        raise  # propagate typed exceptions unchanged
+    except _WS_ConnectionClosed as e:
+        # Server closed the WebSocket after the handshake completed.
+        _sts_log.debug(
+            "STS Score ws_closed (StsConnectionClosedError) phase=%s: %s: %s",
+            _phase, type(e).__name__, e,
+        )
+        raise StsConnectionClosedError(
+            f"ConnectionClosed during {_phase}: {type(e).__name__}: {e}"
+        ) from e
+    except _WS_InvalidHandshake as e:
+        _sts_log.debug(
+            "STS Score ws_handshake_failed (StsHandshakeError): %s: %s",
+            type(e).__name__, e,
+        )
+        raise StsHandshakeError(f"{type(e).__name__}: {e}") from e
+    except (OSError, ConnectionRefusedError, ConnectionResetError) as e:
+        _sts_log.debug(
+            "STS Score connect_failed (StsConnectError) phase=%s: %s: %s",
+            _phase, type(e).__name__, e,
+        )
+        raise StsConnectError(
+            f"{type(e).__name__} at {_phase}: {e}"
+        ) from e
+    except Exception as e:
+        # Unclassified transport error: use phase to pick the best subclass.
+        if _phase == "connect":
+            _sts_log.debug(
+                "STS Score connect_failed (StsConnectError) unclassified: %s: %s",
+                type(e).__name__, e,
+            )
+            raise StsConnectError(f"{type(e).__name__}: {e}") from e
+        _sts_log.debug(
+            "STS Score endpoint_unreachable (StsEndpointUnreachableError) "
+            "phase=%s: %s: %s",
+            _phase, type(e).__name__, e,
+        )
+        raise StsEndpointUnreachableError(
+            f"{type(e).__name__} at {_phase}: {e}"
+        ) from e
 
 
 async def _query_sts_ws(sts_input: dict) -> Dict[str, float]:
@@ -853,6 +1103,10 @@ async def _query_sts_ws(sts_input: dict) -> Dict[str, float]:
     Wraps ``_query_sts_ws_inner`` in ``asyncio.wait_for`` so a single patient
     can never stall for more than ``STS_PER_PATIENT_TIMEOUT_S`` seconds regardless
     of how many WebSocket messages the server sends.
+
+    Raises:
+        StsQueryError subclasses from ``_query_sts_ws_inner``, plus
+        StsSessionTimeoutError when the outer hard timeout fires.
     """
     try:
         return await asyncio.wait_for(
@@ -861,10 +1115,15 @@ async def _query_sts_ws(sts_input: dict) -> Dict[str, float]:
         )
     except asyncio.TimeoutError:
         _sts_log.warning(
-            "STS Score per-patient hard timeout (%ds) exceeded — returning empty result",
+            "STS Score per-patient hard timeout (%ds) exceeded — "
+            "raising StsSessionTimeoutError",
             STS_PER_PATIENT_TIMEOUT_S,
         )
-        return {}
+        raise StsSessionTimeoutError(
+            f"per-patient hard timeout ({STS_PER_PATIENT_TIMEOUT_S}s) exceeded"
+        )
+    except StsQueryError:
+        raise  # propagate typed exceptions unchanged
 
 
 # ---------------------------------------------------------------------------
@@ -1009,15 +1268,72 @@ async def _calculate_sts_chunk_async(
             if failure_log is not None:
                 failure_log.append({"idx": idx, "name": patient_name, "surgery": surgery, "reason": f"build_input error: {e}"})
             return
-        last_err = None
+        last_err: Optional[str] = None
+        last_exc_type: Optional[str] = None
+        _failure_type = "endpoint"  # default; refined below on each caught exception
+        _attempt_log: list = []
         for attempt in range(max_retries + 1):
+            _t0 = time.monotonic()
             async with sem:
                 try:
                     result = await _query_sts_ws(sts_input)
                     last_err = None
+                    last_exc_type = None
+                    _attempt_log.append({
+                        "attempt": attempt,
+                        "elapsed_s": round(time.monotonic() - _t0, 2),
+                        "success": True,
+                    })
+                except StsParseError as e:
+                    result = {}
+                    last_err = str(e)
+                    last_exc_type = "StsParseError"
+                    _failure_type = "parse_error"
+                    _attempt_log.append({
+                        "attempt": attempt,
+                        "elapsed_s": round(time.monotonic() - _t0, 2),
+                        "success": False,
+                        "exc_class": last_exc_type,
+                        "failure_type": _failure_type,
+                    })
+                    # Parse failures are deterministic for this input — skip retries.
+                    break
+                except StsEmptyResponseError as e:
+                    result = {}
+                    last_err = str(e)
+                    last_exc_type = "StsEmptyResponseError"
+                    _failure_type = "empty_response"
+                    _attempt_log.append({
+                        "attempt": attempt,
+                        "elapsed_s": round(time.monotonic() - _t0, 2),
+                        "success": False,
+                        "exc_class": last_exc_type,
+                        "failure_type": _failure_type,
+                    })
+                except (StsEndpointUnreachableError, StsSessionTimeoutError) as e:
+                    result = {}
+                    last_err = str(e)
+                    last_exc_type = type(e).__name__
+                    _failure_type = "endpoint"
+                    _attempt_log.append({
+                        "attempt": attempt,
+                        "elapsed_s": round(time.monotonic() - _t0, 2),
+                        "success": False,
+                        "exc_class": last_exc_type,
+                        "failure_type": _failure_type,
+                    })
                 except Exception as e:
                     result = {}
                     last_err = str(e)
+                    last_exc_type = type(e).__name__
+                    _failure_type = "endpoint"  # unknown → conservative
+                    _attempt_log.append({
+                        "attempt": attempt,
+                        "elapsed_s": round(time.monotonic() - _t0, 2),
+                        "success": False,
+                        "exc_class": last_exc_type,
+                        "failure_type": _failure_type,
+                    })
             if result and "predmort" in result:
                 results[idx] = result
                 return
@@ -1028,7 +1344,13 @@ async def _calculate_sts_chunk_async(
             reason = f"no result after {max_retries+1} attempts"
             if last_err:
                 reason += f" (last error: {last_err})"
-            failure_log.append({"idx": idx, "name": patient_name, "surgery": surgery, "reason": reason})
+            failure_log.append({
+                "idx": idx, "name": patient_name, "surgery": surgery,
+                "reason": reason,
+                "exception_type": last_exc_type,
+                "failure_type": _failure_type,
+                "attempt_log": _attempt_log,
+            })
 
     async def _calc_one_bounded(idx: int, row: dict):
         """Wraps _calc_one with a total per-patient wall-clock cap."""
@@ -1046,6 +1368,8 @@ async def _calculate_sts_chunk_async(
                         f"per-patient timeout exceeded ({patient_timeout_s} s total "
                         "across all retry attempts)"
                     ),
+                    "exception_type": "asyncio.TimeoutError",
+                    "failure_type": "per_patient_timeout",
                 })
 
     if patient_timeout_s is not None:
@@ -1195,7 +1519,12 @@ def calculate_sts_batch(
 
     # --- Cached path ---
     results: list = [{} for _ in rows]
-    execution_log: list = []
+    # Pre-allocated and indexed by eligible position (0-based).  Every row
+    # is assigned execution_log[i] = rec in Phase A or Phase C so that
+    # exec_log[eli_pos] always returns the correct record for that patient.
+    # Appending sequentially would interleave Phase-A resolutions (cache hits /
+    # build failures) before Phase-C fetch records, breaking positional lookup.
+    execution_log: list = [None] * total
     failure_log: list = []
     last_error: Optional[Exception] = None
 
@@ -1216,7 +1545,7 @@ def calculate_sts_batch(
             rec = _sts_cache.make_failed_record(
                 pid_str, None, "build_input", "empty_row"
             )
-            execution_log.append(rec)
+            execution_log[i] = rec
             failure_log.append({
                 "idx": i, "patient_id": pid_str, "status": rec.status,
                 "stage": rec.stage, "reason": rec.reason,
@@ -1230,7 +1559,21 @@ def calculate_sts_batch(
             rec = _sts_cache.make_failed_record(
                 pid_str, None, "build_input", f"mapping_failure: {e}"
             )
-            execution_log.append(rec)
+            execution_log[i] = rec
+            failure_log.append({
+                "idx": i, "patient_id": pid_str, "status": rec.status,
+                "stage": rec.stage, "reason": rec.reason,
+                "retry_attempted": False, "used_previous_cache": False,
+            })
+            continue
+
+        validation_errors = validate_sts_input(sts_input)
+        if validation_errors:
+            reason = "payload_invalid: " + "; ".join(validation_errors)
+            rec = _sts_cache.make_failed_record(
+                pid_str, None, "build_input", reason
+            )
+            execution_log[i] = rec
             failure_log.append({
                 "idx": i, "patient_id": pid_str, "status": rec.status,
                 "stage": rec.stage, "reason": rec.reason,
@@ -1244,7 +1587,7 @@ def calculate_sts_batch(
             rec = _sts_cache.make_failed_record(
                 pid_str, None, "build_input", f"input_hash_error: {e}"
             )
-            execution_log.append(rec)
+            execution_log[i] = rec
             failure_log.append({
                 "idx": i, "patient_id": pid_str, "status": rec.status,
                 "stage": rec.stage, "reason": rec.reason,
@@ -1256,7 +1599,7 @@ def calculate_sts_batch(
         mem_entry = _sts_memory_cache.get(input_hash)
         if mem_entry is not None:
             rec = _sts_cache.make_cache_hit_record(mem_entry, pid_str, input_hash)
-            execution_log.append(rec)
+            execution_log[i] = rec
             if pid_str:
                 _sts_cache.remember_patient_hash(pid_str, input_hash)
             results[i] = dict(mem_entry.get("result") or {})
@@ -1273,7 +1616,7 @@ def calculate_sts_batch(
         if entry_usable:
             _sts_memory_cache[input_hash] = entry  # promote to in-memory cache
             rec = _sts_cache.make_cache_hit_record(entry, pid_str, input_hash)
-            execution_log.append(rec)
+            execution_log[i] = rec
             if pid_str:
                 _sts_cache.remember_patient_hash(pid_str, input_hash)
             results[i] = dict(entry.get("result") or {})
@@ -1368,6 +1711,8 @@ def calculate_sts_batch(
             chunk_had_success = False
             _chunk_exc_type: Optional[str] = None
             _chunk_exc_msg: Optional[str] = None
+            # Record inner_failure_log cursor so we can isolate this chunk's entries.
+            _inner_fl_start = len(inner_failure_log)
             try:
                 chunk_results = _run_async(
                     _calculate_sts_chunk_async(
@@ -1403,51 +1748,95 @@ def calculate_sts_batch(
                     chunk_done_callback(chunk_start, len(local_pairs), chunk_had_success)
                 except Exception:
                     pass
-            # Consecutive-failure abort: if a whole chunk produced no valid
-            # results and no network success, treat it as a failure tick.
+
+            # ── Classify this chunk's failure type ──────────────────────────────
+            # Endpoint-level failures (connection refused, timeouts) count toward
+            # the consecutive-failure abort counter.  Application-level failures
+            # (empty response, parse error) mean the endpoint IS reachable and must
+            # NOT increment the counter — they will not benefit from aborting the batch.
+            _chunk_entries = inner_failure_log[_inner_fl_start:]
+            _chunk_endpoint_failure_count = sum(
+                1 for _ifl in _chunk_entries
+                if _ifl.get("failure_type", "endpoint") in ("endpoint", "per_patient_timeout")
+            )
+            # If inner_failure_log was not populated (either _run_async raised an outer
+            # exception before _calculate_sts_chunk_async could append entries, or
+            # _run_async was bypassed entirely — e.g. in tests), fall back to treating
+            # all chunk members as endpoint failures (conservative default).
+            if not chunk_had_success and not _chunk_entries:
+                _chunk_endpoint_failure_count = len(chunk)
+            # Primary failure type for the chunk log (None when any success).
+            if chunk_had_success:
+                _chunk_primary_failure_type: Optional[str] = None
+            elif _chunk_endpoint_failure_count > 0:
+                _chunk_primary_failure_type = "endpoint"
+            elif _chunk_entries:
+                _chunk_primary_failure_type = _chunk_entries[0].get("failure_type", "endpoint")
+            else:
+                _chunk_primary_failure_type = "endpoint"  # outer exception, no inner entries
+
+            # ── Consecutive-failure abort logic ─────────────────────────────────
             _aborted_after_this_chunk = False
+            _counted_toward_abort = False
             if not chunk_had_success:
-                _consecutive_failures += 1
-                if _consecutive_failures >= STS_MAX_CONSECUTIVE_FAILURES:
-                    _sts_log.warning(
-                        "STS Score batch aborted after %d consecutive chunk failures — "
-                        "endpoint may be unreachable; %d rows remain unqueried",
-                        _consecutive_failures,
-                        len(local_pairs) - chunk_end,
-                    )
-                    _batch_aborted = True
-                    _abort_reason_type = "consecutive_failures"
-                    _abort_consecutive_failures = _consecutive_failures
-                    _aborted_after_this_chunk = True
-                else:
-                    # Progressive backoff: give a flapping endpoint time to recover
-                    # before the next patient attempt.  Runs in the worker thread so
-                    # time.sleep is safe here (does not block the Streamlit event loop).
-                    import time as _tv_sleep_mod
-                    _backoff_s = min(
-                        STS_CONSECUTIVE_FAILURE_BACKOFF_BASE_S * _consecutive_failures,
-                        STS_CONSECUTIVE_FAILURE_BACKOFF_MAX_S,
-                    )
-                    if _backoff_s > 0:
-                        _sts_log.info(
-                            "STS Score consecutive failure %d/%d — "
-                            "waiting %ds before next patient",
+                if _chunk_endpoint_failure_count > 0:
+                    # Endpoint-level failure — advance the abort counter.
+                    _consecutive_failures += 1
+                    _counted_toward_abort = True
+                    if _consecutive_failures >= STS_MAX_CONSECUTIVE_FAILURES:
+                        _sts_log.warning(
+                            "STS Score batch aborted after %d consecutive endpoint "
+                            "chunk failures — endpoint may be unreachable; "
+                            "%d rows remain unqueried",
                             _consecutive_failures,
-                            STS_MAX_CONSECUTIVE_FAILURES,
-                            _backoff_s,
+                            len(local_pairs) - chunk_end,
                         )
-                        _tv_sleep_mod.sleep(_backoff_s)
+                        _batch_aborted = True
+                        _abort_reason_type = "consecutive_failures"
+                        _abort_consecutive_failures = _consecutive_failures
+                        _aborted_after_this_chunk = True
+                    else:
+                        # Progressive backoff: give a flapping endpoint time to recover.
+                        # Runs in the worker thread so time.sleep is safe here.
+                        import time as _tv_sleep_mod
+                        _backoff_s = min(
+                            STS_CONSECUTIVE_FAILURE_BACKOFF_BASE_S * _consecutive_failures,
+                            STS_CONSECUTIVE_FAILURE_BACKOFF_MAX_S,
+                        )
+                        if _backoff_s > 0:
+                            _sts_log.info(
+                                "STS Score consecutive endpoint failure %d/%d — "
+                                "waiting %ds before next patient",
+                                _consecutive_failures,
+                                STS_MAX_CONSECUTIVE_FAILURES,
+                                _backoff_s,
+                            )
+                            _tv_sleep_mod.sleep(_backoff_s)
+                else:
+                    # Non-endpoint failure (empty response / parse error): the endpoint
+                    # IS reachable, so reset the consecutive counter and do not backoff.
+                    _sts_log.info(
+                        "STS Score chunk %d: non-endpoint failure (type=%r) — "
+                        "consecutive endpoint-failure counter reset (was %d)",
+                        _chunk_index,
+                        _chunk_primary_failure_type,
+                        _consecutive_failures,
+                    )
+                    _consecutive_failures = 0
             else:
                 _consecutive_failures = 0
             chunk_log.append({
-                "chunk_index":            _chunk_index,
-                "chunk_start":            chunk_start,
-                "row_count":              len(chunk),
-                "patient_ids":            chunk_patient_ids,
-                "success_count":          _chunk_success,
-                "failure_count":          _chunk_failure,
-                "exception_type":         _chunk_exc_type,
-                "exception_message":      _chunk_exc_msg,
+                "chunk_index":              _chunk_index,
+                "chunk_start":              chunk_start,
+                "row_count":                len(chunk),
+                "patient_ids":              chunk_patient_ids,
+                "success_count":            _chunk_success,
+                "failure_count":            _chunk_failure,
+                "failure_type":             _chunk_primary_failure_type,
+                "endpoint_failure_count":   _chunk_endpoint_failure_count,
+                "counted_toward_abort":     _counted_toward_abort,
+                "exception_type":           _chunk_exc_type,
+                "exception_message":        _chunk_exc_msg,
                 "aborted_after_this_chunk": _aborted_after_this_chunk,
             })
             _chunk_index += 1
@@ -1491,7 +1880,7 @@ def calculate_sts_batch(
                 result, pid_str, input_hash,
                 refreshed=need_refresh, retry_attempted=True,
             )
-            execution_log.append(rec)
+            execution_log[orig_i] = rec
             results[orig_i] = dict(result)
             continue
 
@@ -1518,7 +1907,7 @@ def calculate_sts_batch(
                     fallback_entry, pid_str, input_hash,
                     f"batch_abort: {_abort_row_reason}", retry_attempted=False,
                 )
-                execution_log.append(rec)
+                execution_log[orig_i] = rec
                 failure_log.append({
                     "idx": orig_i, "patient_id": pid_str, "status": rec.status,
                     "stage": "batch_abort",
@@ -1531,7 +1920,7 @@ def calculate_sts_batch(
                     pid_str, input_hash, "batch_abort",
                     _abort_row_reason, retry_attempted=False,
                 )
-                execution_log.append(rec)
+                execution_log[orig_i] = rec
                 failure_log.append({
                     "idx": orig_i, "patient_id": pid_str, "status": rec.status,
                     "stage": "batch_abort",
@@ -1550,7 +1939,7 @@ def calculate_sts_batch(
             rec = _sts_cache.make_stale_fallback_record(
                 fallback_entry, pid_str, input_hash, reason, retry_attempted=True,
             )
-            execution_log.append(rec)
+            execution_log[orig_i] = rec
             failure_log.append({
                 "idx": orig_i, "patient_id": pid_str, "status": rec.status,
                 "stage": rec.stage, "reason": rec.reason,
@@ -1563,13 +1952,41 @@ def calculate_sts_batch(
             pid_str, input_hash, "fetch",
             f"{reason}; no fallback available", retry_attempted=True,
         )
-        execution_log.append(rec)
+        execution_log[orig_i] = rec
         failure_log.append({
             "idx": orig_i, "patient_id": pid_str, "status": rec.status,
             "stage": rec.stage, "reason": rec.reason,
             "retry_attempted": True, "used_previous_cache": False,
         })
         results[orig_i] = {}
+
+    # ── Endpoint health summary (query-phase only; excludes Phase A cache hits) ──
+    # Populated regardless of abort/success so the UI always has current counts.
+    _n_queried_rows = len(pending) - len(_abort_before_query)
+    _n_queried_with_score = sum(
+        1 for local_i, (orig_i, *_rest) in enumerate(pending)
+        if local_i not in _abort_before_query
+        and (results[orig_i] or {}).get("predmort") is not None
+    )
+    # Count failures by exception subtype for detailed diagnostics.
+    _failure_subtype_counts: Dict[str, int] = {}
+    for _ifl in inner_failure_log if pending else []:
+        _st = _ifl.get("exception_type") or "unknown"
+        _failure_subtype_counts[_st] = _failure_subtype_counts.get(_st, 0) + 1
+
+    calculate_sts_batch.endpoint_health_summary = {  # type: ignore[attr-defined]
+        "n_eligible_for_fetch":      len(pending),
+        "n_queried":                 _n_queried_rows,
+        "n_queried_with_score":      _n_queried_with_score,
+        "n_chunks_attempted":        len(chunk_log),
+        "n_chunks_any_success":      sum(1 for cl in chunk_log if cl.get("success_count", 0) > 0),
+        "n_chunks_all_failed":       sum(1 for cl in chunk_log if cl.get("success_count", 0) == 0),
+        "n_chunks_endpoint_failure": sum(1 for cl in chunk_log if cl.get("endpoint_failure_count", 0) > 0),
+        "n_rows_unqueried":          len(_abort_before_query),
+        "abort_reason":              _abort_reason_type or None,
+        "abort_endpoint_failures":   _abort_consecutive_failures if _batch_aborted else 0,
+        "failure_subtype_counts":    _failure_subtype_counts,
+    }
 
     calculate_sts_batch.last_error = last_error
     calculate_sts_batch.failure_log = failure_log
@@ -1583,3 +2000,4 @@ calculate_sts_batch.last_execution_log = []
 calculate_sts_batch._batch_aborted = False          # type: ignore[attr-defined]
 calculate_sts_batch._abort_before_query_count = 0   # type: ignore[attr-defined]
 calculate_sts_batch.chunk_log = []                   # type: ignore[attr-defined]
+calculate_sts_batch.endpoint_health_summary = {}     # type: ignore[attr-defined]

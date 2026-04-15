@@ -108,6 +108,118 @@ def _sts_score_status_caption(execution_log) -> str:
     return " · ".join(parts)
 
 
+def _build_sts_patient_audit(
+    eligibility_log: list,
+    eligible_idx: list,
+    raw_results: list,
+    exec_log: list,
+    fail_log: list,
+    sts_score_col,
+) -> list:
+    """Build a per-eligible-patient audit table for end-to-end STS traceability.
+
+    Each row covers one patient classified as ``supported`` by
+    ``classify_sts_eligibility``.  The table makes explicit exactly where a
+    patient was lost in the pipeline so that a headline like "22 eligible → 6
+    final scores" can be decomposed into specific loss categories.
+
+    Parameters
+    ----------
+    eligibility_log:
+        List of ``{row_index, patient_id, eligibility, reason}`` dicts (ALL
+        patients, from the pre-classification step).
+    eligible_idx:
+        List mapping eligible-position → cohort row index.
+        ``eligible_idx[eli_pos] == cohort_idx``.
+    raw_results:
+        List of result dicts (length = n_eligible).  ``raw_results[eli_pos]``
+        is the raw STS result for the patient at that eligible position.
+    exec_log:
+        List of ``ExecutionRecord`` objects (length = n_eligible), from
+        ``calculate_sts_batch.last_execution_log``.
+    fail_log:
+        List of failure dicts from ``calculate_sts_batch.failure_log``.
+        Each entry has ``idx`` = 0-based eligible position.
+    sts_score_col:
+        ``pd.Series`` (the ``sts_score`` column of ``_tv_data``) or ``None``.
+        Used to check whether a score is present in the final output.
+
+    Returns
+    -------
+    list of dict with 14 fields per eligible patient:
+      row_index, patient_id, sts_eligibility_status, sts_supported_class,
+      sts_input_ready, sts_query_attempted, sts_query_success, sts_parse_success,
+      sts_score_present_final, sts_batch_aborted_before_query,
+      sts_failure_stage, sts_failure_reason, sts_chunk_index, sts_retry_attempted
+    """
+    _elig_by_cohort: dict = {e["row_index"]: e for e in eligibility_log}
+    _fail_by_pos: dict = {f["idx"]: f for f in fail_log}
+
+    rows = []
+    for eli_pos, cohort_idx in enumerate(eligible_idx):
+        elig = _elig_by_cohort.get(cohort_idx, {})
+        fail = _fail_by_pos.get(eli_pos)
+        exec_rec = exec_log[eli_pos] if eli_pos < len(exec_log) else None
+        raw_res = (raw_results[eli_pos] if eli_pos < len(raw_results) else None) or {}
+
+        _fail_stage  = fail["stage"]  if fail else None
+        _exec_status = getattr(exec_rec, "status", None) if exec_rec else None
+
+        # ── Derived audit flags ───────────────────────────────────────────
+        # Was the STS input dict built without error?
+        input_ready = _fail_stage != "build_input"
+
+        # Was a live network query sent to the STS endpoint?
+        # True for: fetch failures (stage="fetch"), fresh/refreshed/stale_fallback successes.
+        # False for: cached (Phase A short-circuit), build_input failures, batch_abort.
+        query_attempted = (
+            _fail_stage == "fetch"
+            or _exec_status in ("fresh", "refreshed", "stale_fallback")
+        )
+
+        # Did the live query return a usable response?
+        # Only True for fresh/refreshed; stale_fallback means the live query failed.
+        query_success = _exec_status in ("fresh", "refreshed")
+
+        # Is the primary STS endpoint (predmort) present in the raw result dict?
+        parse_success = "predmort" in raw_res
+
+        # Was this patient skipped because an abort triggered before it was queried?
+        batch_aborted = _fail_stage == "batch_abort"
+
+        # Is a final STS score present in the output DataFrame column?
+        try:
+            if sts_score_col is not None:
+                _sv = sts_score_col.iloc[cohort_idx]
+                score_present = bool(_sv is not None and not pd.isna(_sv))
+            else:
+                score_present = False
+        except Exception:
+            score_present = False
+
+        rows.append({
+            "row_index":                      cohort_idx,
+            "patient_id":                     elig.get("patient_id", ""),
+            "sts_eligibility_status":         elig.get("eligibility", "supported"),
+            "sts_supported_class":            elig.get("reason", ""),
+            "sts_input_ready":                input_ready,
+            "sts_query_attempted":            query_attempted,
+            "sts_query_success":              query_success,
+            "sts_parse_success":              parse_success,
+            "sts_score_present_final":        score_present,
+            "sts_batch_aborted_before_query": batch_aborted,
+            "sts_failure_stage":              _fail_stage or "",
+            "sts_failure_reason":             (fail.get("reason") or "") if fail else "",
+            "sts_chunk_index":                eli_pos,
+            "sts_retry_attempted":            (
+                fail.get("retry_attempted", False) if fail
+                else getattr(exec_rec, "retry_attempted", False) if exec_rec
+                else False
+            ),
+        })
+    return rows
+
+
 def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; complexity matches original
     """Render the Temporal Validation tab (tab index 9)."""
     # ── Context aliases ─────────────────────────────────────────────────
@@ -561,6 +673,20 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _batch_aborted_ctx = getattr(calculate_sts_batch, "_batch_aborted", False)
                         _abort_before_query_count = getattr(calculate_sts_batch, "_abort_before_query_count", 0)
                         _tv_chunk_log = getattr(calculate_sts_batch, "chunk_log", [])
+                        # eligibility_log must be read from ctx BEFORE the audit call
+                        # so that patient_id, eligibility_status, and supported_class
+                        # are populated correctly. It was previously assigned AFTER the
+                        # call, causing the audit to be built with an empty log.
+                        _tv_sts_eligibility_log = _sts_ctx.get("eligibility_log", [])
+                        # ── Build per-patient STS audit table ────────────────────────────
+                        _tv_sts_audit_rows = _build_sts_patient_audit(
+                            _tv_sts_eligibility_log,
+                            list(_sts_eligible_idx),
+                            _sts_raw_results,
+                            _tv_exec_log,
+                            _tv_fail_log,
+                            _tv_data["sts_score"],
+                        )
                         _sts_cancelled_r = (
                             _sts_ctx.get("n_total", 0)
                             - sum(1 for r in _sts_raw_results if r and "predmort" in r)
@@ -573,7 +699,6 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _n_completed = sum(1 for r in _sts_raw_results if r and "predmort" in r)
                         _n_failed    = len(_tv_fail_log)
                         _tv_sts_status = _sts_score_status_caption(_tv_exec_log)
-                        _tv_sts_eligibility_log = _sts_ctx.get("eligibility_log", [])
                         _tv_ai_incidents = _sts_ctx.get("ai_incidents", [])
                         _tv_is_surrogate = _sts_ctx.get("is_surrogate", False)
                         _tv_locked_threshold = _sts_ctx.get("locked_threshold", _tv_locked_threshold_default)
@@ -727,6 +852,10 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             "batch_aborted": bool(_batch_aborted_ctx),
                             "abort_before_query_count": int(_abort_before_query_count),
                             "chunk_log": list(_tv_chunk_log),
+                            "sts_patient_audit": list(_tv_sts_audit_rows),
+                            "endpoint_health_summary": dict(
+                                getattr(calculate_sts_batch, "endpoint_health_summary", {})
+                            ),
                         }
                         st.session_state["_tv_result_sig"]   = _tv_context_sig_r
                         st.session_state[_TV_STS_ST]         = "idle"  # clear running state
@@ -1527,11 +1656,14 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         # ── Chunk-level execution log ─────────────────────────────────────
                         if _tv_chunk_log:
                             _n_abort_chunks = sum(1 for _cl in _tv_chunk_log if _cl.get("aborted_after_this_chunk"))
+                            _n_endpoint_chunks = sum(1 for _cl in _tv_chunk_log if _cl.get("endpoint_failure_count", 0) > 0)
                             with st.expander(
                                 tr(
                                     f"STS chunk execution log ({len(_tv_chunk_log)} chunk(s)"
+                                    + (f", {_n_endpoint_chunks} endpoint failure(s)" if _n_endpoint_chunks else "")
                                     + (f", aborted after chunk {_n_abort_chunks}" if _n_abort_chunks else "") + ")",
                                     f"Log de execução por chunk STS ({len(_tv_chunk_log)} chunk(s)"
+                                    + (f", {_n_endpoint_chunks} falha(s) de endpoint" if _n_endpoint_chunks else "")
                                     + (f", abortado após chunk {_n_abort_chunks}" if _n_abort_chunks else "") + ")",
                                 ),
                                 expanded=bool(_n_abort_chunks),
@@ -1539,15 +1671,54 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 _chunk_display_rows = []
                                 for _cl in _tv_chunk_log:
                                     _chunk_display_rows.append({
-                                        tr("chunk_index", "chunk_index"):       _cl.get("chunk_index", ""),
-                                        tr("row_count",   "n_pacientes"):       _cl.get("row_count", ""),
-                                        tr("success",     "sucesso"):           _cl.get("success_count", 0),
-                                        tr("failure",     "falha"):             _cl.get("failure_count", 0),
-                                        tr("exc_type",    "tipo_excecao"):      _cl.get("exception_type") or "",
-                                        tr("exc_msg",     "msg_excecao"):       (_cl.get("exception_message") or "")[:80],
-                                        tr("aborted",     "abortou_aqui"):      _cl.get("aborted_after_this_chunk", False),
+                                        tr("chunk_index",  "chunk_index"):      _cl.get("chunk_index", ""),
+                                        tr("row_count",    "n_pacientes"):      _cl.get("row_count", ""),
+                                        tr("success",      "sucesso"):          _cl.get("success_count", 0),
+                                        tr("failure",      "falha"):            _cl.get("failure_count", 0),
+                                        tr("failure_type", "tipo_falha"):       _cl.get("failure_type") or "",
+                                        tr("endpt_fails",  "falhas_endpoint"):  _cl.get("endpoint_failure_count", 0),
+                                        tr("counted",      "conta_abort"):      _cl.get("counted_toward_abort", False),
+                                        tr("exc_type",     "tipo_excecao"):     _cl.get("exception_type") or "",
+                                        tr("exc_msg",      "msg_excecao"):      (_cl.get("exception_message") or "")[:80],
+                                        tr("aborted",      "abortou_aqui"):     _cl.get("aborted_after_this_chunk", False),
                                     })
                                 st.dataframe(pd.DataFrame(_chunk_display_rows), width="stretch", hide_index=True)
+
+                        # ── Endpoint health summary ───────────────────────────────────────
+                        if _tv_endpoint_health:
+                            _ehs = _tv_endpoint_health
+                            _ehs_c1, _ehs_c2, _ehs_c3, _ehs_c4 = st.columns(4)
+                            _ehs_c1.metric(
+                                tr("Sent to endpoint",  "Enviados ao endpoint"),
+                                _ehs.get("n_queried", 0),
+                                help=tr(
+                                    f"Of {_ehs.get('n_eligible_for_fetch',0)} eligible after cache check",
+                                    f"De {_ehs.get('n_eligible_for_fetch',0)} elegíveis após cache",
+                                ),
+                            )
+                            _ehs_c2.metric(
+                                tr("Received a score",  "Receberam escore"),
+                                _ehs.get("n_queried_with_score", 0),
+                            )
+                            _ehs_c3.metric(
+                                tr("Endpoint fail chunks", "Chunks c/ falha endpoint"),
+                                _ehs.get("n_chunks_endpoint_failure", 0),
+                                help=tr(
+                                    f"Of {_ehs.get('n_chunks_attempted',0)} chunks attempted",
+                                    f"De {_ehs.get('n_chunks_attempted',0)} chunks tentados",
+                                ),
+                            )
+                            _ehs_c4.metric(
+                                tr("Unqueried (abort)",  "Não consultados (abort)"),
+                                _ehs.get("n_rows_unqueried", 0),
+                            )
+                            if _ehs.get("abort_reason"):
+                                st.caption(tr(
+                                    f"Abort reason: {_ehs['abort_reason']} "
+                                    f"after {_ehs.get('abort_endpoint_failures',0)} consecutive endpoint failures.",
+                                    f"Motivo do abort: {_ehs['abort_reason']} "
+                                    f"após {_ehs.get('abort_endpoint_failures',0)} falhas consecutivas de endpoint.",
+                                ))
 
                         # ── STS eligibility log ───────────────────────────────────────────
                         if _tv_sts_eligibility_log:
@@ -1626,6 +1797,10 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         "batch_aborted": False,
                         "abort_before_query_count": 0,
                         "chunk_log": list(getattr(calculate_sts_batch, "chunk_log", [])),
+                        "sts_patient_audit": [],
+                        "endpoint_health_summary": dict(
+                            getattr(calculate_sts_batch, "endpoint_health_summary", {})
+                        ),
                     }
                     st.session_state["_tv_result_sig"] = _tv_context_sig
 
@@ -1654,6 +1829,8 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _batch_aborted_ctx = _saved.get("batch_aborted", False)
                         _abort_before_query_count = _saved.get("abort_before_query_count", 0)
                         _tv_chunk_log = _saved.get("chunk_log", [])
+                        _tv_sts_audit_rows = _saved.get("sts_patient_audit", [])
+                        _tv_endpoint_health = _saved.get("endpoint_health_summary", {})
 
                         st.success(tr(
                             "Temporal validation results restored from session — "
@@ -1716,6 +1893,32 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 f"STS Score cache status: {_saved_sts_status}",
                                 f"Status do cache STS Score: {_saved_sts_status}",
                             ))
+                        # ── STS consistency check ──────────────────────────────────────
+                        if _tv_sts_audit_rows:
+                            _aud_n_elig   = len(_tv_sts_audit_rows)
+                            _aud_n_score  = sum(1 for _ar in _tv_sts_audit_rows if _ar["sts_score_present_final"])
+                            if _aud_n_score < _aud_n_elig:
+                                _aud_n_lost  = _aud_n_elig - _aud_n_score
+                                _aud_n_bi    = sum(1 for _ar in _tv_sts_audit_rows if _ar["sts_failure_stage"] == "build_input")
+                                _aud_n_fe    = sum(1 for _ar in _tv_sts_audit_rows if _ar["sts_failure_stage"] == "fetch" and not _ar["sts_score_present_final"])
+                                _aud_n_ab    = sum(1 for _ar in _tv_sts_audit_rows if _ar["sts_batch_aborted_before_query"] and not _ar["sts_score_present_final"])
+                                _aud_n_other = _aud_n_lost - _aud_n_bi - _aud_n_fe - _aud_n_ab
+                                st.warning(tr(
+                                    f"STS Score consistency: **{_aud_n_elig} eligible → {_aud_n_score} final scores** "
+                                    f"({_aud_n_lost} patient(s) without a score: "
+                                    f"{_aud_n_bi} input-build failure(s), "
+                                    f"{_aud_n_fe} fetch/parse failure(s), "
+                                    f"{_aud_n_ab} batch-aborted"
+                                    + (f", {_aud_n_other} other" if _aud_n_other else "")
+                                    + "). See **STS patient audit** below.",
+                                    f"Consistência STS Score: **{_aud_n_elig} elegíveis → {_aud_n_score} escores finais** "
+                                    f"({_aud_n_lost} paciente(s) sem escore: "
+                                    f"{_aud_n_bi} falha(s) de construção de input, "
+                                    f"{_aud_n_fe} falha(s) de consulta/parse, "
+                                    f"{_aud_n_ab} abortados em lote"
+                                    + (f", {_aud_n_other} outros" if _aud_n_other else "")
+                                    + "). Veja **Auditoria de pacientes STS** abaixo.",
+                                ))
                         if _tv_ai_incidents:
                             st.warning(tr(
                                 f"AI Risk inference incidents (temporal validation): "
@@ -1910,6 +2113,60 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                         file_name="sts_eligibility.xlsx",
                                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                         key="tv_elig_dl_xlsx_rst",
+                                    )
+
+                        # ── STS patient audit expander (restore path) ────────────────
+                        if _tv_sts_audit_rows:
+                            _aud_has_loss = any(not _ar["sts_score_present_final"] for _ar in _tv_sts_audit_rows)
+                            with st.expander(
+                                tr(
+                                    f"STS patient audit ({len(_tv_sts_audit_rows)} eligible patient(s))",
+                                    f"Auditoria de pacientes STS ({len(_tv_sts_audit_rows)} paciente(s) elegível(is))",
+                                ),
+                                expanded=_aud_has_loss,
+                            ):
+                                _aud_df = pd.DataFrame(_tv_sts_audit_rows)
+                                st.dataframe(_aud_df, width="stretch", hide_index=True)
+                                # Reconciliation summary
+                                _rec_score    = sum(1 for _ar in _tv_sts_audit_rows if _ar["sts_score_present_final"])
+                                _rec_bi       = sum(1 for _ar in _tv_sts_audit_rows if _ar["sts_failure_stage"] == "build_input")
+                                _rec_fetch_ns = sum(1 for _ar in _tv_sts_audit_rows if _ar["sts_failure_stage"] == "fetch" and not _ar["sts_score_present_final"])
+                                _rec_abort_ns = sum(1 for _ar in _tv_sts_audit_rows if _ar["sts_batch_aborted_before_query"] and not _ar["sts_score_present_final"])
+                                _rec_total    = _rec_score + _rec_bi + _rec_fetch_ns + _rec_abort_ns
+                                _rec_ok       = _rec_total == len(_tv_sts_audit_rows)
+                                st.caption(tr(
+                                    f"Reconciliation: {len(_tv_sts_audit_rows)} eligible = "
+                                    f"{_rec_score} with score + "
+                                    f"{_rec_bi} input-build failure + "
+                                    f"{_rec_fetch_ns} fetch/parse failure (no fallback) + "
+                                    f"{_rec_abort_ns} batch-aborted (no fallback)"
+                                    + (" ✓" if _rec_ok else f" ⚠ unaccounted: {len(_tv_sts_audit_rows) - _rec_total}"),
+                                    f"Reconciliação: {len(_tv_sts_audit_rows)} elegíveis = "
+                                    f"{_rec_score} com escore + "
+                                    f"{_rec_bi} falha de input + "
+                                    f"{_rec_fetch_ns} falha de consulta/parse (sem fallback) + "
+                                    f"{_rec_abort_ns} abortados em lote (sem fallback)"
+                                    + (" ✓" if _rec_ok else f" ⚠ não contabilizados: {len(_tv_sts_audit_rows) - _rec_total}"),
+                                ))
+                                _aud_c1, _aud_c2 = st.columns(2)
+                                with _aud_c1:
+                                    st.download_button(
+                                        label=tr("Download STS audit (CSV)", "Baixar auditoria STS (CSV)"),
+                                        data=_aud_df.to_csv(index=False).encode("utf-8"),
+                                        file_name="sts_patient_audit.csv",
+                                        mime="text/csv",
+                                        key="tv_aud_dl_csv_rst",
+                                    )
+                                with _aud_c2:
+                                    _aud_xlsx = BytesIO()
+                                    with pd.ExcelWriter(_aud_xlsx, engine="openpyxl") as _ew_aud:
+                                        _aud_df.to_excel(_ew_aud, sheet_name="sts_audit", index=False)
+                                    st.download_button(
+                                        label=tr("Download STS audit (XLSX)", "Baixar auditoria STS (XLSX)"),
+                                        data=_aud_xlsx.getvalue(),
+                                        file_name="sts_patient_audit.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        key="tv_aud_dl_xlsx_rst",
                                     )
 
                     # ── 7. Display results ──

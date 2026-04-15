@@ -363,9 +363,112 @@ def build_temporal_validation_summary(
     threshold: float,
     language: str = "English",
 ) -> str:
-    """Build Markdown summary for temporal validation results."""
+    """Build Markdown summary for temporal validation results.
+
+    The report uses PDF-friendly table layouts throughout:
+
+    * ``performance_df`` (16 raw columns) is split into two narrow sub-tables
+      so every column fits without overlap in the rendered PDF:
+
+        - Table A — Discrimination: Score, n, AUC, AUC lo/hi, AUPRC lo/hi, Brier
+        - Table B — Calibration & Classification:
+          Score, Cal.Int., Cal.Slp., HL p, Sens., Spec., PPV, NPV
+
+    * ``pairwise_df`` drops the ``DeLong_skip_reason`` column from the table
+      and renders it as a footnote caption below instead.
+
+    * All float values are formatted to controlled decimal precision
+      (3 d.p. for most metrics, 4 d.p. for p-values) to avoid
+      machine-precision strings like ``0.7714285714285715``.
+
+    Raw CSV/XLSX exports are generated directly from the unmodified DataFrames
+    and are not affected by these presentation changes.
+    """
     def _tr(en, pt):
         return en if language == "English" else pt
+
+    # ── Formatting helpers ────────────────────────────────────────────────
+
+    def _fv(val, decimals: int = 3) -> str:
+        """Format a single value for report display.
+
+        * floats → fixed decimal notation
+        * NaN / None → "N/A"
+        * everything else → str()
+        """
+        try:
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return "N/A"
+            if isinstance(val, float):
+                return f"{val:.{decimals}f}"
+        except (TypeError, ValueError):
+            pass
+        return str(val)
+
+    def _build_sub_table(
+        src: pd.DataFrame,
+        col_map: "list[tuple[str, str, int]]",
+    ) -> "list[str]":
+        """Return Markdown table lines for a subset of *src* columns.
+
+        *col_map* is a list of ``(src_col, display_label, decimals)`` triples.
+        Columns absent from *src* are silently skipped so the function is
+        robust against DataFrames with varying column sets.
+        """
+        # Keep only columns that actually exist in src
+        present = [(sc, lbl, dec) for sc, lbl, dec in col_map if sc in src.columns]
+        if not present:
+            return []
+        labels = [lbl for _, lbl, _ in present]
+        hdr = " | ".join(labels)
+        sep = "|" + "|".join("--:" if i > 0 else ":--" for i in range(len(present))) + "|"
+        out = [f"| {hdr} |", sep]
+        for _, row in src.iterrows():
+            cells = " | ".join(_fv(row[sc], dec) for sc, _, dec in present)
+            out.append(f"| {cells} |")
+        return out
+
+    # ── Column maps for performance sub-tables ────────────────────────────
+    #
+    # Each entry: (raw_column_name, display_label_for_report, decimal_places)
+    #
+    # Table A — Discrimination / global performance (9 columns)
+    _PERF_A: "list[tuple[str,str,int]]" = [
+        ("Score",          _tr("Score",    "Score"),    0),
+        ("n",              "n",                         0),
+        ("AUC",            "AUC",                       3),
+        ("AUC_IC95_inf",   _tr("AUC lo",  "AUC inf"),  3),
+        ("AUC_IC95_sup",   _tr("AUC hi",  "AUC sup"),  3),
+        ("AUPRC",          "AUPRC",                     3),
+        ("AUPRC_IC95_inf", _tr("AUPRC lo","AUPRC inf"), 3),
+        ("AUPRC_IC95_sup", _tr("AUPRC hi","AUPRC sup"), 3),
+        ("Brier",          "Brier",                     3),
+    ]
+
+    # Table B — Calibration & classification (8 columns)
+    _PERF_B: "list[tuple[str,str,int]]" = [
+        ("Score",                  _tr("Score",      "Score"),      0),
+        ("Calibration_Intercept",  _tr("Cal.Int.",   "Int.Cal."),   3),
+        ("Calibration_Slope",      _tr("Cal.Slp.",   "Inc.Cal."),   3),
+        ("HL_p",                   "HL p",                          4),
+        ("Sensitivity",            _tr("Sens.",      "Sens."),      3),
+        ("Specificity",            _tr("Spec.",      "Espec."),     3),
+        ("PPV",                    "PPV",                           3),
+        ("NPV",                    "NPV",                           3),
+    ]
+
+    # Column map for pairwise table (DeLong_skip_reason excluded — shown as footnote)
+    _PAIR: "list[tuple[str,str,int]]" = [
+        ("Comparison",          _tr("Comparison",  "Comparação"), 0),
+        ("n",                   "n",                               0),
+        ("Delta_AUC",           _tr("dAUC",        "dAUC"),       3),
+        ("Delta_AUC_IC95_inf",  _tr("dAUC lo",     "dAUC inf"),   3),
+        ("Delta_AUC_IC95_sup",  _tr("dAUC hi",     "dAUC sup"),   3),
+        ("Bootstrap_p",         _tr("Boot.p",      "p Boot."),    4),
+        ("DeLong_p",            _tr("DeLong p",    "p DeLong"),   4),
+        ("NRI",                 "NRI",                             3),
+        ("IDI",                 "IDI",                             3),
+    ]
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     cs = cohort_summary
@@ -393,7 +496,7 @@ def build_temporal_validation_summary(
         "",
     ]
 
-    # Cohort summary table
+    # ── Cohort summary table ──────────────────────────────────────────────
     lines.append(f"## {_tr('Cohort Summary', 'Resumo da Coorte')}")
     lines.append("")
     lines.append(f"| {_tr('Property', 'Propriedade')} | {_tr('Value', 'Valor')} |")
@@ -403,53 +506,84 @@ def build_temporal_validation_summary(
     lines.append(f"| {_tr('Event rate', 'Taxa de eventos')} | {cs.get('event_rate', 0):.1%} |")
     lines.append(f"| {_tr('Date range', 'Período')} | {cs.get('date_range', 'Unknown')} |")
     for level_key, level_label_en, level_label_pt in [
-        ("n_complete", "Complete data", "Dados completos"),
-        ("n_adequate", "Adequate", "Adequados"),
-        ("n_partial", "Partially imputed", "Parcialmente imputados"),
-        ("n_low", "Heavily imputed", "Muito imputados"),
+        ("n_complete", "Complete data",       "Dados completos"),
+        ("n_adequate", "Adequate",             "Adequados"),
+        ("n_partial",  "Partially imputed",    "Parcialmente imputados"),
+        ("n_low",      "Heavily imputed",      "Muito imputados"),
     ]:
         n = cs.get(level_key, 0)
         pct = n / cs["n_total"] * 100 if cs.get("n_total", 0) > 0 else 0
         lines.append(f"| {_tr(level_label_en, level_label_pt)} | {n} ({pct:.1f}%) |")
     lines.append("")
 
-    # Performance table
+    # ── Performance — split into two narrow sub-tables ────────────────────
     if not performance_df.empty:
         lines.append(f"## {_tr('Discrimination and Calibration', 'Discriminação e Calibração')}")
         lines.append("")
-        hdr = " | ".join(performance_df.columns)
-        lines.append(f"| {hdr} |")
-        lines.append("|" + "|".join(":--" for _ in performance_df.columns) + "|")
-        for _, row in performance_df.iterrows():
-            cells = " | ".join(str(v) for v in row.values)
-            lines.append(f"| {cells} |")
-        lines.append("")
 
-    # Pairwise comparison
+        # Sub-table A: discrimination / global performance
+        tbl_a = _build_sub_table(performance_df, _PERF_A)
+        if tbl_a:
+            lines.append(f"### {_tr('Discrimination', 'Discriminação')}")
+            lines.append("")
+            lines.extend(tbl_a)
+            lines.append("")
+
+        # Sub-table B: calibration & classification
+        tbl_b = _build_sub_table(performance_df, _PERF_B)
+        if tbl_b:
+            lines.append(f"### {_tr('Calibration and Classification', 'Calibração e Classificação')}")
+            lines.append("")
+            lines.extend(tbl_b)
+            lines.append("")
+
+    # ── Pairwise comparison ───────────────────────────────────────────────
     if not pairwise_df.empty:
         lines.append(f"## {_tr('Pairwise Comparison', 'Comparação Pareada')}")
         lines.append("")
-        hdr = " | ".join(pairwise_df.columns)
-        lines.append(f"| {hdr} |")
-        lines.append("|" + "|".join(":--" for _ in pairwise_df.columns) + "|")
-        for _, row in pairwise_df.iterrows():
-            cells = " | ".join(str(v) for v in row.values)
-            lines.append(f"| {cells} |")
-        lines.append("")
 
-    # Risk categories
+        tbl_pair = _build_sub_table(pairwise_df, _PAIR)
+        if tbl_pair:
+            lines.extend(tbl_pair)
+            lines.append("")
+
+        # DeLong skip-reason footnotes (rendered below table, not as a column)
+        if "DeLong_skip_reason" in pairwise_df.columns:
+            notes = [
+                (str(row.get("Comparison", "?")), str(row["DeLong_skip_reason"]))
+                for _, row in pairwise_df.iterrows()
+                if row["DeLong_skip_reason"] and str(row["DeLong_skip_reason"]) not in ("", "None", "nan")
+            ]
+            if notes:
+                lines.append(
+                    f"*{_tr('DeLong note', 'Nota DeLong')}: "
+                    + "; ".join(f"{comp}: {reason}" for comp, reason in notes)
+                    + "*"
+                )
+                lines.append("")
+
+    # ── Risk category distribution ────────────────────────────────────────
     if not risk_category_df.empty:
         lines.append(f"## {_tr('Risk Category Distribution', 'Distribuição por Classe de Risco')}")
         lines.append("")
-        hdr = " | ".join(risk_category_df.columns)
+        # Risk category table is already narrow (≤5 columns); render as-is
+        # but format any float columns to avoid machine-precision noise.
+        hdr = " | ".join(str(c) for c in risk_category_df.columns)
         lines.append(f"| {hdr} |")
         lines.append("|" + "|".join(":--" for _ in risk_category_df.columns) + "|")
         for _, row in risk_category_df.iterrows():
-            cells = " | ".join(str(v) for v in row.values)
-            lines.append(f"| {cells} |")
+            cells = []
+            for v in row.values:
+                if isinstance(v, float) and not pd.isna(v):
+                    cells.append(f"{v:.3f}")
+                else:
+                    cells.append(str(v) if not (isinstance(v, float) and pd.isna(v)) else "N/A")
+            lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
 
     lines.append("---")
-    lines.append(f"*{_tr('Generated by AI Risk — Temporal Validation Module', 'Gerado pelo AI Risk — Módulo de Validação Temporal')}*")
+    lines.append(
+        f"*{_tr('Generated by AI Risk — Temporal Validation Module', 'Gerado pelo AI Risk — Módulo de Validação Temporal')}*"
+    )
 
     return "\n".join(lines)
