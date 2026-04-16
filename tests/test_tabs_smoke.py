@@ -43,6 +43,7 @@ def test_import_temporal_validation_module():
     assert callable(getattr(temporal_validation, "render", None))
     # Helper moved out of app.py — verify it travelled with the tab.
     assert callable(getattr(temporal_validation, "_sts_score_status_caption", None))
+    assert callable(getattr(temporal_validation, "_sts_availability_details_caption", None))
 
 
 # ---------------------------------------------------------------------------

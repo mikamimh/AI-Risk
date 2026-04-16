@@ -75,6 +75,10 @@ from model_metadata import (
 from temporal_validation import (
     extract_year_quarter_range as _extract_year_quarter_range,
     chronological_state_label,
+    classify_sts_availability,
+    build_sts_availability_summary,
+    STS_AVAILABILITY_PARTIAL,
+    STS_AVAILABILITY_UNAVAILABLE,
     CHRONO_STATE_NO_OVERLAP,
     CHRONO_STATE_OVERLAP,
     CHRONO_STATE_RETROGRADE,
@@ -106,6 +110,49 @@ def _sts_score_status_caption(execution_log) -> str:
         if summary.get(k, 0):
             parts.append(f"{k} {summary[k]}")
     return " · ".join(parts)
+
+
+def _sts_availability_details_caption(
+    availability: str,
+    n_score: int,
+    n_eligible: int,
+    language: str = "English",
+) -> str:
+    """Human-readable STS availability line for execution-details blocks."""
+    if availability == "complete":
+        return (
+            f"STS availability: complete ({n_score}/{n_eligible} eligible)"
+            if language == "English"
+            else f"Disponibilidade do STS: completa ({n_score}/{n_eligible} elegíveis)"
+        )
+    if availability == "partial":
+        return (
+            f"STS availability: partial ({n_score}/{n_eligible} eligible)"
+            if language == "English"
+            else f"Disponibilidade do STS: parcial ({n_score}/{n_eligible} elegíveis)"
+        )
+    if availability == "unavailable":
+        return (
+            f"STS availability: unavailable ({n_score}/{n_eligible} eligible)"
+            if language == "English"
+            else f"Disponibilidade do STS: indisponível ({n_score}/{n_eligible} elegíveis)"
+        )
+    if availability == "no_eligible":
+        return (
+            "STS availability: no STS-eligible rows"
+            if language == "English"
+            else "Disponibilidade do STS: sem linhas elegíveis para STS"
+        )
+    return (
+        "STS availability: not requested"
+        if language == "English"
+        else "Disponibilidade do STS: não solicitada"
+    )
+
+
+def _compute_sts_availability_status(n_eligible: int, n_score: int) -> str:
+    """Compatibility wrapper for the shared temporal-validation helper."""
+    return classify_sts_availability(n_eligible, n_score)
 
 
 def _build_sts_patient_audit(
@@ -585,6 +632,11 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                 # ── Defaults (prevent NameErrors on first page load) ──────────────
                 _tv_sts_eligibility_log = []
                 _tv_is_surrogate = _tv_is_surrogate  # already set above from overlap check
+                _tv_sts_availability: str = "no_sts"   # "complete"|"partial"|"unavailable"|"no_sts"|"no_eligible"
+                _tv_sts_n_score: int = 0               # eligible rows with a final STS score
+                _tv_sts_n_eligible: int = 0            # eligible rows (supported by STS ACSD)
+                _tv_sts_availability_note: dict | None = None
+                _tv_sts_score_label = "STS Score"
 
                 # ── STS thread state — session_state keys ──────────────────────────
                 # These constants are shared by the run block (which starts the
@@ -667,6 +719,18 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
 
                         _tv_data["sts_score"] = _tv_sts_scores
                         _tv_sts_ok = _tv_data["sts_score"].notna().sum() > 0
+                        # ── STS availability classification ───────────────────────────────
+                        _tv_sts_n_score    = int(_tv_data["sts_score"].notna().sum())
+                        _tv_sts_n_eligible = _sts_n_elig_int
+                        _tv_sts_availability = _compute_sts_availability_status(
+                            _tv_sts_n_eligible, _tv_sts_n_score
+                        )
+                        _tv_sts_availability_note = build_sts_availability_summary(
+                            _tv_sts_n_eligible,
+                            _tv_sts_n_score,
+                            language=language,
+                        )
+                        _tv_sts_score_label = _tv_sts_availability_note["score_label"]
 
                         _tv_exec_log = getattr(calculate_sts_batch, "last_execution_log", [])
                         _tv_fail_log = getattr(calculate_sts_batch, "failure_log", [])
@@ -765,7 +829,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _tv_rename     = {"ia_risk": "AI Risk", "euroscore_calc": "EuroSCORE II"}
                         if _tv_sts_ok:
                             _tv_score_cols.append("sts_score")
-                            _tv_rename["sts_score"] = "STS Score"
+                            _tv_rename["sts_score"] = _tv_sts_score_label
 
                         _tv_perf = evaluate_scores_temporal(
                             _tv_data, "morte_30d", _tv_score_cols, _tv_locked_threshold,
@@ -856,6 +920,10 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             "endpoint_health_summary": dict(
                                 getattr(calculate_sts_batch, "endpoint_health_summary", {})
                             ),
+                            # ── STS availability fields ───────────────────────────────
+                            "sts_availability": _tv_sts_availability,
+                            "sts_n_score":      _tv_sts_n_score,
+                            "sts_n_eligible":   _tv_sts_n_eligible,
                         }
                         st.session_state["_tv_result_sig"]   = _tv_context_sig_r
                         st.session_state[_TV_STS_ST]         = "idle"  # clear running state
@@ -1197,6 +1265,9 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 )
 
                         if _tv_n_eligible == 0:
+                            _tv_sts_availability = "no_eligible"
+                            _tv_sts_n_eligible = 0
+                            _tv_sts_n_score = 0
                             st.info(tr(
                                 "No patients have STS-supported procedures in this cohort. "
                                 "Analysis will proceed with AI Risk and EuroSCORE II only.",
@@ -1522,7 +1593,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             f"  · uncertain: **{_sts_unc_n}** (OBSERVATION ADMIT or unmapped — skipped)  \n"
                             f"  · total classified: **{len(_tv_sts_eligibility_log)}**  \n"
                             f"AI Risk inference incidents: {len(_tv_ai_incidents) if _tv_ai_incidents else 0}  \n"
-                            f"STS Score available: {'yes' if _tv_sts_ok else 'no'}  \n"
+                            f"{_sts_availability_details_caption(_tv_sts_availability, _tv_sts_n_score, _tv_sts_n_eligible, 'English')}  \n"
                             f"Temporal axis: {'de-identified surrogate' if _tv_is_surrogate else 'standard'}",
                             f"Após `prepare_master_dataset`: **{len(_tv_data)}** pacientes "
                             f"({_tv_events} eventos, taxa {_tv_rate:.1%})  \n"
@@ -1532,7 +1603,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             f"  · incertos: **{_sts_unc_n}** (OBSERVATION ADMIT ou sem mapeamento — ignorados)  \n"
                             f"  · total classificados: **{len(_tv_sts_eligibility_log)}**  \n"
                             f"Incidentes de AI Risk: {len(_tv_ai_incidents) if _tv_ai_incidents else 0}  \n"
-                            f"STS Score disponível: {'sim' if _tv_sts_ok else 'não'}  \n"
+                            f"{_sts_availability_details_caption(_tv_sts_availability, _tv_sts_n_score, _tv_sts_n_eligible, 'Portuguese')}  \n"
                             f"Eixo temporal: {'substituto desidentificado' if _tv_is_surrogate else 'padrão'}",
                         ))
 
@@ -1597,8 +1668,8 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     f"· input build failed: **{_exec_counts.get('build_input', 0)}**  \n"
                                     f"· unqueried due to batch abort: **{_abort_before_query_count}**  \n"
                                     f"· STS score present in final output: **{_n_score_present}**  \n"
-                                    f"_Note: 'STS Score available: yes' means at least one eligible patient has "
-                                    f"a score, not that all eligible patients do._",
+                                    f"Â· {_sts_availability_details_caption(_tv_sts_availability, _tv_sts_n_score, _tv_sts_n_eligible, 'English')}  \n"
+                                    "_Availability is classified against STS-eligible rows, not the full cohort._",
                                     f"· em cache (sessão/disco): **{_exec_counts.get('cached', 0)}**  \n"
                                     f"· consultados com sucesso: **{_exec_counts.get('fresh', 0) + _exec_counts.get('refreshed', 0)}**  \n"
                                     f"· fallback de cache antigo usado: **{_exec_counts.get('stale_fallback', 0)}**  \n"
@@ -1606,8 +1677,8 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     f"· falha na construção do input: **{_exec_counts.get('build_input', 0)}**  \n"
                                     f"· não consultados por aborto do lote: **{_abort_before_query_count}**  \n"
                                     f"· STS Score presente na saída final: **{_n_score_present}**  \n"
-                                    f"_Nota: 'STS Score disponível: sim' significa que ao menos um paciente elegível "
-                                    f"tem escore, não que todos os elegíveis o têm._",
+                                    f"Â· {_sts_availability_details_caption(_tv_sts_availability, _tv_sts_n_score, _tv_sts_n_eligible, 'Portuguese')}  \n"
+                                    "_A disponibilidade é classificada em relação às linhas elegíveis para STS, não à coorte completa._",
                                 )
                             )
 
@@ -1801,6 +1872,9 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         "endpoint_health_summary": dict(
                             getattr(calculate_sts_batch, "endpoint_health_summary", {})
                         ),
+                        "sts_availability": _tv_sts_availability,
+                        "sts_n_score": _tv_sts_n_score,
+                        "sts_n_eligible": _tv_sts_n_eligible,
                     }
                     st.session_state["_tv_result_sig"] = _tv_context_sig
 
@@ -1831,6 +1905,9 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _tv_chunk_log = _saved.get("chunk_log", [])
                         _tv_sts_audit_rows = _saved.get("sts_patient_audit", [])
                         _tv_endpoint_health = _saved.get("endpoint_health_summary", {})
+                        _tv_sts_availability = _saved.get("sts_availability", "no_sts")
+                        _tv_sts_n_score = int(_saved.get("sts_n_score", 0) or 0)
+                        _tv_sts_n_eligible = int(_saved.get("sts_n_eligible", 0) or 0)
 
                         st.success(tr(
                             "Temporal validation results restored from session — "
@@ -2017,7 +2094,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 f"  · uncertain: **{_rst_unc_n}** (OBSERVATION ADMIT or unmapped — skipped)  \n"
                                 f"  · total classified: **{len(_tv_sts_eligibility_log)}**  \n"
                                 f"AI Risk inference incidents: {len(_tv_ai_incidents) if _tv_ai_incidents else 0}  \n"
-                                f"STS Score available: {'yes' if _tv_sts_ok else 'no'}  \n"
+                                f"{_sts_availability_details_caption(_tv_sts_availability, _tv_sts_n_score, _tv_sts_n_eligible, 'English')}  \n"
                                 f"Temporal axis: {'de-identified surrogate' if _tv_is_surrogate else 'standard'}",
                                 f"Após `prepare_master_dataset`: **{len(_tv_data)}** pacientes "
                                 f"({_tv_cohort_summary.get('n_events', '?')} eventos, "
@@ -2028,7 +2105,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 f"  · incertos: **{_rst_unc_n}** (OBSERVATION ADMIT ou sem mapeamento — ignorados)  \n"
                                 f"  · total classificados: **{len(_tv_sts_eligibility_log)}**  \n"
                                 f"Incidentes de AI Risk: {len(_tv_ai_incidents) if _tv_ai_incidents else 0}  \n"
-                                f"STS Score disponível: {'sim' if _tv_sts_ok else 'não'}  \n"
+                                f"{_sts_availability_details_caption(_tv_sts_availability, _tv_sts_n_score, _tv_sts_n_eligible, 'Portuguese')}  \n"
                                 f"Eixo temporal: {'substituto desidentificado' if _tv_is_surrogate else 'padrão'}",
                             ))
 
@@ -2173,6 +2250,25 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                     st.divider()
                     st.markdown(tr("### Results", "### Resultados"))
 
+                    if _tv_sts_availability in ("complete", "partial", "unavailable") and _tv_sts_n_eligible > 0:
+                        _tv_sts_availability_note = build_sts_availability_summary(
+                            _tv_sts_n_eligible,
+                            _tv_sts_n_score,
+                            language=language,
+                        )
+                        _tv_sts_score_label = _tv_sts_availability_note["score_label"]
+                    else:
+                        _tv_sts_availability_note = None
+                        _tv_sts_score_label = "STS Score"
+
+                    if _tv_sts_availability_note and _tv_sts_availability in (STS_AVAILABILITY_PARTIAL, STS_AVAILABILITY_UNAVAILABLE):
+                        st.warning(_tv_sts_availability_note["banner_text"])
+                        st.caption(_tv_sts_availability_note["coverage_text"])
+                        if _tv_sts_availability == STS_AVAILABILITY_PARTIAL and _tv_sts_availability_note.get("subset_note"):
+                            st.caption(_tv_sts_availability_note["subset_note"])
+                        elif _tv_sts_availability == STS_AVAILABILITY_UNAVAILABLE and _tv_sts_availability_note.get("suppressed_note"):
+                            st.caption(_tv_sts_availability_note["suppressed_note"])
+
                     # 7.1 Cohort summary
                     with st.expander(tr("Cohort summary", "Resumo da coorte"), expanded=True):
                         _cs = _tv_cohort_summary
@@ -2199,6 +2295,11 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 f"IC 95% por bootstrap ({AppConfig.N_BOOTSTRAP_SAMPLES} reamostras). "
                                 f"Métricas de classificação no limiar bloqueado = {_tv_locked_threshold:.0%}.",
                             ))
+                            if _tv_sts_availability_note and _tv_sts_availability in (STS_AVAILABILITY_PARTIAL, STS_AVAILABILITY_UNAVAILABLE):
+                                if _tv_sts_availability == STS_AVAILABILITY_PARTIAL:
+                                    st.caption(_tv_sts_availability_note["subset_note"])
+                                else:
+                                    st.caption(_tv_sts_availability_note["suppressed_note"])
                             _tv_perf_display = _tv_perf.copy()
                             # Format for display
                             for _fc in ["AUC", "AUPRC", "Brier", "Calibration_Intercept", "Calibration_Slope",
@@ -2263,6 +2364,8 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                     # 7.4 Risk categories
                     if not _tv_risk_cat.empty:
                         with st.expander(tr("Risk category distribution", "Distribuição por classe de risco"), expanded=True):
+                            if _tv_sts_availability_note and _tv_sts_availability in (STS_AVAILABILITY_PARTIAL, STS_AVAILABILITY_UNAVAILABLE):
+                                st.caption(_tv_sts_availability_note["risk_category_note"])
                             _tv_rc_display = _tv_risk_cat.copy()
                             _tv_rc_display["Observed_mortality"] = _tv_rc_display["Observed_mortality"].map(
                                 lambda v: f"{v:.1%}" if pd.notna(v) else "—"
@@ -2446,13 +2549,18 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             _tv_case_cols.append(_date_cand)
                     _tv_case_cols.append("morte_30d")
                     _tv_case_cols.extend(["ia_risk", "euroscore_calc"])
-                    if _tv_sts_ok:
+                    if _tv_sts_availability != "no_sts" and "sts_score" in _tv_data.columns:
                         _tv_case_cols.append("sts_score")
                     _tv_case_cols.extend(["class_ia", "class_euro"])
-                    if _tv_sts_ok:
+                    if _tv_sts_availability != "no_sts" and "class_sts" in _tv_data.columns:
                         _tv_case_cols.append("class_sts")
                     _tv_case_cols.append("_completeness")
                     _tv_case_cols = [c for c in _tv_case_cols if c in _tv_data.columns]
+                    _tv_export_case_cols = list(_tv_case_cols)
+                    if "sts_score" in _tv_data.columns and "sts_score" not in _tv_export_case_cols:
+                        _tv_export_case_cols.append("sts_score")
+                    if "class_sts" in _tv_data.columns and "class_sts" not in _tv_export_case_cols:
+                        _tv_export_case_cols.append("class_sts")
 
                     _tv_case_df = _tv_data[_tv_case_cols].copy()
                     # Rename for display
@@ -2461,7 +2569,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         "morte_30d": tr("Outcome", "Desfecho"),
                         "ia_risk": "AI Risk",
                         "euroscore_calc": "EuroSCORE II",
-                        "sts_score": "STS Score",
+                        "sts_score": _tv_sts_score_label,
                         "class_ia": tr("AI Risk class", "Classe AI Risk"),
                         "class_euro": tr("EuroSCORE II class", "Classe EuroSCORE II"),
                         "class_sts": tr("STS Score class", "Classe STS Score"),
@@ -2470,7 +2578,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                     _tv_case_df = _tv_case_df.rename(columns=_tv_case_rename)
 
                     # Format probabilities as percentages
-                    for _pc in ["AI Risk", "EuroSCORE II", "STS Score"]:
+                    for _pc in ["AI Risk", "EuroSCORE II", _tv_sts_score_label]:
                         if _pc in _tv_case_df.columns:
                             _tv_case_df[_pc] = _tv_case_df[_pc].map(
                                 lambda v: f"{v*100:.2f}%" if pd.notna(v) else "—"
@@ -2498,6 +2606,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                     _tv_md = build_temporal_validation_summary(
                         _tv_cohort_summary, _tv_perf, _tv_pairwise, _tv_calib_df,
                         _tv_risk_cat, _tv_meta, _tv_locked_threshold, language,
+                        sts_availability=_tv_sts_availability_note,
                     )
 
                     # 9.1 XLSX
@@ -2521,12 +2630,12 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         if not _tv_calib_df.empty:
                             _tv_calib_df.to_excel(_tv_writer, sheet_name="calibration", index=False)
                         # Case-level predictions sheet
-                        _tv_case_export = _tv_data[_tv_case_cols].copy()
+                        _tv_case_export = _tv_data[_tv_export_case_cols].copy()
                         _tv_case_export.to_excel(_tv_writer, sheet_name="case_level_predictions", index=False)
                     _tv_xlsx_bytes = _tv_xlsx_buf.getvalue()
 
                     # 9.2 CSV
-                    _tv_csv_export = _tv_data[_tv_case_cols].copy()
+                    _tv_csv_export = _tv_data[_tv_export_case_cols].copy()
                     _tv_csv_bytes = _tv_csv_export.to_csv(index=False).encode("utf-8")
 
                     # 9.4 PDF
@@ -2594,6 +2703,9 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 "event_rate": round(_tv_rate, 4),
                                 "validation_date_range": f"{_tv_val_start} — {_tv_val_end}",
                                 "sts_available": _tv_sts_ok,
+                                "sts_availability": _tv_sts_availability,
+                                "sts_n_eligible": _tv_sts_n_eligible,
+                                "sts_n_score": _tv_sts_n_score,
                             },
                         )
 

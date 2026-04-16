@@ -8,6 +8,8 @@ Provides:
 - check_temporal_overlap      — compare training vs. validation date ranges
 - format_locked_model_for_display — tabular locked-model summary (Temporal Validation tab)
 - build_temporal_validation_summary — Markdown report for temporal validation results
+- classify_sts_availability   — explicit STS coverage rule for temporal cohorts
+- build_sts_availability_summary — shared UI/report text for partial STS coverage
 
 Internal helpers (year-quarter timestamp conversion) are kept private to this
 module; they are not part of the public API.
@@ -32,6 +34,151 @@ import pandas as pd
 
 _QUARTER_TO_MONTH = {"Q1": 1, "Q2": 4, "Q3": 7, "Q4": 10}
 _QUARTER_ORDER = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
+
+# ---------------------------------------------------------------------------
+# STS availability status
+# ---------------------------------------------------------------------------
+
+STS_AVAILABILITY_COMPLETE: str = "complete"
+STS_AVAILABILITY_PARTIAL: str = "partial"
+STS_AVAILABILITY_UNAVAILABLE: str = "unavailable"
+
+STS_AVAILABILITY_STATES: tuple = (
+    STS_AVAILABILITY_COMPLETE,
+    STS_AVAILABILITY_PARTIAL,
+    STS_AVAILABILITY_UNAVAILABLE,
+)
+
+
+def classify_sts_availability(n_eligible: int, n_score: int) -> str:
+    """Classify STS final-score availability for a temporal cohort.
+
+    Rule:
+      - complete    = final STS score present for all eligible rows
+      - partial     = final STS score present for some but not all eligible rows
+      - unavailable = final STS score present for none of the eligible rows
+    """
+    if n_eligible <= 0 or n_score <= 0:
+        return STS_AVAILABILITY_UNAVAILABLE
+    if n_score >= n_eligible:
+        return STS_AVAILABILITY_COMPLETE
+    return STS_AVAILABILITY_PARTIAL
+
+
+def build_sts_availability_summary(
+    n_eligible: int,
+    n_score: int,
+    language: str = "English",
+) -> dict:
+    """Return shared STS availability text for UI and report layers.
+
+    Intended for cohorts where STS was enabled and at least one row was eligible.
+    Callers that want separate handling for "STS disabled" or "no eligible rows"
+    should gate those cases before calling this helper.
+    """
+    def _tr(en: str, pt: str) -> str:
+        return en if language == "English" else pt
+
+    status = classify_sts_availability(n_eligible, n_score)
+    coverage_pct = (n_score / n_eligible * 100.0) if n_eligible > 0 else 0.0
+    coverage_text = _tr(
+        f"Coverage: {coverage_pct:.1f}% of eligible rows ({n_score}/{n_eligible}).",
+        f"Cobertura: {coverage_pct:.1f}% das linhas elegíveis ({n_score}/{n_eligible}).",
+    )
+
+    if status == STS_AVAILABILITY_COMPLETE:
+        status_label = _tr("COMPLETE", "COMPLETA")
+        banner_text = ""
+        execution_details_text = _tr(
+            f"STS availability: complete ({n_score}/{n_eligible} eligible).",
+            f"Disponibilidade do STS: completa ({n_score}/{n_eligible} elegíveis).",
+        )
+        report_note = _tr(
+            f"STS availability: COMPLETE. Usable final STS scores were present for all {n_eligible} eligible rows.",
+            f"Disponibilidade do STS: COMPLETA. Escores finais utilizáveis estavam presentes para todas as {n_eligible} linhas elegíveis.",
+        )
+        subset_note = ""
+        suppressed_note = ""
+        risk_category_note = ""
+        score_label = "STS Score"
+    elif status == STS_AVAILABILITY_PARTIAL:
+        status_label = _tr("PARTIAL", "PARCIAL")
+        banner_text = _tr(
+            f"STS availability: PARTIAL. {n_score} of {n_eligible} eligible rows produced a usable final STS score. "
+            "STS summaries below reflect only this subset and should not be interpreted as a complete cohort-level comparator.",
+            f"Disponibilidade do STS: PARCIAL. {n_score} de {n_eligible} linhas elegíveis produziram um escore STS final utilizável. "
+            "Os resumos STS abaixo refletem apenas esse subconjunto e não devem ser interpretados como um comparador em nível de coorte completa.",
+        )
+        execution_details_text = _tr(
+            f"STS availability: partial ({n_score}/{n_eligible} eligible).",
+            f"Disponibilidade do STS: parcial ({n_score}/{n_eligible} elegíveis).",
+        )
+        report_note = _tr(
+            f"STS availability: PARTIAL. STS-based summaries and comparisons reflect only the subset with usable final STS scores "
+            f"({n_score} of {n_eligible} eligible rows; {coverage_pct:.1f}% coverage) and should not be interpreted as full-cohort STS results.",
+            f"Disponibilidade do STS: PARCIAL. Os resumos e comparações baseados em STS refletem apenas o subconjunto com escore STS final utilizável "
+            f"({n_score} de {n_eligible} linhas elegíveis; cobertura de {coverage_pct:.1f}%) e não devem ser interpretados como resultados STS da coorte completa.",
+        )
+        subset_note = _tr(
+            f"STS entries shown here are subset-only and reflect the {n_score}/{n_eligible} eligible rows with usable final STS scores.",
+            f"As entradas de STS mostradas aqui são apenas do subconjunto e refletem as {n_score}/{n_eligible} linhas elegíveis com escore STS final utilizável.",
+        )
+        suppressed_note = ""
+        risk_category_note = _tr(
+            f"STS rows below reflect only the subset with usable final STS output ({n_score}/{n_eligible} eligible).",
+            f"As linhas de STS abaixo refletem apenas o subconjunto com saída final STS utilizável ({n_score}/{n_eligible} elegíveis).",
+        )
+        score_label = _tr(
+            f"STS Score (available for {n_score}/{n_eligible} eligible)",
+            f"STS Score (disponível para {n_score}/{n_eligible} elegíveis)",
+        )
+    else:
+        status_label = _tr("UNAVAILABLE", "INDISPONÍVEL")
+        banner_text = _tr(
+            f"STS availability: UNAVAILABLE. No eligible rows produced a usable final STS score.",
+            f"Disponibilidade do STS: INDISPONÍVEL. Nenhuma linha elegível produziu um escore STS final utilizável.",
+        )
+        execution_details_text = _tr(
+            f"STS availability: unavailable ({n_score}/{n_eligible} eligible).",
+            f"Disponibilidade do STS: indisponível ({n_score}/{n_eligible} elegíveis).",
+        )
+        report_note = _tr(
+            f"STS availability: UNAVAILABLE. No eligible rows produced a usable final STS score "
+            f"({n_score} of {n_eligible} eligible rows; {coverage_pct:.1f}% coverage). "
+            "STS-specific tables and plots are therefore omitted from cohort-level interpretation.",
+            f"Disponibilidade do STS: INDISPONÍVEL. Nenhuma linha elegível produziu um escore STS final utilizável "
+            f"({n_score} de {n_eligible} linhas elegíveis; cobertura de {coverage_pct:.1f}%). "
+            "As tabelas e gráficos específicos de STS são, portanto, omitidos da interpretação em nível de coorte.",
+        )
+        subset_note = ""
+        suppressed_note = _tr(
+            "STS-specific distributions and plots are not shown because no eligible rows produced a usable final STS score.",
+            "As distribuições e gráficos específicos de STS não são mostrados porque nenhuma linha elegível produziu um escore STS final utilizável.",
+        )
+        risk_category_note = _tr(
+            f"STS was unavailable for eligible rows ({n_score}/{n_eligible}) and is omitted from this section.",
+            f"O STS ficou indisponível para as linhas elegíveis ({n_score}/{n_eligible}) e foi omitido desta seção.",
+        )
+        score_label = _tr(
+            f"STS Score (available for {n_score}/{n_eligible} eligible)",
+            f"STS Score (disponível para {n_score}/{n_eligible} elegíveis)",
+        )
+
+    return {
+        "status": status,
+        "status_label": status_label,
+        "n_eligible": int(n_eligible),
+        "n_score": int(n_score),
+        "coverage_pct": coverage_pct,
+        "coverage_text": coverage_text,
+        "banner_text": banner_text,
+        "execution_details_text": execution_details_text,
+        "report_note": report_note,
+        "subset_note": subset_note,
+        "suppressed_note": suppressed_note,
+        "risk_category_note": risk_category_note,
+        "score_label": score_label,
+    }
 
 # ---------------------------------------------------------------------------
 # Surrogate / de-identified timeline detection
@@ -362,6 +509,7 @@ def build_temporal_validation_summary(
     metadata: dict,
     threshold: float,
     language: str = "English",
+    sts_availability: Optional[dict] = None,
 ) -> str:
     """Build Markdown summary for temporal validation results.
 
@@ -472,6 +620,8 @@ def build_temporal_validation_summary(
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     cs = cohort_summary
+    sts_note = sts_availability or {}
+    sts_status = sts_note.get("status")
 
     lines = [
         f"# {_tr('Temporal Validation Report', 'Relatório de Validação Temporal')}",
@@ -497,6 +647,13 @@ def build_temporal_validation_summary(
     ]
 
     # ── Cohort summary table ──────────────────────────────────────────────
+    if sts_status in STS_AVAILABILITY_STATES:
+        lines.append(
+            f"**{_tr('STS availability note', 'Nota de disponibilidade do STS')}:** "
+            f"{sts_note.get('report_note', '')}"
+        )
+        lines.append("")
+
     lines.append(f"## {_tr('Cohort Summary', 'Resumo da Coorte')}")
     lines.append("")
     lines.append(f"| {_tr('Property', 'Propriedade')} | {_tr('Value', 'Valor')} |")
@@ -520,6 +677,12 @@ def build_temporal_validation_summary(
     if not performance_df.empty:
         lines.append(f"## {_tr('Discrimination and Calibration', 'Discriminação e Calibração')}")
         lines.append("")
+        if sts_status == STS_AVAILABILITY_PARTIAL and sts_note.get("subset_note"):
+            lines.append(f"*{sts_note['subset_note']}*")
+            lines.append("")
+        elif sts_status == STS_AVAILABILITY_UNAVAILABLE and sts_note.get("suppressed_note"):
+            lines.append(f"*{sts_note['suppressed_note']}*")
+            lines.append("")
 
         # Sub-table A: discrimination / global performance
         tbl_a = _build_sub_table(performance_df, _PERF_A)
@@ -566,6 +729,9 @@ def build_temporal_validation_summary(
     if not risk_category_df.empty:
         lines.append(f"## {_tr('Risk Category Distribution', 'Distribuição por Classe de Risco')}")
         lines.append("")
+        if sts_status in (STS_AVAILABILITY_PARTIAL, STS_AVAILABILITY_UNAVAILABLE) and sts_note.get("risk_category_note"):
+            lines.append(f"*{sts_note['risk_category_note']}*")
+            lines.append("")
         # Risk category table is already narrow (≤5 columns); render as-is
         # but format any float columns to avoid machine-precision noise.
         hdr = " | ".join(str(c) for c in risk_category_df.columns)
@@ -581,9 +747,22 @@ def build_temporal_validation_summary(
             lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
 
+    if (
+        sts_status == STS_AVAILABILITY_UNAVAILABLE
+        and sts_note.get("risk_category_note")
+        and risk_category_df.empty
+    ):
+        lines.append(f"## {_tr('Risk Category Distribution', 'DistribuiÃ§Ã£o por Classe de Risco')}")
+        lines.append("")
+        lines.append(f"*{sts_note['risk_category_note']}*")
+        lines.append("")
+
     lines.append("---")
     lines.append(
         f"*{_tr('Generated by AI Risk — Temporal Validation Module', 'Gerado pelo AI Risk — Módulo de Validação Temporal')}*"
     )
 
-    return "\n".join(lines)
+    report = "\n".join(lines)
+    report = report.replace("DistribuiÃ§Ã£o por Classe de Risco", "Distribuição por Classe de Risco")
+    report = report.replace("DistribuiÃƒÂ§ÃƒÂ£o por Classe de Risco", "Distribuição por Classe de Risco")
+    return report

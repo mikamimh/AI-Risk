@@ -298,6 +298,8 @@ The Temporal Validation tab applies the frozen trained model to an **independent
 
 **STS mode selector:** A checkbox allows the user to include or exclude STS Score from the temporal validation run. When unchecked, STS queries are skipped entirely and the analysis proceeds with AI Risk and EuroSCORE II only. The checkbox defaults to enabled when `websockets` is installed.
 
+**Partial STS availability policy:** Temporal validation now classifies STS coverage for the cohort as `complete`, `partial`, or `unavailable` based on usable final STS scores among STS-eligible rows. When coverage is partial, the UI and PDF report show an explicit warning with exact counts (for example, `6 of 22 eligible`) and label STS summaries as subset-only. When coverage is unavailable, STS-specific cohort-level summaries are omitted and replaced by a clear note. Raw CSV/XLSX exports still retain the STS columns.
+
 ## Decision threshold
 
 The **operational clinical threshold remains fixed at 8%**. This is the default used throughout the app for classification, clinical comparison, and temporal validation.
