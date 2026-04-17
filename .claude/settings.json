@@ -10,7 +10,8 @@
       "Bash(ls requirements*.txt)",
       "Bash(pip show:*)",
       "Bash(python -m pip list)",
-      "Bash(python -m pip show numpy xgboost scikit-learn streamlit)"
+      "Bash(python -m pip show numpy xgboost scikit-learn streamlit)",
+      "Bash(python -m pytest tests/test_sts_scope_centralization.py -v)"
     ]
   }
 }

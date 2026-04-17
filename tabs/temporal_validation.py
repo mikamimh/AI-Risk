@@ -43,7 +43,11 @@ from sklearn.metrics import (
 
 from config import AppConfig
 from euroscore import euroscore_from_row
-from risk_data import prepare_master_dataset
+from risk_data import (
+    prepare_master_dataset,
+    normalize_external_dataset,
+    read_external_table_with_fallback,
+)
 from sts_calculator import (
     HAS_WEBSOCKETS as HAS_STS,
     STS_PER_PATIENT_TIMEOUT_S,
@@ -51,6 +55,7 @@ from sts_calculator import (
     classify_sts_eligibility,
 )
 from stats_compare import (
+    calibration_bins_detail,
     calibration_data,
     calibration_intercept_slope,
     class_risk,
@@ -59,8 +64,13 @@ from stats_compare import (
     evaluate_scores_temporal,
     hosmer_lemeshow_test,
     pairwise_score_comparison,
+    recalibrate_intercept_only,
+    recalibrate_isotonic,
+    recalibrate_logistic,
     risk_category_table,
     roc_data,
+    threshold_analysis_table,
+    youden_threshold,
 )
 from model_metadata import (
     build_model_metadata,
@@ -93,6 +103,12 @@ if TYPE_CHECKING:
 # Convenience constants mirroring those app.py used via AppConfig.
 MODEL_VERSION = AppConfig.MODEL_VERSION
 TEMP_DATA_DIR = AppConfig.TEMP_DATA_DIR
+
+_TV_MODEL_COLORS = {
+    "AI Risk": "#1f77b4",
+    "EuroSCORE II": "#ff7f0e",
+    "STS Score": "#2ca02c",
+}
 
 
 def _sts_score_status_caption(execution_log) -> str:
@@ -433,6 +449,107 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                 _tv_c1.metric(tr("Patients", "Pacientes"), _tv_n)
                 _tv_c2.metric(tr("Events", "Eventos"), _tv_events)
                 _tv_c3.metric(tr("Event rate", "Taxa de eventos"), f"{_tv_rate:.1%}")
+
+                # ── 3b. External-dataset normalization summary ──
+                # Only for CSV/Parquet uploads (not multi-sheet XLSX).
+                # Cached per file-content hash so re-renders are instant.
+                _tv_norm_report = None
+                if _tv_ext in {".csv", ".parquet"}:
+                    import hashlib as _tv_hl_norm
+                    _tv_norm_hash = _tv_hl_norm.sha256(_tv_file_bytes).hexdigest()[:16]
+                    _tv_norm_key = f"_tv_norm_{_tv_norm_hash}"
+                    if _tv_norm_key not in st.session_state:
+                        try:
+                            _tv_read_meta = None
+                            if _tv_ext == ".csv":
+                                try:
+                                    _, _tv_read_meta = read_external_table_with_fallback(
+                                        str(_tv_temp_path)
+                                    )
+                                except Exception:
+                                    pass
+                            _, _tv_norm_report = normalize_external_dataset(
+                                _tv_data,
+                                source_name=_tv_file.name,
+                                read_meta=_tv_read_meta,
+                            )
+                            st.session_state[_tv_norm_key] = _tv_norm_report
+                        except Exception:
+                            st.session_state[_tv_norm_key] = None
+                    _tv_norm_report = st.session_state.get(_tv_norm_key)
+
+                if _tv_norm_report is not None:
+                    # ── Unit-conversion visible warning (shown outside expander) ──
+                    _tv_us = _tv_norm_report.unit_summary or {}
+                    _tv_unit_msgs = []
+                    if _tv_us.get("height_converted"):
+                        _tv_unit_msgs.append(tr(
+                            f"Height auto-converted from inches to cm"
+                            f" ({_tv_us['n_height_converted']} row(s),"
+                            f" original median {_tv_us['height_original_median']:.1f} in).",
+                            f"Altura convertida automaticamente de polegadas para cm"
+                            f" ({_tv_us['n_height_converted']} linha(s),"
+                            f" mediana original {_tv_us['height_original_median']:.1f} in).",
+                        ))
+                    if _tv_us.get("weight_converted"):
+                        _tv_unit_msgs.append(tr(
+                            f"Weight auto-converted from lb to kg"
+                            f" ({_tv_us['n_weight_converted']} row(s),"
+                            f" original median {_tv_us['weight_original_median']:.1f} lb).",
+                            f"Peso convertido automaticamente de lb para kg"
+                            f" ({_tv_us['n_weight_converted']} linha(s),"
+                            f" mediana original {_tv_us['weight_original_median']:.1f} lb).",
+                        ))
+                    for _tv_unit_msg in _tv_unit_msgs:
+                        st.warning(
+                            tr("Unit auto-conversion applied: ", "Conversão de unidade automática: ")
+                            + _tv_unit_msg
+                        )
+                    with st.expander(
+                        tr(
+                            "Dataset normalization summary",
+                            "Resumo de normalização do dataset",
+                        ),
+                        expanded=False,
+                    ):
+                        _tv_norm_lines = _tv_norm_report.summary_lines()
+                        if _tv_norm_lines:
+                            for _ln in _tv_norm_lines:
+                                if _ln.startswith("[WARNING]"):
+                                    st.warning(_ln[9:].strip())
+                                else:
+                                    st.markdown(f"- {_ln}")
+                        else:
+                            st.info(tr(
+                                "No normalization actions were applied to this dataset.",
+                                "Nenhuma ação de normalização foi aplicada a este dataset.",
+                            ))
+                        _tv_sr = _tv_norm_report.sts_readiness_summary
+                        if _tv_sr and _tv_sr.get("n_total", 0) > 0:
+                            _tv_sr_parts = [
+                                f"{_tv_sr['n_ready']}/{_tv_sr['n_total']}"
+                                f" {tr('STS-ready', 'STS-prontos')}"
+                            ]
+                            if _tv_sr.get("n_pediatric_excluded", 0):
+                                _tv_sr_parts.append(
+                                    f"{_tv_sr['n_pediatric_excluded']}"
+                                    f" {tr('pediatric excluded', 'pediátricos excluídos')}"
+                                )
+                            if _tv_sr.get("n_scope_excluded", 0):
+                                _tv_sr_parts.append(
+                                    f"{_tv_sr['n_scope_excluded']}"
+                                    f" {tr('scope excluded', 'fora do escopo')}"
+                                )
+                            if _tv_sr.get("n_missing_fields", 0):
+                                _tv_sr_parts.append(
+                                    f"{_tv_sr['n_missing_fields']}"
+                                    f" {tr('missing required fields', 'campos obrigatórios ausentes')}"
+                                )
+                            st.caption(
+                                tr("STS preflight", "Pré-voo STS")
+                                + ": "
+                                + " \u00b7 ".join(_tv_sr_parts)
+                            )
 
                 # ── 4. Chronological check ──
                 from model_metadata import _extract_year_quarter_range
@@ -1509,6 +1626,36 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         "n_low": int(_comp_counts.get("low", 0)),
                     }
 
+                    # ── Extra analytics for interactive graphs ─────────────────────────
+                    _tv_thresholds_fixed = [0.02, 0.05, 0.08, 0.10]
+                    _tv_youden: dict = {}
+                    _tv_thresh_tables: dict = {}
+                    for _sc in _tv_score_cols:
+                        _sub = _tv_data[["morte_30d", _sc]].dropna()
+                        if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
+                            _tv_youden[_sc] = youden_threshold(
+                                _sub["morte_30d"].values, _sub[_sc].values
+                            )
+                            _tv_thresh_tables[_sc] = threshold_analysis_table(
+                                _sub["morte_30d"].values,
+                                _sub[_sc].values,
+                                _tv_thresholds_fixed,
+                            )
+
+                    # ── Common-cohort (STS-available subset) comparison ────────────────
+                    _tv_common_perf = None
+                    _tv_n_common = 0
+                    if "sts_score" in _tv_data.columns and len(_tv_score_cols) >= 2:
+                        _common_cols = ["morte_30d"] + _tv_score_cols
+                        _common_sub = _tv_data[_common_cols].dropna()
+                        _tv_n_common = len(_common_sub)
+                        if _tv_n_common >= 10 and _common_sub["morte_30d"].nunique() >= 2:
+                            _tv_common_perf = evaluate_scores_temporal(
+                                _common_sub, "morte_30d", _tv_score_cols
+                            )
+                            if not _tv_common_perf.empty:
+                                _tv_common_perf["Score"] = _tv_common_perf["Score"].replace(_tv_rename)
+
                     _tv_prepare_info = dict(_tv_prepared.info) if _tv_prepared is not None else {}
                     _tv_progress.progress(1.0, text=tr("Done.", "Concluído."))
                     _tv_phase_slot.empty()
@@ -2372,13 +2519,11 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             )
                             st.dataframe(_tv_rc_display, width="stretch", hide_index=True)
 
-                    # ── 8. Graphs ──
+                    # ── 8. Interactive Graphs ──
                     st.divider()
                     st.markdown(tr("### Graphs", "### Gráficos"))
 
-                    import matplotlib
-                    matplotlib.use("Agg")
-                    import matplotlib.pyplot as plt
+                    import plotly.graph_objects as go
                     from sklearn.metrics import (
                         precision_recall_curve as _pr_curve_fn,
                         average_precision_score as _auprc_fn,
@@ -2387,153 +2532,501 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
 
                     _tv_y = _tv_data["morte_30d"].values
 
+                    def _model_color(name: str) -> str:
+                        return _TV_MODEL_COLORS.get(name, "#636efa")
+
                     # 8.1 ROC curves
-                    _fig_roc, _ax_roc = plt.subplots(figsize=(7, 6))
-                    _ax_roc.plot([0, 1], [0, 1], "k--", lw=0.8, alpha=0.5)
-                    for _sc in _tv_score_cols:
-                        _sub = _tv_data[["morte_30d", _sc]].dropna()
-                        if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
-                            fpr, tpr = roc_data(_sub["morte_30d"].values, _sub[_sc].values)
-                            _auc_val = float(_roc_auc_fn(_sub["morte_30d"].values, _sub[_sc].values))
-                            _ax_roc.plot(fpr, tpr, label=f"{_tv_rename.get(_sc, _sc)} (AUC={_auc_val:.3f})")
-                    _ax_roc.set_xlabel("1 - Specificity (FPR)")
-                    _ax_roc.set_ylabel("Sensitivity (TPR)")
-                    _ax_roc.set_title(tr("ROC Curves — Temporal Validation", "Curvas ROC — Validação Temporal"))
-                    _ax_roc.legend(loc="lower right")
-                    plt.tight_layout()
-                    st.pyplot(_fig_roc)
-                    plt.close(_fig_roc)
+                    with st.expander(tr("ROC Curves", "Curvas ROC"), expanded=True):
+                        _fig_roc = go.Figure()
+                        _fig_roc.add_shape(type="line", x0=0, y0=0, x1=1, y1=1,
+                                           line=dict(dash="dash", color="gray", width=1))
+                        for _sc in _tv_score_cols:
+                            _sub = _tv_data[["morte_30d", _sc]].dropna()
+                            if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
+                                _fpr, _tpr = roc_data(_sub["morte_30d"].values, _sub[_sc].values)
+                                _auc_val = float(_roc_auc_fn(_sub["morte_30d"].values, _sub[_sc].values))
+                                _label = _tv_rename.get(_sc, _sc)
+                                _fig_roc.add_trace(go.Scatter(
+                                    x=_fpr, y=_tpr, mode="lines",
+                                    name=f"{_label} (AUC={_auc_val:.3f})",
+                                    line=dict(color=_model_color(_label), width=2),
+                                ))
+                                # Mark locked threshold
+                                _cls_thr = classification_metrics_at_threshold(
+                                    _sub["morte_30d"].values, _sub[_sc].values, _tv_locked_threshold
+                                )
+                                _fig_roc.add_trace(go.Scatter(
+                                    x=[1 - _cls_thr["Specificity"]], y=[_cls_thr["Sensitivity"]],
+                                    mode="markers",
+                                    marker=dict(symbol="x", size=10, color=_model_color(_label)),
+                                    name=f"{_label} @ {_tv_locked_threshold:.0%}",
+                                    showlegend=False,
+                                    hovertemplate=(
+                                        f"{_label}<br>"
+                                        f"Threshold={_tv_locked_threshold:.0%}<br>"
+                                        f"TPR={_cls_thr['Sensitivity']:.3f}<br>"
+                                        f"FPR={1-_cls_thr['Specificity']:.3f}<extra></extra>"
+                                    ),
+                                ))
+                                # Mark Youden threshold
+                                if _sc in _tv_youden:
+                                    _yt, _ = _tv_youden[_sc]
+                                    _cls_y = classification_metrics_at_threshold(
+                                        _sub["morte_30d"].values, _sub[_sc].values, _yt
+                                    )
+                                    _fig_roc.add_trace(go.Scatter(
+                                        x=[1 - _cls_y["Specificity"]], y=[_cls_y["Sensitivity"]],
+                                        mode="markers",
+                                        marker=dict(symbol="diamond", size=10, color=_model_color(_label)),
+                                        name=f"{_label} Youden",
+                                        showlegend=False,
+                                        hovertemplate=(
+                                            f"{_label}<br>"
+                                            f"Youden threshold={_yt:.3f}<br>"
+                                            f"TPR={_cls_y['Sensitivity']:.3f}<br>"
+                                            f"FPR={1-_cls_y['Specificity']:.3f}<extra></extra>"
+                                        ),
+                                    ))
+                        _fig_roc.update_layout(
+                            xaxis_title="1 − Specificity (FPR)",
+                            yaxis_title=tr("Sensitivity (TPR)", "Sensibilidade (TPR)"),
+                            title=tr("ROC Curves — Temporal Validation", "Curvas ROC — Validação Temporal"),
+                            legend=dict(x=0.6, y=0.05),
+                            height=420,
+                        )
+                        st.plotly_chart(_fig_roc, use_container_width=True)
+                        st.caption(tr(
+                            "× marker = locked threshold; ◆ marker = Youden's J optimal (exploratory).",
+                            "Marcador × = limiar bloqueado; ◆ = ótimo de Youden (exploratório).",
+                        ))
 
                     # 8.2 Precision-Recall curves
-                    _fig_pr, _ax_pr = plt.subplots(figsize=(7, 6))
-                    for _sc in _tv_score_cols:
-                        _sub = _tv_data[["morte_30d", _sc]].dropna()
-                        if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
-                            precision, recall, _ = _pr_curve_fn(_sub["morte_30d"].values, _sub[_sc].values)
-                            _auprc_val = float(_auprc_fn(_sub["morte_30d"].values, _sub[_sc].values))
-                            _ax_pr.plot(recall, precision, label=f"{_tv_rename.get(_sc, _sc)} (AUPRC={_auprc_val:.3f})")
-                    _ax_pr.set_xlabel("Recall (Sensitivity)")
-                    _ax_pr.set_ylabel("Precision (PPV)")
-                    _ax_pr.set_title(tr("Precision-Recall Curves — Temporal Validation", "Curvas Precisão-Recall — Validação Temporal"))
-                    _ax_pr.legend(loc="upper right")
-                    plt.tight_layout()
-                    st.pyplot(_fig_pr)
-                    plt.close(_fig_pr)
+                    with st.expander(tr("Precision-Recall Curves", "Curvas Precisão-Recall"), expanded=False):
+                        _tv_prevalence = float(_tv_data["morte_30d"].mean()) if _tv_n > 0 else 0.0
+                        _fig_pr = go.Figure()
+                        _fig_pr.add_shape(type="line", x0=0, y0=_tv_prevalence, x1=1, y1=_tv_prevalence,
+                                          line=dict(dash="dash", color="gray", width=1))
+                        for _sc in _tv_score_cols:
+                            _sub = _tv_data[["morte_30d", _sc]].dropna()
+                            if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
+                                _prec, _rec, _ = _pr_curve_fn(_sub["morte_30d"].values, _sub[_sc].values)
+                                _auprc_val = float(_auprc_fn(_sub["morte_30d"].values, _sub[_sc].values))
+                                _label = _tv_rename.get(_sc, _sc)
+                                _fig_pr.add_trace(go.Scatter(
+                                    x=_rec, y=_prec, mode="lines",
+                                    name=f"{_label} (AUPRC={_auprc_val:.3f})",
+                                    line=dict(color=_model_color(_label), width=2),
+                                ))
+                        _fig_pr.update_layout(
+                            xaxis_title=tr("Recall (Sensitivity)", "Recall (Sensibilidade)"),
+                            yaxis_title=tr("Precision (PPV)", "Precisão (PPV)"),
+                            title=tr("Precision-Recall Curves — Temporal Validation", "Curvas Precisão-Recall — Validação Temporal"),
+                            height=420,
+                        )
+                        st.plotly_chart(_fig_pr, use_container_width=True)
+                        st.caption(tr(
+                            f"Dashed baseline = prevalence ({_tv_prevalence:.1%}).",
+                            f"Linha tracejada = prevalência ({_tv_prevalence:.1%}).",
+                        ))
 
-                    # 8.3 Calibration curves
-                    _fig_cal, _ax_cal = plt.subplots(figsize=(7, 6))
-                    _ax_cal.plot([0, 1], [0, 1], "k--", lw=0.8, alpha=0.5, label="Perfect calibration")
-                    for _sc in _tv_score_cols:
-                        _sub = _tv_data[["morte_30d", _sc]].dropna()
-                        if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
-                            prob_pred, prob_true = calibration_data(_sub["morte_30d"].values, _sub[_sc].values)
-                            _ax_cal.plot(prob_pred, prob_true, "o-", label=_tv_rename.get(_sc, _sc))
-                    _ax_cal.set_xlabel(tr("Predicted probability", "Probabilidade predita"))
-                    _ax_cal.set_ylabel(tr("Observed frequency", "Frequência observada"))
-                    _ax_cal.set_title(tr("Calibration Curves — Temporal Validation", "Curvas de Calibração — Validação Temporal"))
-                    _ax_cal.legend()
-                    plt.tight_layout()
-                    st.pyplot(_fig_cal)
-                    plt.close(_fig_cal)
+                    # 8.3 Calibration curves — interactive with bin selector and Wilson CI
+                    with st.expander(tr("Calibration Curves", "Curvas de Calibração"), expanded=True):
+                        _cal_n_bins = st.select_slider(
+                            tr("Number of bins", "Número de bins"),
+                            options=[5, 8, 10, 15, 20],
+                            value=10,
+                            key="_tv_cal_bins",
+                        )
+                        _fig_cal = go.Figure()
+                        _fig_cal.add_shape(type="line", x0=0, y0=0, x1=1, y1=1,
+                                           line=dict(dash="dash", color="gray", width=1))
+                        for _sc in _tv_score_cols:
+                            _sub = _tv_data[["morte_30d", _sc]].dropna()
+                            if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
+                                _bins_df = calibration_bins_detail(
+                                    _sub["morte_30d"].values, _sub[_sc].values,
+                                    n_bins=_cal_n_bins, strategy="quantile",
+                                )
+                                _label = _tv_rename.get(_sc, _sc)
+                                _fig_cal.add_trace(go.Scatter(
+                                    x=_bins_df["Mean_Predicted"],
+                                    y=_bins_df["Obs_Frequency"],
+                                    error_y=dict(
+                                        type="data",
+                                        symmetric=False,
+                                        array=(_bins_df["CI_upper"] - _bins_df["Obs_Frequency"]).tolist(),
+                                        arrayminus=(_bins_df["Obs_Frequency"] - _bins_df["CI_lower"]).tolist(),
+                                        color=_model_color(_label),
+                                    ),
+                                    mode="lines+markers",
+                                    name=_label,
+                                    line=dict(color=_model_color(_label), width=2),
+                                    marker=dict(size=7),
+                                    customdata=_bins_df[["N", "CI_lower", "CI_upper"]].values,
+                                    hovertemplate=(
+                                        f"{_label}<br>"
+                                        "Predicted: %{x:.3f}<br>"
+                                        "Observed: %{y:.3f}<br>"
+                                        "N: %{customdata[0]}<br>"
+                                        "CI 95%%: [%{customdata[1]:.3f}, %{customdata[2]:.3f}]<extra></extra>"
+                                    ),
+                                ))
+                        _fig_cal.update_layout(
+                            xaxis_title=tr("Mean predicted probability", "Probabilidade predita média"),
+                            yaxis_title=tr("Observed frequency", "Frequência observada"),
+                            title=tr("Calibration Curves — Temporal Validation", "Curvas de Calibração — Validação Temporal"),
+                            height=420,
+                        )
+                        st.plotly_chart(_fig_cal, use_container_width=True)
+                        st.caption(tr(
+                            "Error bars = Wilson 95% CI per bin. Quantile binning (equal-size bins).",
+                            "Barras de erro = IC 95% de Wilson por bin. Binagem por quantil (bins de tamanho igual).",
+                        ))
 
                     # 8.4 Distribution of predicted probabilities
-                    _fig_dist, _ax_dist = plt.subplots(figsize=(7, 5))
-                    for _sc in _tv_score_cols:
-                        _vals = _tv_data[_sc].dropna().values
-                        if len(_vals) > 0:
-                            _ax_dist.hist(_vals, bins=30, alpha=0.5, label=_tv_rename.get(_sc, _sc), density=True)
-                    _ax_dist.set_xlabel(tr("Predicted probability", "Probabilidade predita"))
-                    _ax_dist.set_ylabel(tr("Density", "Densidade"))
-                    _ax_dist.set_title(tr("Distribution of Predicted Probabilities", "Distribuição das Probabilidades Preditas"))
-                    _ax_dist.legend()
-                    plt.tight_layout()
-                    st.pyplot(_fig_dist)
-                    plt.close(_fig_dist)
+                    with st.expander(tr("Risk Score Distribution", "Distribuição dos Escores de Risco"), expanded=False):
+                        _col_log, _col_outcome = st.columns(2)
+                        _dist_log = _col_log.checkbox(tr("Log scale", "Escala log"), value=False, key="_tv_dist_log")
+                        _dist_by_outcome = _col_outcome.checkbox(
+                            tr("Split by outcome", "Separar por desfecho"), value=False, key="_tv_dist_outcome"
+                        )
+                        _fig_dist = go.Figure()
+                        for _sc in _tv_score_cols:
+                            _label = _tv_rename.get(_sc, _sc)
+                            _color = _model_color(_label)
+                            if _dist_by_outcome:
+                                for _out_val, _out_label in [(0, tr("Alive", "Vivo")), (1, tr("Died", "Óbito"))]:
+                                    _mask_out = _tv_data["morte_30d"] == _out_val
+                                    _vals = _tv_data.loc[_mask_out, _sc].dropna().values
+                                    if len(_vals) > 0:
+                                        _fig_dist.add_trace(go.Histogram(
+                                            x=_vals, name=f"{_label} — {_out_label}",
+                                            opacity=0.6, nbinsx=30,
+                                            histnorm="probability density",
+                                        ))
+                            else:
+                                _vals = _tv_data[_sc].dropna().values
+                                if len(_vals) > 0:
+                                    _fig_dist.add_trace(go.Histogram(
+                                        x=_vals, name=_label, opacity=0.6,
+                                        nbinsx=30, histnorm="probability density",
+                                        marker_color=_color,
+                                    ))
+                        _fig_dist.update_layout(
+                            barmode="overlay",
+                            xaxis_title=tr("Predicted probability", "Probabilidade predita"),
+                            yaxis_title=tr("Density", "Densidade"),
+                            yaxis_type="log" if _dist_log else "linear",
+                            title=tr("Distribution of Predicted Probabilities", "Distribuição das Probabilidades Preditas"),
+                            height=380,
+                        )
+                        st.plotly_chart(_fig_dist, use_container_width=True)
 
                     # 8.5 Decision Curve Analysis
-                    # Build a shared row mask: keep only rows where morte_30d AND
-                    # every score column are non-null.  Per-column dropna() would
-                    # produce arrays of different lengths → shapes mismatch in
-                    # net_benefit.  Using a common mask guarantees y and every
-                    # preds array are aligned to identical rows.
-                    _tv_dca_scores = {}
-                    _dca_mask = _tv_data["morte_30d"].notna()
-                    for _sc in _tv_score_cols:
-                        _dca_mask = _dca_mask & _tv_data[_sc].notna()
-                    _tv_dca_sub = _tv_data.loc[_dca_mask]
-                    for _sc in _tv_score_cols:
-                        if len(_tv_dca_sub) >= 10 and _tv_dca_sub["morte_30d"].nunique() >= 2:
-                            _tv_dca_scores[_tv_rename.get(_sc, _sc)] = _tv_dca_sub[_sc].values
-                    if _tv_dca_scores:
-                        _tv_dca_y = _tv_dca_sub["morte_30d"].values
-                        _tv_thresholds = np.linspace(0.01, 0.30, 30)
-                        _tv_dca_df = decision_curve(_tv_dca_y, _tv_dca_scores, _tv_thresholds)
-
-                        _fig_dca, _ax_dca = plt.subplots(figsize=(8, 6))
-                        for _strat in _tv_dca_df["Strategy"].unique():
-                            _dca_sub = _tv_dca_df[_tv_dca_df["Strategy"] == _strat]
-                            _style = "--" if _strat in ("Treat all", "Treat none") else "-"
-                            _alpha = 0.5 if _strat in ("Treat all", "Treat none") else 1.0
-                            _ax_dca.plot(_dca_sub["Threshold"], _dca_sub["Net Benefit"], _style, alpha=_alpha, label=_strat)
-                        _ax_dca.set_xlabel(tr("Threshold probability", "Probabilidade limiar"))
-                        _ax_dca.set_ylabel(tr("Net benefit", "Benefício líquido"))
-                        _ax_dca.set_title(tr("Decision Curve Analysis — Temporal Validation", "Análise de Curva de Decisão — Validação Temporal"))
-                        _ax_dca.legend(loc="upper right", fontsize=8)
-                        _ax_dca.set_ylim(bottom=-0.05)
-                        plt.tight_layout()
-                        st.pyplot(_fig_dca)
-                        plt.close(_fig_dca)
+                    with st.expander(tr("Decision Curve Analysis (DCA)", "Análise de Curva de Decisão (DCA)"), expanded=False):
+                        _tv_dca_scores = {}
+                        _dca_mask = _tv_data["morte_30d"].notna()
+                        for _sc in _tv_score_cols:
+                            _dca_mask = _dca_mask & _tv_data[_sc].notna()
+                        _tv_dca_sub = _tv_data.loc[_dca_mask]
+                        for _sc in _tv_score_cols:
+                            if len(_tv_dca_sub) >= 10 and _tv_dca_sub["morte_30d"].nunique() >= 2:
+                                _tv_dca_scores[_tv_rename.get(_sc, _sc)] = _tv_dca_sub[_sc].values
+                        if _tv_dca_scores:
+                            _tv_dca_y = _tv_dca_sub["morte_30d"].values
+                            _tv_dca_thresholds = np.linspace(0.01, 0.30, 60)
+                            _tv_dca_df = decision_curve(_tv_dca_y, _tv_dca_scores, _tv_dca_thresholds)
+                            _fig_dca = go.Figure()
+                            for _strat in _tv_dca_df["Strategy"].unique():
+                                _dca_s = _tv_dca_df[_tv_dca_df["Strategy"] == _strat]
+                                _is_ref = _strat in ("Treat all", "Treat none")
+                                _fig_dca.add_trace(go.Scatter(
+                                    x=_dca_s["Threshold"], y=_dca_s["Net Benefit"],
+                                    mode="lines",
+                                    name=_strat,
+                                    line=dict(
+                                        dash="dot" if _is_ref else "solid",
+                                        color=_model_color(_strat) if not _is_ref else ("gray" if _strat == "Treat none" else "black"),
+                                        width=1.5 if _is_ref else 2.5,
+                                    ),
+                                    opacity=0.6 if _is_ref else 1.0,
+                                ))
+                            # Threshold markers for 2%, 5%, 8%, 10%
+                            for _t_mark in [0.02, 0.05, 0.08, 0.10]:
+                                _fig_dca.add_vline(
+                                    x=_t_mark, line_dash="dash", line_color="rgba(100,100,100,0.4)",
+                                    annotation_text=f"{_t_mark:.0%}",
+                                    annotation_position="top",
+                                )
+                            _fig_dca.update_layout(
+                                xaxis_title=tr("Threshold probability", "Probabilidade limiar"),
+                                yaxis_title=tr("Net benefit", "Benefício líquido"),
+                                title=tr("Decision Curve Analysis — Temporal Validation", "Análise de Curva de Decisão — Validação Temporal"),
+                                yaxis=dict(range=[-0.05, None]),
+                                height=420,
+                            )
+                            st.plotly_chart(_fig_dca, use_container_width=True)
+                        else:
+                            st.info(tr("Insufficient data for DCA.", "Dados insuficientes para DCA."))
 
                     # 8.6 Observed vs Predicted by risk decile
-                    _fig_decile, _ax_decile = plt.subplots(figsize=(7, 5))
-                    _has_decile = False
-                    for _sc_i, _sc in enumerate(_tv_score_cols):
-                        _sub = _tv_data[["morte_30d", _sc]].dropna()
-                        if len(_sub) >= 20:
-                            _sub = _sub.copy()
-                            try:
-                                _sub["_decile"] = pd.qcut(_sub[_sc], q=10, labels=False, duplicates="drop")
-                            except ValueError:
-                                _sub["_decile"] = pd.cut(_sub[_sc], bins=10, labels=False, duplicates="drop")
-                            _grp = _sub.groupby("_decile", observed=True).agg(
-                                predicted=(_sc, "mean"),
-                                observed=("morte_30d", "mean"),
-                            ).reset_index()
-                            _offset = (_sc_i - 1) * 0.003
-                            _ax_decile.scatter(_grp["predicted"] + _offset, _grp["observed"], label=_tv_rename.get(_sc, _sc), s=40, zorder=3)
-                            _has_decile = True
-                    if _has_decile:
-                        _ax_decile.plot([0, max(0.3, _ax_decile.get_xlim()[1])], [0, max(0.3, _ax_decile.get_xlim()[1])], "k--", lw=0.8, alpha=0.5)
-                        _ax_decile.set_xlabel(tr("Mean predicted probability", "Probabilidade predita média"))
-                        _ax_decile.set_ylabel(tr("Observed mortality", "Mortalidade observada"))
-                        _ax_decile.set_title(tr("Observed vs Predicted by Decile", "Observado vs Predito por Decil"))
-                        _ax_decile.legend()
-                        plt.tight_layout()
-                        st.pyplot(_fig_decile)
-                    plt.close(_fig_decile)
+                    with st.expander(tr("Observed vs Predicted by Decile", "Observado vs Predito por Decil"), expanded=False):
+                        _fig_decile = go.Figure()
+                        _fig_decile.add_shape(type="line", x0=0, y0=0, x1=0.5, y1=0.5,
+                                              line=dict(dash="dash", color="gray", width=1))
+                        _has_decile = False
+                        for _sc in _tv_score_cols:
+                            _sub = _tv_data[["morte_30d", _sc]].dropna()
+                            if len(_sub) >= 20:
+                                _sub = _sub.copy()
+                                try:
+                                    _sub["_decile"] = pd.qcut(_sub[_sc], q=10, labels=False, duplicates="drop")
+                                except ValueError:
+                                    _sub["_decile"] = pd.cut(_sub[_sc], bins=10, labels=False, duplicates="drop")
+                                _grp = _sub.groupby("_decile", observed=True).agg(
+                                    predicted=(_sc, "mean"),
+                                    observed=("morte_30d", "mean"),
+                                    n=(_sc, "count"),
+                                ).reset_index()
+                                _label = _tv_rename.get(_sc, _sc)
+                                _fig_decile.add_trace(go.Scatter(
+                                    x=_grp["predicted"], y=_grp["observed"],
+                                    mode="markers",
+                                    name=_label,
+                                    marker=dict(color=_model_color(_label), size=10),
+                                    customdata=_grp["n"].values,
+                                    hovertemplate=(
+                                        f"{_label}<br>"
+                                        "Mean pred: %{x:.3f}<br>"
+                                        "Observed: %{y:.3f}<br>"
+                                        "N: %{customdata}<extra></extra>"
+                                    ),
+                                ))
+                                _has_decile = True
+                        if _has_decile:
+                            _fig_decile.update_layout(
+                                xaxis_title=tr("Mean predicted probability", "Probabilidade predita média"),
+                                yaxis_title=tr("Observed mortality", "Mortalidade observada"),
+                                title=tr("Observed vs Predicted by Decile", "Observado vs Predito por Decil"),
+                                height=400,
+                            )
+                            st.plotly_chart(_fig_decile, use_container_width=True)
+                        else:
+                            st.info(tr("At least 20 rows required per score.", "Mínimo de 20 linhas por escore necessárias."))
 
-                    # 8.7 Confusion matrix at locked threshold
-                    from stats_compare import classification_metrics_at_threshold
-                    _fig_cm, _axes_cm = plt.subplots(1, len(_tv_score_cols), figsize=(5 * len(_tv_score_cols), 4))
-                    if len(_tv_score_cols) == 1:
-                        _axes_cm = [_axes_cm]
-                    for _ax_i, _sc in enumerate(_tv_score_cols):
-                        _sub = _tv_data[["morte_30d", _sc]].dropna()
-                        if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
-                            _cls = classification_metrics_at_threshold(_sub["morte_30d"].values, _sub[_sc].values, _tv_locked_threshold)
-                            _cm = np.array([[_cls["TN"], _cls["FP"]], [_cls["FN"], _cls["TP"]]])
-                            _ax = _axes_cm[_ax_i]
-                            _im = _ax.imshow(_cm, cmap="Blues", interpolation="nearest")
-                            for (_r, _cc), _val in np.ndenumerate(_cm):
-                                _ax.text(_cc, _r, str(_val), ha="center", va="center", fontsize=14, fontweight="bold")
-                            _ax.set_xticks([0, 1])
-                            _ax.set_xticklabels([tr("Predicted -", "Predito -"), tr("Predicted +", "Predito +")])
-                            _ax.set_yticks([0, 1])
-                            _ax.set_yticklabels([tr("Actual -", "Real -"), tr("Actual +", "Real +")])
-                            _ax.set_title(f"{_tv_rename.get(_sc, _sc)}\n(threshold={_tv_locked_threshold:.0%})")
-                    plt.tight_layout()
-                    st.pyplot(_fig_cm)
-                    plt.close(_fig_cm)
+                    # 8.7 Confusion matrices at locked threshold (Plotly heatmaps)
+                    with st.expander(
+                        tr(f"Confusion Matrices (threshold={_tv_locked_threshold:.0%})",
+                           f"Matrizes de Confusão (limiar={_tv_locked_threshold:.0%})"),
+                        expanded=False,
+                    ):
+                        _cm_cols = st.columns(max(1, len(_tv_score_cols)))
+                        for _ax_i, _sc in enumerate(_tv_score_cols):
+                            _sub = _tv_data[["morte_30d", _sc]].dropna()
+                            if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
+                                _cls = classification_metrics_at_threshold(
+                                    _sub["morte_30d"].values, _sub[_sc].values, _tv_locked_threshold
+                                )
+                                _z = [[_cls["TN"], _cls["FP"]], [_cls["FN"], _cls["TP"]]]
+                                _x_labels = [tr("Predicted −", "Predito −"), tr("Predicted +", "Predito +")]
+                                _y_labels = [tr("Actual −", "Real −"), tr("Actual +", "Real +")]
+                                _label = _tv_rename.get(_sc, _sc)
+                                _fig_cm_i = go.Figure(go.Heatmap(
+                                    z=_z, x=_x_labels, y=_y_labels,
+                                    colorscale="Blues", showscale=False,
+                                    text=[[str(v) for v in row] for row in _z],
+                                    texttemplate="%{text}",
+                                    textfont=dict(size=18),
+                                ))
+                                _fig_cm_i.update_layout(
+                                    title=f"{_label} @ {_tv_locked_threshold:.0%}",
+                                    height=280, margin=dict(l=50, r=20, t=50, b=40),
+                                )
+                                with _cm_cols[_ax_i]:
+                                    st.plotly_chart(_fig_cm_i, use_container_width=True)
+
+                    # ── 9. Threshold Analysis ──
+                    st.divider()
+                    st.markdown(tr("### Threshold Analysis", "### Análise de Limiar"))
+                    st.caption(tr(
+                        "Fixed thresholds: 2%, 5%, 8%, 10%. "
+                        "Youden's J optimal threshold is data-driven and **exploratory** — "
+                        "do not use it as the operative locked threshold.",
+                        "Limiares fixos: 2%, 5%, 8%, 10%. "
+                        "O limiar ótimo de Youden é orientado pelos dados e **exploratório** — "
+                        "não deve ser usado como limiar operacional bloqueado.",
+                    ))
+                    for _sc in _tv_score_cols:
+                        if _sc in _tv_thresh_tables:
+                            _label = _tv_rename.get(_sc, _sc)
+                            with st.expander(f"{_label} — {tr('threshold sweep', 'varredura de limiar')}", expanded=False):
+                                _tbl = _tv_thresh_tables[_sc].copy()
+                                _tbl["Threshold"] = _tbl["Threshold"].map(lambda v: f"{v:.0%}")
+                                _tbl_disp = _tbl.rename(columns={
+                                    "Sensitivity": tr("Sensitivity", "Sensibilidade"),
+                                    "Specificity": tr("Specificity", "Especificidade"),
+                                    "PPV": "PPV",
+                                    "NPV": "NPV",
+                                    "N_Flagged": tr("N Flagged", "N Sinalizados"),
+                                    "Positives_per_1000": tr("Per 1000", "Por 1000"),
+                                    "Flag_Rate_pct": tr("Flag Rate %", "Taxa sinalizados %"),
+                                })
+                                st.dataframe(_tbl_disp, hide_index=True)
+                                if _sc in _tv_youden:
+                                    _yt, _yj = _tv_youden[_sc]
+                                    st.info(tr(
+                                        f"Youden's J optimum (exploratory): threshold = {_yt:.3f} → J = {_yj:.3f}",
+                                        f"Ótimo de Youden (exploratório): limiar = {_yt:.3f} → J = {_yj:.3f}",
+                                    ))
+                                # Sens/Spec sweep chart
+                                _full_thr_vals = np.linspace(0.01, 0.50, 100)
+                                _sub2 = _tv_data[["morte_30d", _sc]].dropna()
+                                if len(_sub2) >= 10 and _sub2["morte_30d"].nunique() >= 2:
+                                    _sweep_tbl = threshold_analysis_table(
+                                        _sub2["morte_30d"].values, _sub2[_sc].values,
+                                        list(_full_thr_vals),
+                                    )
+                                    _fig_sweep = go.Figure()
+                                    _fig_sweep.add_trace(go.Scatter(
+                                        x=_sweep_tbl["Threshold"], y=_sweep_tbl["Sensitivity"],
+                                        mode="lines", name=tr("Sensitivity", "Sensibilidade"),
+                                        line=dict(color="#1f77b4", width=2),
+                                    ))
+                                    _fig_sweep.add_trace(go.Scatter(
+                                        x=_sweep_tbl["Threshold"], y=_sweep_tbl["Specificity"],
+                                        mode="lines", name=tr("Specificity", "Especificidade"),
+                                        line=dict(color="#ff7f0e", width=2),
+                                    ))
+                                    _fig_sweep.add_vline(
+                                        x=_tv_locked_threshold, line_dash="dash", line_color="gray",
+                                        annotation_text=tr(f"Locked {_tv_locked_threshold:.0%}", f"Bloqueado {_tv_locked_threshold:.0%}"),
+                                        annotation_position="top right",
+                                    )
+                                    _fig_sweep.update_layout(
+                                        xaxis_title=tr("Threshold", "Limiar"),
+                                        yaxis_title=tr("Metric value", "Valor da métrica"),
+                                        title=f"{_label} — {tr('Sensitivity / Specificity Trade-off', 'Trade-off Sensibilidade / Especificidade')}",
+                                        height=320,
+                                    )
+                                    st.plotly_chart(_fig_sweep, use_container_width=True)
+
+                    # ── 10. Common Cohort Comparison ──
+                    if _tv_common_perf is not None and not _tv_common_perf.empty:
+                        st.divider()
+                        with st.expander(
+                            tr(
+                                f"Common Cohort — All models on STS-available subset (n={_tv_n_common})",
+                                f"Coorte Comum — Todos os modelos no subconjunto com STS disponível (n={_tv_n_common})",
+                            ),
+                            expanded=False,
+                        ):
+                            st.caption(tr(
+                                "Metrics below use only rows where **all three** models "
+                                "(AI Risk, EuroSCORE II, and STS Score) have non-missing predictions. "
+                                "This 'common cohort' is strictly the STS-available subset; "
+                                "it will typically be smaller than the full validation cohort. "
+                                "Use this to compare all three scores on identical patients.",
+                                "As métricas abaixo usam apenas as linhas em que os **três** modelos "
+                                "(AI Risk, EuroSCORE II e STS Score) têm predições disponíveis. "
+                                "Essa 'coorte comum' corresponde ao subconjunto com STS disponível; "
+                                "tende a ser menor que a coorte completa de validação. "
+                                "Use para comparar os três escores nos mesmos pacientes.",
+                            ))
+                            st.dataframe(_tv_common_perf, hide_index=True)
+
+                    # ── 11. Post-hoc Recalibration (exploratory) ──
+                    st.divider()
+                    with st.expander(
+                        tr(
+                            "Post-hoc Recalibration — Exploratory analysis only",
+                            "Recalibração Pós-hoc — Apenas análise exploratória",
+                        ),
+                        expanded=False,
+                    ):
+                        st.warning(tr(
+                            "**Exploratory only.** Recalibration is applied after-the-fact to the "
+                            "validation cohort. Results are not clinically validated and must **not** "
+                            "be used to report model performance or guide clinical decisions. "
+                            "The locked model and threshold remain unchanged.",
+                            "**Apenas exploratório.** A recalibração é aplicada post-hoc à "
+                            "coorte de validação. Os resultados não foram validados clinicamente "
+                            "e **não devem** ser usados para reportar desempenho do modelo ou "
+                            "orientar decisões clínicas. O modelo bloqueado e o limiar permanecem inalterados.",
+                        ))
+                        _recal_score_opts = [_tv_rename.get(_sc, _sc) for _sc in _tv_score_cols]
+                        _recal_score_sel = st.selectbox(
+                            tr("Score to recalibrate", "Escore para recalibrar"),
+                            _recal_score_opts,
+                            key="_tv_recal_score",
+                        )
+                        _recal_method = st.radio(
+                            tr("Method", "Método"),
+                            [
+                                tr("Intercept-only (slope=1)", "Apenas intercepto (slope=1)"),
+                                tr("Intercept + slope (logistic)", "Intercepto + slope (logístico)"),
+                                tr("Isotonic (non-parametric)", "Isotônica (não-paramétrica)"),
+                            ],
+                            horizontal=True,
+                            key="_tv_recal_method",
+                        )
+                        _recal_sc_raw = next(
+                            (_sc for _sc in _tv_score_cols if _tv_rename.get(_sc, _sc) == _recal_score_sel),
+                            _tv_score_cols[0] if _tv_score_cols else None,
+                        )
+                        if _recal_sc_raw is not None:
+                            _rsub = _tv_data[["morte_30d", _recal_sc_raw]].dropna()
+                            if len(_rsub) >= 10 and _rsub["morte_30d"].nunique() >= 2:
+                                _ry = _rsub["morte_30d"].values
+                                _rp = _rsub[_recal_sc_raw].values
+                                if "slope=1" in _recal_method or "slope=1)" in _recal_method:
+                                    _rcal = recalibrate_intercept_only(_ry, _rp)
+                                elif "logistic" in _recal_method or "logístico" in _recal_method:
+                                    _rcal = recalibrate_logistic(_ry, _rp)
+                                else:
+                                    _rcal = recalibrate_isotonic(_ry, _rp)
+                                _rp_new = _rcal["recalibrated_probs"]
+                                # Before/after summary table
+                                _rcal_summary = {
+                                    tr("Metric", "Métrica"): [
+                                        tr("Brier score", "Escore de Brier"),
+                                        tr("Calibration intercept", "Intercepto de calibração"),
+                                        tr("Calibration slope", "Inclinação de calibração"),
+                                    ],
+                                    tr("Before", "Antes"): [
+                                        f"{_rcal['brier_before']:.4f}",
+                                        f"{_rcal.get('cal_intercept_before', float('nan')):.3f}",
+                                        f"{_rcal.get('cal_slope_before', float('nan')):.3f}",
+                                    ],
+                                    tr("After", "Depois"): [
+                                        f"{_rcal['brier_after']:.4f}",
+                                        f"{_rcal.get('cal_intercept_after', float('nan')):.3f}",
+                                        f"{_rcal.get('cal_slope_after', float('nan')):.3f}",
+                                    ],
+                                }
+                                st.dataframe(pd.DataFrame(_rcal_summary), hide_index=True)
+                                # Before/after calibration plot
+                                _fig_rcal = go.Figure()
+                                _fig_rcal.add_shape(type="line", x0=0, y0=0, x1=1, y1=1,
+                                                    line=dict(dash="dash", color="gray", width=1))
+                                for _rp_vals, _rp_name, _rp_color in [
+                                    (_rp, tr("Original", "Original"), "#aaaaaa"),
+                                    (_rp_new, tr("Recalibrated", "Recalibrado"), "#1f77b4"),
+                                ]:
+                                    _rbins = calibration_bins_detail(_ry, _rp_vals, n_bins=10, strategy="quantile")
+                                    _fig_rcal.add_trace(go.Scatter(
+                                        x=_rbins["Mean_Predicted"], y=_rbins["Obs_Frequency"],
+                                        mode="lines+markers", name=_rp_name,
+                                        line=dict(color=_rp_color, width=2),
+                                    ))
+                                _fig_rcal.update_layout(
+                                    xaxis_title=tr("Mean predicted probability", "Probabilidade predita média"),
+                                    yaxis_title=tr("Observed frequency", "Frequência observada"),
+                                    title=tr("Calibration: Before vs After Recalibration", "Calibração: Antes vs Depois da Recalibração"),
+                                    height=350,
+                                )
+                                st.plotly_chart(_fig_rcal, use_container_width=True)
+                            else:
+                                st.info(tr("Insufficient data for recalibration.", "Dados insuficientes para recalibração."))
 
                     # 7.5 Case-level predictions table
                     st.divider()
@@ -2607,6 +3100,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _tv_cohort_summary, _tv_perf, _tv_pairwise, _tv_calib_df,
                         _tv_risk_cat, _tv_meta, _tv_locked_threshold, language,
                         sts_availability=_tv_sts_availability_note,
+                        normalization_report=_tv_norm_report,
                     )
 
                     # 9.1 XLSX
@@ -2632,6 +3126,11 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         # Case-level predictions sheet
                         _tv_case_export = _tv_data[_tv_export_case_cols].copy()
                         _tv_case_export.to_excel(_tv_writer, sheet_name="case_level_predictions", index=False)
+                        # Normalization summary sheet (only when pipeline was run)
+                        if _tv_norm_report is not None:
+                            pd.DataFrame(_tv_norm_report.to_export_rows()).to_excel(
+                                _tv_writer, sheet_name="Normalization_Summary", index=False
+                            )
                     _tv_xlsx_bytes = _tv_xlsx_buf.getvalue()
 
                     # 9.2 CSV

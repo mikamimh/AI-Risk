@@ -143,9 +143,10 @@ class TestClassifyStsEligibility:
     ]
 
     # hard exclusions — not_supported
-    # Keywords must be substrings present in _STS_UNSUPPORTED_KEYWORDS:
+    # Keywords must be substrings present in STS_UNSUPPORTED_SURGERY_KEYWORDS:
     # DISSECTION, ANEURISM, ANEURYSM, BENTALL, AORTIC ROOT REPLACEMENT,
-    # AORTIC ROOT REPAIR, AORTIC REPAIR, AORTIC RECONSTRUCTION, AORTA REPAIR
+    # AORTIC ROOT REPAIR, AORTIC REPAIR, AORTIC RECONSTRUCTION, AORTA REPAIR,
+    # ROSS, HOMOGRAFT, TRANSPLANT
     NOT_SUPPORTED_ROWS = [
         {"surgery_pre": "AORTIC DISSECTION REPAIR"},   # contains DISSECTION
         {"surgery_pre": "AORTIC ANEURYSM REPAIR"},     # contains ANEURYSM

@@ -86,6 +86,8 @@ def build_sts_availability_summary(
         f"Cobertura: {coverage_pct:.1f}% das linhas elegíveis ({n_score}/{n_eligible}).",
     )
 
+    comparator_scope_note = ""  # populated for PARTIAL status only
+
     if status == STS_AVAILABILITY_COMPLETE:
         status_label = _tr("COMPLETE", "COMPLETA")
         banner_text = ""
@@ -128,9 +130,20 @@ def build_sts_availability_summary(
             f"STS rows below reflect only the subset with usable final STS output ({n_score}/{n_eligible} eligible).",
             f"As linhas de STS abaixo refletem apenas o subconjunto com saída final STS utilizável ({n_score}/{n_eligible} elegíveis).",
         )
+        comparator_scope_note = _tr(
+            f"Comparability note: STS results are subset-only ({n_score}/{n_eligible} eligible rows"
+            f" with usable final STS scores; {coverage_pct:.1f}% coverage). "
+            "AI Risk model and EuroSCORE II metrics are computed at full cohort level and"
+            " are not affected by STS subset coverage.",
+            f"Nota de comparabilidade: Os resultados do STS são apenas do subconjunto"
+            f" ({n_score}/{n_eligible} linhas elegíveis com escore STS final utilizável;"
+            f" cobertura de {coverage_pct:.1f}%). "
+            "As métricas do modelo de AI Risk e do EuroSCORE II são calculadas no nível da coorte"
+            " completa e não são afetadas pela cobertura do subconjunto STS.",
+        )
         score_label = _tr(
-            f"STS Score (available for {n_score}/{n_eligible} eligible)",
-            f"STS Score (disponível para {n_score}/{n_eligible} elegíveis)",
+            f"STS Score (subset: {n_score}/{n_eligible} eligible)",
+            f"STS Score (subconjunto: {n_score}/{n_eligible} elegíveis)",
         )
     else:
         status_label = _tr("UNAVAILABLE", "INDISPONÍVEL")
@@ -177,6 +190,7 @@ def build_sts_availability_summary(
         "subset_note": subset_note,
         "suppressed_note": suppressed_note,
         "risk_category_note": risk_category_note,
+        "comparator_scope_note": comparator_scope_note,
         "score_label": score_label,
     }
 
@@ -510,6 +524,7 @@ def build_temporal_validation_summary(
     threshold: float,
     language: str = "English",
     sts_availability: Optional[dict] = None,
+    normalization_report=None,
 ) -> str:
     """Build Markdown summary for temporal validation results.
 
@@ -646,6 +661,88 @@ def build_temporal_validation_summary(
         "",
     ]
 
+    # ── Dataset normalization summary (external CSV/Parquet only) ─────────
+    if normalization_report is not None:
+        _nr = normalization_report
+        lines.append(f"## {_tr('Dataset Normalization', 'Normalização do Dataset')}")
+        lines.append("")
+        _rm = getattr(_nr, "read_meta", None)
+        if _rm is not None:
+            lines.append(f"| {_tr('Property', 'Propriedade')} | {_tr('Value', 'Valor')} |")
+            lines.append("|:--|:--|")
+            _src = getattr(_nr, "source_name", None) or "N/A"
+            lines.append(f"| {_tr('Source', 'Fonte')} | {_src} |")
+            lines.append(f"| {_tr('Encoding', 'Codificação')} | {_rm.encoding_used} |")
+            lines.append(f"| {_tr('Delimiter', 'Delimitador')} | {_rm.delimiter!r} |")
+            lines.append(f"| {_tr('Rows loaded', 'Linhas carregadas')} | {_rm.rows_loaded} |")
+            lines.append(
+                f"| {_tr('Columns loaded', 'Colunas carregadas')} | {_rm.columns_loaded} |"
+            )
+            lines.append("")
+        _u = getattr(_nr, "unit_summary", {})
+        if _u.get("height_converted") or _u.get("weight_converted"):
+            lines.append(
+                f"**{_tr('Unit conversions applied', 'Conversões de unidade aplicadas')}:**"
+            )
+            if _u.get("height_converted"):
+                lines.append(
+                    f"- {_tr('Height', 'Altura')}: {_u['n_height_converted']}"
+                    f" {_tr('values converted from inches to cm', 'valores convertidos de polegadas para cm')}"
+                    f" ({_tr('original median', 'mediana original')}: {_u['height_original_median']} in)"
+                )
+            if _u.get("weight_converted"):
+                lines.append(
+                    f"- {_tr('Weight', 'Peso')}: {_u['n_weight_converted']}"
+                    f" {_tr('values converted from lb to kg', 'valores convertidos de lb para kg')}"
+                    f" ({_tr('original median', 'mediana original')}: {_u['weight_original_median']} lb)"
+                )
+            lines.append("")
+            lines.append(
+                f"> **{_tr('Note', 'Nota')}:** "
+                + _tr(
+                    "Anthropometric units were automatically detected and converted before"
+                    " any model inference. Original values are not stored — verify source"
+                    " data if unit detection is unexpected.",
+                    "Unidades antropométricas foram detectadas e convertidas automaticamente"
+                    " antes de qualquer inferência do modelo. Os valores originais não são"
+                    " armazenados — verifique os dados de origem se a detecção de unidade"
+                    " for inesperada.",
+                )
+            )
+            lines.append("")
+        _sc = getattr(_nr, "scope_summary", {})
+        _sr = getattr(_nr, "sts_readiness_summary", {})
+        if _sc or _sr:
+            lines.append(
+                f"**{_tr('STS scope and preflight readiness', 'Escopo e prontidão pré-voo STS')}:**"
+            )
+            if _sc.get("n_pediatric", 0) > 0:
+                lines.append(
+                    f"- {_sc['n_pediatric']}"
+                    f" {_tr('pediatric patient(s) (age < 18) excluded from adult STS scope', 'paciente(s) pediátrico(s) (idade < 18) excluídos do escopo STS adulto')}"
+                )
+            if _sc.get("n_sts_scope_excluded", 0) > 0:
+                lines.append(
+                    f"- {_sc['n_sts_scope_excluded']}"
+                    f" {_tr('surgery(ies) outside STS ACSD scope', 'cirurgia(s) fora do escopo STS ACSD')}"
+                    f" ({_tr('dissection / aneurysm / Bentall / etc.', 'dissecção / aneurisma / Bentall / etc.')})"
+                )
+            if _sr:
+                lines.append(
+                    f"- {_tr('STS-ready rows after normalization', 'Linhas STS-prontas após normalização')}:"
+                    f" {_sr.get('n_ready', 0)}/{_sr.get('n_total', 0)}"
+                    f" ({_sr.get('n_ready_pct', 0):.1f}%)"
+                )
+            lines.append("")
+        _nw = getattr(_nr, "warnings", [])
+        if _nw:
+            lines.append(
+                f"**{_tr('Normalization warnings', 'Avisos de normalização')}:**"
+            )
+            for _w in _nw:
+                lines.append(f"- {_w}")
+            lines.append("")
+
     # ── Cohort summary table ──────────────────────────────────────────────
     if sts_status in STS_AVAILABILITY_STATES:
         lines.append(
@@ -653,6 +750,9 @@ def build_temporal_validation_summary(
             f"{sts_note.get('report_note', '')}"
         )
         lines.append("")
+        if sts_note.get("comparator_scope_note"):
+            lines.append(f"> {sts_note['comparator_scope_note']}")
+            lines.append("")
 
     lines.append(f"## {_tr('Cohort Summary', 'Resumo da Coorte')}")
     lines.append("")

@@ -88,7 +88,10 @@ STS_CONSECUTIVE_FAILURE_BACKOFF_MAX_S: int = 30
 
 # Procedures NOT covered by the STS ACSD web calculator.
 # Keywords are matched (substring, upper-case) against surgery_pre / Surgery.
-_STS_UNSUPPORTED_KEYWORDS: frozenset = frozenset([
+# This is the single canonical source of STS scope exclusion keywords — used by
+# both classify_sts_eligibility (runtime gate) and the external normalization
+# pipeline (apply_external_scope_rules via risk_data.py).
+STS_UNSUPPORTED_SURGERY_KEYWORDS: frozenset = frozenset([
     "DISSECTION",
     "ANEURISM",
     "ANEURYSM",
@@ -98,6 +101,9 @@ _STS_UNSUPPORTED_KEYWORDS: frozenset = frozenset([
     "AORTIC REPAIR",
     "AORTIC RECONSTRUCTION",
     "AORTA REPAIR",
+    "ROSS",
+    "HOMOGRAFT",
+    "TRANSPLANT",
 ])
 
 # Surgical-priority values that cannot be safely mapped to an STS urgency field.
@@ -384,11 +390,18 @@ def classify_sts_eligibility(row: dict) -> tuple:
             string, or unmappable priority).  The caller may choose to attempt
             the query or skip conservatively.
     """
+    # --- pediatric exclusion (flag set by apply_external_scope_rules) ---
+    if row.get("is_pediatric", False):
+        return (
+            "not_supported",
+            "pediatric patient (age < 18) \u2014 outside adult STS ACSD scope",
+        )
+
     surgery = str(row.get("surgery_pre") or row.get("Surgery") or "").strip().upper()
     priority = str(row.get("surgical_priority") or row.get("Surgical Priority") or "").strip().upper()
 
     # --- hard exclusions ---
-    for kw in _STS_UNSUPPORTED_KEYWORDS:
+    for kw in STS_UNSUPPORTED_SURGERY_KEYWORDS:
         if kw in surgery:
             return ("not_supported", f"procedure outside STS ACSD scope: {surgery!r}")
 

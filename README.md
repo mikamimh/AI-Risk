@@ -211,6 +211,29 @@ All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converg
 - **Column exclusion** — columns with **>95% missing** are dropped before modelling so that degenerate columns never reach the preprocessor or the leaderboard.
 - **Patient matching** — patient name and procedure date are used exclusively for cross-sheet matching and are never passed to the model as predictors.
 
+### External-dataset normalization pipeline
+
+When an external CSV or Parquet file is ingested (e.g. for Temporal Validation), a dedicated preprocessing pipeline runs **before** the data reaches `prepare_master_dataset`, the STS workflow, or temporal validation. Every action is logged in a structured `ExternalNormalizationReport`; nothing is changed silently.
+
+| Stage | Function | What it does |
+|:--|:--|:--|
+| 1 — Encoding | `read_external_table_with_fallback` | Tries encodings in order: `utf-8-sig` → `utf-8` → `cp1252` → `latin-1`. Records the encoding used, detected delimiter, and shape. |
+| 2 — Column aliases | `canonicalize_external_columns` | Strips whitespace, collapses internal spaces, and maps known snake_case aliases to canonical display names (e.g. `age_years` → `Age (years)`). |
+| 3 — Token variants | `normalize_external_tokens` | Maps linguistic Yes/No variants to canonical English: `Sim` → `Yes`, `Não`/`nao` → `No`, `oui` → `Yes`, `nein` → `No`, etc. Applied only to columns where ≥ 50% of values look binary. |
+| 4 — Anthropometric units | `normalize_external_units` | Detects probable unit mismatches: height median < 100 → suspect inches → convert × 2.54; weight median > 140 and max > 250 → suspect lbs → convert ÷ 2.205. An optional BSA cross-check flags divergences > 20%. |
+| 5 — Clinical scope | `apply_external_scope_rules` | Flags `is_pediatric = True` for age < 18 (outside adult STS ACSD scope). Cleans surgery text and sets `sts_scope_excluded = True` for procedures containing unsupported keywords (dissection / aneurysm / Bentall / Ross / transplant / homograft). |
+| 6 — STS preflight | `build_sts_readiness_flags` | Per-row: checks pediatric flag, scope exclusion, and presence/validity of minimum required STS fields (age, sex, surgery, surgical priority). Sets `sts_input_ready`, `sts_missing_required_fields`, `sts_readiness_reason`. |
+| 7 — Orchestration | `normalize_external_dataset` | Runs all stages in order; returns `(normalized_df, ExternalNormalizationReport)`. |
+
+**What is auto-corrected (with logging):** encoding fallback, column alias mapping, linguistic token variants, anthropometric unit conversion.
+
+**What is flagged only (not auto-corrected):** pediatric patients, out-of-scope STS procedures, missing/invalid required STS fields.
+
+The normalization summary is surfaced in:
+- A collapsible **"Dataset normalization summary"** expander in the Temporal Validation tab
+- The **PDF/Markdown report** (a "Dataset Normalization" section with encoding, unit conversions, scope exclusions, and STS-ready row count)
+- The `ExternalNormalizationReport.summary_lines()` method for programmatic access
+
 ## Clinical notes
 
 - Patient name and procedure date are used only for internal matching across sheets — never as predictors

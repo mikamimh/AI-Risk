@@ -18,8 +18,10 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize_scalar
 from scipy.stats import chi2, norm
 from sklearn.calibration import calibration_curve
+from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score, roc_curve
 
@@ -640,3 +642,230 @@ def risk_category_table(
     if not rows:
         return pd.DataFrame(columns=["Score", "Category", "n", "%", "Observed_mortality"])
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Youden's J optimal threshold
+# ---------------------------------------------------------------------------
+
+def youden_threshold(y: np.ndarray, p: np.ndarray) -> Tuple[float, float]:
+    """Find optimal threshold by Youden's J = Sensitivity + Specificity − 1.
+
+    Returns ``(optimal_threshold, j_score)``.
+
+    Important: computed on the evaluation cohort → treat as exploratory /
+    data-driven / optimistic.  Do NOT use as a prospective locked threshold.
+    """
+    y = np.asarray(y).astype(int)
+    p = np.asarray(p)
+    fpr, tpr, thresholds = roc_curve(y, p)
+    j = tpr + (1.0 - fpr) - 1.0
+    idx = int(np.argmax(j))
+    return float(thresholds[idx]), float(j[idx])
+
+
+# ---------------------------------------------------------------------------
+# Multi-threshold classification analysis
+# ---------------------------------------------------------------------------
+
+def threshold_analysis_table(
+    y: np.ndarray,
+    p: np.ndarray,
+    thresholds: List[float],
+) -> pd.DataFrame:
+    """Classification metrics at multiple thresholds.
+
+    Columns: Threshold, Sensitivity, Specificity, PPV, NPV,
+    TP, FP, TN, FN, N_Flagged, Positives_per_1000, Flag_Rate_pct.
+    """
+    y = np.asarray(y).astype(int)
+    p = np.asarray(p)
+    n = len(y)
+    rows = []
+    for t in thresholds:
+        m = classification_metrics_at_threshold(y, p, t)
+        n_flagged = int((p >= t).sum())
+        rows.append({
+            "Threshold": float(t),
+            "Sensitivity": m["Sensitivity"],
+            "Specificity": m["Specificity"],
+            "PPV": m["PPV"],
+            "NPV": m["NPV"],
+            "TP": m["TP"],
+            "FP": m["FP"],
+            "TN": m["TN"],
+            "FN": m["FN"],
+            "N_Flagged": n_flagged,
+            "Positives_per_1000": round(n_flagged / n * 1000, 1) if n else np.nan,
+            "Flag_Rate_pct": round(n_flagged / n * 100, 1) if n else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Detailed calibration bins (for interactive plots)
+# ---------------------------------------------------------------------------
+
+def calibration_bins_detail(
+    y: np.ndarray,
+    p: np.ndarray,
+    n_bins: int = 10,
+    strategy: str = "quantile",
+) -> pd.DataFrame:
+    """Calibration bins with per-bin count and Wilson 95% CI.
+
+    Columns: Bin, N, Mean_Predicted, Obs_Frequency, CI_lower, CI_upper.
+    strategy: 'quantile' (equal-size) or 'uniform' (equal-width).
+    """
+    y = np.asarray(y).astype(int)
+    p = np.asarray(p)
+    df_cal = pd.DataFrame({"y": y, "p": p})
+
+    try:
+        if strategy == "quantile":
+            df_cal["bin"] = pd.qcut(df_cal["p"], q=n_bins, labels=False, duplicates="drop")
+        else:
+            df_cal["bin"] = pd.cut(df_cal["p"], bins=n_bins, labels=False, duplicates="drop")
+    except Exception:
+        df_cal["bin"] = pd.cut(df_cal["p"], bins=n_bins, labels=False, duplicates="drop")
+
+    rows = []
+    z = 1.96
+    for bin_label, grp in df_cal.groupby("bin", observed=True):
+        n = len(grp)
+        if n == 0:
+            continue
+        mean_pred = float(grp["p"].mean())
+        obs_freq = float(grp["y"].mean())
+        # Wilson binomial CI
+        center = (obs_freq + z**2 / (2 * n)) / (1 + z**2 / n)
+        half = z * np.sqrt(obs_freq * (1 - obs_freq) / n + z**2 / (4 * n**2)) / (1 + z**2 / n)
+        ci_low = max(0.0, float(center - half))
+        ci_high = min(1.0, float(center + half))
+        rows.append({
+            "Bin": int(bin_label) + 1,
+            "N": n,
+            "Mean_Predicted": mean_pred,
+            "Obs_Frequency": obs_freq,
+            "CI_lower": ci_low,
+            "CI_upper": ci_high,
+        })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Post-hoc recalibration (exploratory — do not use for primary reporting)
+# ---------------------------------------------------------------------------
+
+def recalibrate_intercept_only(y: np.ndarray, p: np.ndarray) -> Dict:
+    """Intercept-only (calibration-in-the-large) recalibration.
+
+    Fits: logit(p_new) = a + 1.0 × logit(p_original)  (slope fixed at 1).
+
+    Returns dict: recalibrated_probs, intercept_offset, brier_before/after,
+    cal_intercept/slope before/after.
+
+    IMPORTANT: exploratory post-hoc analysis only.
+    """
+    y = np.asarray(y).astype(int)
+    p = np.asarray(p)
+    p_clipped = np.clip(p, 1e-7, 1 - 1e-7)
+    logit_p = np.log(p_clipped / (1 - p_clipped))
+
+    def _nll(a: float) -> float:
+        lp = a + logit_p
+        pn = 1.0 / (1.0 + np.exp(-lp))
+        pn = np.clip(pn, 1e-9, 1 - 1e-9)
+        return float(-np.sum(y * np.log(pn) + (1 - y) * np.log(1 - pn)))
+
+    res = minimize_scalar(_nll, bounds=(-10, 10), method="bounded")
+    offset = float(res.x)
+    p_new = np.clip(1.0 / (1.0 + np.exp(-(offset + logit_p))), 0.0, 1.0)
+
+    cal_before = calibration_intercept_slope(y, p)
+    cal_after = calibration_intercept_slope(y, p_new)
+    return {
+        "recalibrated_probs": p_new,
+        "method": "intercept_only",
+        "intercept_offset": offset,
+        "brier_before": float(brier_score_loss(y, p)),
+        "brier_after": float(brier_score_loss(y, p_new)),
+        "cal_intercept_before": cal_before["Calibration intercept"],
+        "cal_intercept_after": cal_after["Calibration intercept"],
+        "cal_slope_before": cal_before["Calibration slope"],
+        "cal_slope_after": cal_after["Calibration slope"],
+    }
+
+
+def recalibrate_logistic(y: np.ndarray, p: np.ndarray) -> Dict:
+    """Intercept + slope logistic recalibration.
+
+    Fits: logit(p_new) = a + b × logit(p_original).
+
+    IMPORTANT: exploratory post-hoc analysis only.
+    """
+    y = np.asarray(y).astype(int)
+    p = np.asarray(p)
+    if len(np.unique(y)) < 2:
+        brier = float(brier_score_loss(y, p))
+        return {
+            "recalibrated_probs": p.copy(),
+            "method": "logistic",
+            "intercept": np.nan,
+            "slope": np.nan,
+            "brier_before": brier,
+            "brier_after": np.nan,
+            "cal_intercept_before": np.nan,
+            "cal_intercept_after": np.nan,
+            "cal_slope_before": np.nan,
+            "cal_slope_after": np.nan,
+        }
+
+    p_clipped = np.clip(p, 1e-7, 1 - 1e-7)
+    logit_p = np.log(p_clipped / (1 - p_clipped)).reshape(-1, 1)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore")
+        lr = LogisticRegression(C=np.inf, solver="lbfgs", max_iter=2000)
+        lr.fit(logit_p, y)
+    intercept = float(lr.intercept_[0])
+    slope = float(lr.coef_[0][0])
+    p_new = np.clip(lr.predict_proba(logit_p)[:, 1], 0.0, 1.0)
+    cal_before = calibration_intercept_slope(y, p)
+    cal_after = calibration_intercept_slope(y, p_new)
+    return {
+        "recalibrated_probs": p_new,
+        "method": "logistic",
+        "intercept": intercept,
+        "slope": slope,
+        "brier_before": float(brier_score_loss(y, p)),
+        "brier_after": float(brier_score_loss(y, p_new)),
+        "cal_intercept_before": cal_before["Calibration intercept"],
+        "cal_intercept_after": cal_after["Calibration intercept"],
+        "cal_slope_before": cal_before["Calibration slope"],
+        "cal_slope_after": cal_after["Calibration slope"],
+    }
+
+
+def recalibrate_isotonic(y: np.ndarray, p: np.ndarray) -> Dict:
+    """Isotonic regression recalibration (non-parametric, monotone).
+
+    Most aggressive method. May overfit small datasets.
+    IMPORTANT: exploratory post-hoc analysis only.
+    """
+    y = np.asarray(y).astype(int)
+    p = np.asarray(p)
+    ir = IsotonicRegression(out_of_bounds="clip")
+    ir.fit(p, y)
+    p_new = np.clip(ir.predict(p), 0.0, 1.0)
+    cal_before = calibration_intercept_slope(y, p)
+    cal_after = calibration_intercept_slope(y, p_new)
+    return {
+        "recalibrated_probs": p_new,
+        "method": "isotonic",
+        "brier_before": float(brier_score_loss(y, p)),
+        "brier_after": float(brier_score_loss(y, p_new)),
+        "cal_intercept_before": cal_before["Calibration intercept"],
+        "cal_intercept_after": cal_after["Calibration intercept"],
+        "cal_slope_before": cal_before["Calibration slope"],
+        "cal_slope_after": cal_after["Calibration slope"],
+    }

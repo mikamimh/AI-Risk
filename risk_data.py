@@ -14,6 +14,7 @@ Example:
     >>> features = prepared.feature_columns
 """
 
+import csv as _csv_module
 import re
 import sqlite3
 import warnings
@@ -23,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from sts_calculator import STS_UNSUPPORTED_SURGERY_KEYWORDS
 
 
 MISSING_TOKENS = {
@@ -978,6 +980,126 @@ class PreparedData:
     ingestion_report: Optional[IngestionReport] = None
 
 
+@dataclass
+class ExternalReadMeta:
+    """Metadata captured during external CSV ingestion.
+
+    Produced by :func:`read_external_table_with_fallback`.
+    """
+    encoding_used: str
+    delimiter: str
+    rows_loaded: int
+    columns_loaded: int
+
+
+@dataclass
+class ExternalNormalizationReport:
+    """Structured report of all normalization actions for an external dataset.
+
+    Produced by :func:`normalize_external_dataset`.  Each field corresponds
+    to the output of one pipeline stage; the full object is persisted in
+    session state by the Temporal Validation tab.
+    """
+    source_name: Optional[str]
+    read_meta: Optional[ExternalReadMeta]
+    column_mapping: Dict[str, str]
+    token_summary: Dict[str, dict]
+    unit_summary: dict
+    scope_summary: dict
+    sts_readiness_summary: dict
+    warnings: List[str]
+
+    def summary_lines(self) -> List[str]:
+        """One-line-per-topic summary suitable for UI display."""
+        lines: List[str] = []
+        if self.read_meta:
+            lines.append(
+                f"encoding: {self.read_meta.encoding_used}"
+                f" \u00b7 delimiter: {self.read_meta.delimiter!r}"
+                f" \u00b7 {self.read_meta.rows_loaded} rows"
+                f" \u00b7 {self.read_meta.columns_loaded} columns"
+            )
+        renamed = {k: v for k, v in self.column_mapping.items() if k != v}
+        if renamed:
+            lines.append(
+                f"columns renamed: {len(renamed)} alias(es) mapped to canonical names"
+            )
+        if self.token_summary:
+            total_tok = sum(
+                s.get("yes_converted", 0) + s.get("no_converted", 0)
+                for s in self.token_summary.values()
+            )
+            lines.append(
+                f"tokens normalized: {total_tok} value(s) in {len(self.token_summary)} column(s)"
+            )
+        u = self.unit_summary
+        if u.get("height_converted"):
+            lines.append(
+                f"height: {u['n_height_converted']} value(s) converted"
+                f" from inches to cm (original median {u['height_original_median']} in)"
+            )
+        if u.get("weight_converted"):
+            lines.append(
+                f"weight: {u['n_weight_converted']} value(s) converted"
+                f" from lb to kg (original median {u['weight_original_median']} lb)"
+            )
+        s = self.scope_summary
+        if s.get("n_pediatric", 0) > 0:
+            lines.append(
+                f"pediatric rows (age < 18): {s['n_pediatric']}"
+                " \u2014 excluded from adult STS ACSD scope"
+            )
+        if s.get("n_sts_scope_excluded", 0) > 0:
+            lines.append(
+                f"STS-scope-excluded surgeries: {s['n_sts_scope_excluded']}"
+                " (dissection / aneurysm / Bentall / Ross / transplant / homograft)"
+            )
+        sr = self.sts_readiness_summary
+        if sr:
+            lines.append(
+                f"STS-ready rows after normalization:"
+                f" {sr.get('n_ready', 0)}/{sr.get('n_total', 0)}"
+                f" ({sr.get('n_ready_pct', 0):.1f}%)"
+            )
+        for w in self.warnings:
+            lines.append(f"[WARNING] {w}")
+        return lines
+
+    def to_export_rows(self) -> List[Dict[str, Any]]:
+        """Structured rows for the Normalization_Summary XLSX sheet.
+
+        Returns a list of ``{"Field": str, "Value": ...}`` dicts covering
+        ingestion metadata, scope/readiness counts, unit conversions, warnings,
+        and all ``summary_lines()`` entries.  Never mutates the parent DataFrame.
+        """
+        rows: List[Dict[str, Any]] = []
+        if self.read_meta is not None:
+            rm = self.read_meta
+            rows += [
+                {"Field": "source_name",       "Value": str(self.source_name or "")},
+                {"Field": "encoding_used",      "Value": rm.encoding_used},
+                {"Field": "delimiter",          "Value": repr(rm.delimiter)},
+                {"Field": "rows_loaded",        "Value": rm.rows_loaded},
+                {"Field": "columns_loaded",     "Value": rm.columns_loaded},
+            ]
+        sc = self.scope_summary or {}
+        rs = self.sts_readiness_summary or {}
+        us = self.unit_summary or {}
+        rows += [
+            {"Field": "n_pediatric",            "Value": sc.get("n_pediatric", 0)},
+            {"Field": "n_sts_scope_excluded",   "Value": sc.get("n_sts_scope_excluded", 0)},
+            {"Field": "n_sts_ready",            "Value": rs.get("n_ready", "")},
+            {"Field": "n_sts_ready_pct",        "Value": rs.get("n_ready_pct", "")},
+            {"Field": "height_converted",       "Value": us.get("height_converted", False)},
+            {"Field": "weight_converted",       "Value": us.get("weight_converted", False)},
+        ]
+        for i, warning in enumerate(self.warnings, 1):
+            rows.append({"Field": f"warning_{i}", "Value": warning})
+        for i, line in enumerate(self.summary_lines(), 1):
+            rows.append({"Field": f"summary_line_{i}", "Value": line})
+        return rows
+
+
 def _load_source_tables(source_path: str) -> Dict[str, pd.DataFrame]:
     _COL_FIXES = {
         "Surgical Priorit": "Surgical Priority",
@@ -1224,6 +1346,789 @@ def normalize_dataframe(
         correction_records=correction_records,
     )
     return out, report
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# External-dataset normalization pipeline
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Staged normalization for external CSV datasets before they reach
+# prepare_master_dataset / STS / temporal validation.  Every step is
+# explicit, auditable, and logged.  No correction is made silently.
+#
+# Orchestrating entry point:  normalize_external_dataset(df_raw, ...)
+#
+# Stages (in order):
+#   1. read_external_table_with_fallback — robust CSV reader + encoding meta
+#   2. canonicalize_external_columns     — trim/alias column names
+#   3. normalize_external_tokens         — Yes/No/Sim/Não variant normalization
+#   4. normalize_external_units          — height/weight unit detection
+#   5. apply_external_scope_rules        — pediatric flag, surgery-text cleaning
+#   6. build_sts_readiness_flags         — per-row STS preflight assessment
+#
+# Auto-corrected (logged in report):
+#   - Encoding fallback:  utf-8-sig → utf-8 → cp1252 → latin-1
+#   - Column aliases:     snake_case → canonical display name
+#   - Token variants:     Sim → Yes, Não → No, oui → Yes, etc.
+#   - Anthropometric:     inches → cm, lb → kg (heuristic thresholds)
+#
+# Flagged only (NOT auto-corrected):
+#   - Pediatric patients (age < 18)
+#   - Out-of-scope STS surgeries (Bentall, dissection, aneurysm, …)
+#   - Missing/invalid required STS fields
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _sniff_csv_delimiter(path: str, encoding: str) -> str:
+    """Sniff the field delimiter of a CSV file using :mod:`csv.Sniffer`."""
+    try:
+        with open(path, encoding=encoding, errors="replace", newline="") as f:
+            sample = f.read(8192)
+        dialect = _csv_module.Sniffer().sniff(sample, delimiters=",;\t|")
+        return dialect.delimiter
+    except Exception:
+        return ","
+
+
+def read_external_table_with_fallback(
+    path: str,
+) -> Tuple[pd.DataFrame, ExternalReadMeta]:
+    """Read a CSV with a prioritized encoding fallback chain.
+
+    Encoding chain (tried in order):
+
+    1. ``utf-8-sig`` — modern default; also strips a BOM if present.
+    2. ``utf-8``     — plain UTF-8.
+    3. ``cp1252``    — Windows-1252, the most common Brazilian Excel export.
+    4. ``latin-1``   — accepts any single byte; last resort.
+
+    The delimiter is auto-detected via :mod:`csv.Sniffer`.
+
+    Unlike the internal :func:`_read_csv_auto`, this function:
+
+    * includes plain ``utf-8`` in the chain
+    * returns :class:`ExternalReadMeta` (encoding, delimiter, shape)
+    * is intended only for **external** datasets, not the training pipeline.
+
+    Parameters
+    ----------
+    path : str
+        Absolute or relative path to the CSV file.
+
+    Returns
+    -------
+    (DataFrame, ExternalReadMeta)
+    """
+    _ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
+    last_err: Exception | None = None
+    for enc in _ENCODINGS:
+        try:
+            df = pd.read_csv(path, sep=None, engine="python", encoding=enc)
+            delim = _sniff_csv_delimiter(path, enc)
+            meta = ExternalReadMeta(
+                encoding_used=enc,
+                delimiter=delim,
+                rows_loaded=len(df),
+                columns_loaded=len(df.columns),
+            )
+            return df, meta
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+    raise last_err if last_err is not None else RuntimeError(
+        f"Failed to read CSV with any known encoding: {path}"
+    )
+
+
+def canonicalize_external_columns(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, Dict[str, str]]:
+    """Normalize column names for external datasets.
+
+    Steps applied to every column name:
+
+    1. Strip leading/trailing whitespace.
+    2. Collapse consecutive internal spaces to a single space.
+    3. Map to a canonical app column name via :data:`FLAT_ALIAS_TO_APP_COLUMNS`
+       (exact match first, then case-insensitive).
+
+    Parameters
+    ----------
+    df : DataFrame
+        Raw external dataframe (not modified in place).
+
+    Returns
+    -------
+    (normalized_df, original_to_canonical)
+        ``original_to_canonical`` maps every original column name to its
+        canonical counterpart (equal to original when no renaming applies).
+    """
+    out = df.copy()
+    _alias_lower = {k.lower(): v for k, v in FLAT_ALIAS_TO_APP_COLUMNS.items()}
+    original_to_canonical: Dict[str, str] = {}
+    rename_map: Dict[str, str] = {}
+
+    for orig_col in list(df.columns):
+        cleaned = re.sub(r"\s+", " ", str(orig_col)).strip()
+        canonical = (
+            FLAT_ALIAS_TO_APP_COLUMNS.get(cleaned)
+            or _alias_lower.get(cleaned.lower())
+            or cleaned
+        )
+        original_to_canonical[orig_col] = canonical
+        if canonical != orig_col:
+            rename_map[orig_col] = canonical
+
+    out = out.rename(columns=rename_map)
+    return out, original_to_canonical
+
+
+# ── Token normalization ──────────────────────────────────────────────────
+#
+# Maps linguistic Yes/No variants to canonical English tokens.  Only columns
+# where ≥ 50 % of non-null values match any known binary indicator token are
+# processed — prevents accidental rewrites in free-text or multi-value columns.
+#
+# Auto-corrected:
+#   YES variants → "Yes":  sim, sí, oui, ja  (+ case fix for "yes")
+#   NO  variants → "No" :  não/nao, non, nein, nee  (+ case fix for "no")
+#
+# NOT handled here (already covered by normalize_dataframe / MISSING_TOKENS):
+#   Unknown / N/A / "" / "-" / "--" → NaN
+
+_TOKEN_NORM_MAP: Dict[str, str] = {
+    # Case normalization (English)
+    "yes":  "Yes",
+    "no":   "No",
+    # Portuguese
+    "sim":  "Yes",
+    "não":  "No",
+    "nao":  "No",
+    # Spanish (accented only — "si" alone is too ambiguous)
+    "sí":   "Yes",
+    # French
+    "oui":  "Yes",
+    "non":  "No",
+    # German
+    "ja":   "Yes",
+    "nein": "No",
+    # Dutch
+    "nee":  "No",
+}
+
+# Broader set for column-type detection only (not used as output values)
+_BINARY_INDICATOR_TOKENS: frozenset = frozenset(
+    list(_TOKEN_NORM_MAP.keys()) + ["y", "n", "true", "false", "1", "0"]
+)
+
+
+def normalize_external_tokens(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, Dict[str, dict]]:
+    """Normalize Yes/No/Unknown token variants in object-dtype columns.
+
+    For each object column (excluding valve-severity columns and already-
+    converted numerics), linguistic variants are mapped to canonical English:
+
+    * ``"Sim"`` / ``"sim"`` → ``"Yes"``; ``"Não"`` / ``"nao"`` → ``"No"``
+    * ``"oui"`` → ``"Yes"``; ``"non"`` / ``"nein"`` → ``"No"``
+    * Case-only fixes: ``"yes"`` → ``"Yes"``; ``"no"`` → ``"No"``
+
+    A column is normalized only when ≥ 50 % of its non-null values appear in
+    :data:`_BINARY_INDICATOR_TOKENS` — this avoids polluting free-text or
+    multi-value columns with spurious Yes/No rewrites.
+
+    Missing tokens (``"unknown"``, ``"n/a"``, ``""`` …) are left as-is; the
+    downstream :func:`normalize_dataframe` step handles them.
+
+    Returns
+    -------
+    (normalized_df, token_summary)
+        ``token_summary`` is ``{column: {"yes_converted": int, "no_converted": int,
+        "total": int}}``.
+    """
+    out = df.copy()
+    token_summary: Dict[str, dict] = {}
+
+    for col in out.columns:
+        if out[col].dtype != object:
+            continue
+        if col in NONE_IS_VALID_COLUMNS:
+            # Never overwrite valve-severity columns ("None" = no disease)
+            continue
+
+        non_null = out[col].dropna()
+        if non_null.empty:
+            continue
+
+        lower_vals = non_null.astype(str).str.strip().str.lower()
+        hit_rate = lower_vals.isin(_BINARY_INDICATOR_TOKENS).sum() / len(non_null)
+        if hit_rate < 0.50:
+            continue  # Not enough binary tokens — skip to avoid polluting non-binary columns
+
+        n_yes = n_no = 0
+        for idx, val in non_null.items():
+            lower = str(val).strip().lower()
+            canonical = _TOKEN_NORM_MAP.get(lower)
+            if canonical is None:
+                continue
+            if str(val).strip() != canonical:
+                out.at[idx, col] = canonical
+                if canonical == "Yes":
+                    n_yes += 1
+                else:
+                    n_no += 1
+
+        if n_yes + n_no > 0:
+            token_summary[col] = {
+                "yes_converted": n_yes,
+                "no_converted": n_no,
+                "total": n_yes + n_no,
+            }
+
+    return out, token_summary
+
+
+# ── Anthropometric unit normalization ────────────────────────────────────
+#
+# Height heuristic:  median(height_cm) in (0, 100)  → suspect inches → × 2.54
+#   Adult height in cm:     150–200  |  in inches: 59–79
+#   Median below 100 is clinically impossible in cm for an adult population.
+#
+# Weight heuristic:  median(weight_kg) > 140 AND max > 250  → suspect lbs → / 2.205
+#   Adult weight in kg:  40–200  |  in lbs: 88–440
+#   Median above 140 combined with max above 250 strongly implies pounds.
+#
+# Optional BSA cross-check: DuBois formula; >20 % divergence logged as warning.
+
+
+def normalize_external_units(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, dict]:
+    """Detect and correct common anthropometric unit mismatches.
+
+    Targets ``Height (cm)`` / ``height_cm`` and ``Weight (kg)`` /
+    ``weight_kg``.  See inline comments for the heuristic thresholds.
+
+    An optional BSA cross-check is performed when ``BSA, m2`` / ``bsa_m2``
+    is present and a conversion was applied.
+
+    Returns
+    -------
+    (normalized_df, unit_summary)
+        Keys: ``height_converted`` (bool), ``height_original_median``,
+        ``n_height_converted``, ``weight_converted`` (bool),
+        ``weight_original_median``, ``n_weight_converted``, ``warnings``.
+    """
+    out = df.copy()
+    unit_summary: dict = {
+        "height_converted": False,
+        "height_conversion_factor": None,
+        "height_original_median": None,
+        "n_height_converted": 0,
+        "weight_converted": False,
+        "weight_conversion_factor": None,
+        "weight_original_median": None,
+        "n_weight_converted": 0,
+        "warnings": [],
+    }
+
+    # ── Height ──────────────────────────────────────────────────────────
+    h_col: Optional[str] = next(
+        (c for c in ("Height (cm)", "height_cm") if c in out.columns), None
+    )
+    if h_col is not None:
+        h_series = pd.to_numeric(out[h_col], errors="coerce")
+        h_valid = h_series.dropna()
+        if not h_valid.empty:
+            h_median = float(h_valid.median())
+            unit_summary["height_original_median"] = round(h_median, 1)
+            if 0 < h_median < 100:
+                factor = 2.54
+                n_conv = int(h_series.notna().sum())
+                out[h_col] = (h_series * factor).round(1)
+                unit_summary.update(
+                    height_converted=True,
+                    height_conversion_factor=factor,
+                    n_height_converted=n_conv,
+                )
+
+    # ── Weight ──────────────────────────────────────────────────────────
+    w_col: Optional[str] = next(
+        (c for c in ("Weight (kg)", "weight_kg") if c in out.columns), None
+    )
+    if w_col is not None:
+        w_series = pd.to_numeric(out[w_col], errors="coerce")
+        w_valid = w_series.dropna()
+        if not w_valid.empty:
+            w_median = float(w_valid.median())
+            w_max = float(w_valid.max())
+            unit_summary["weight_original_median"] = round(w_median, 1)
+            if w_median > 140 and w_max > 250:
+                factor = 1.0 / 2.205
+                n_conv = int(w_series.notna().sum())
+                out[w_col] = (w_series * factor).round(1)
+                unit_summary.update(
+                    weight_converted=True,
+                    weight_conversion_factor=round(factor, 5),
+                    n_weight_converted=n_conv,
+                )
+
+    # ── Mixed-unit heterogeneity check ─────────────────────────────────────
+    # Emit a warning when the same column contains a suspicious mix of
+    # metric and imperial values (e.g. some rows in cm, others in inches).
+    # Threshold: each "unit regime" must represent at least 5 % of valid rows.
+    _MIX_MIN_FRAC = 0.05
+    if h_col is not None:
+        h_series_raw = pd.to_numeric(df[h_col], errors="coerce")
+        h_valid_raw = h_series_raw.dropna()
+        if len(h_valid_raw) >= 10:
+            n_imperial = int(((h_valid_raw >= 45) & (h_valid_raw <= 90)).sum())
+            n_metric = int(((h_valid_raw >= 130) & (h_valid_raw <= 250)).sum())
+            frac_imperial = n_imperial / len(h_valid_raw)
+            frac_metric = n_metric / len(h_valid_raw)
+            if frac_imperial >= _MIX_MIN_FRAC and frac_metric >= _MIX_MIN_FRAC:
+                unit_summary["warnings"].append(
+                    f"Mixed height units suspected in {h_col!r}: "
+                    f"{n_imperial} value(s) in adult-inches range (45–90) and "
+                    f"{n_metric} value(s) in adult-cm range (130–250). "
+                    "Verify source data before relying on auto-conversion."
+                )
+    if w_col is not None:
+        w_series_raw = pd.to_numeric(df[w_col], errors="coerce")
+        w_valid_raw = w_series_raw.dropna()
+        if len(w_valid_raw) >= 10:
+            n_lb = int((w_valid_raw > 200).sum())       # >200 → almost certainly lbs
+            n_kg = int((w_valid_raw < 100).sum())       # <100 → almost certainly kg
+            frac_lb = n_lb / len(w_valid_raw)
+            frac_kg = n_kg / len(w_valid_raw)
+            if frac_lb >= _MIX_MIN_FRAC and frac_kg >= _MIX_MIN_FRAC:
+                unit_summary["warnings"].append(
+                    f"Mixed weight units suspected in {w_col!r}: "
+                    f"{n_lb} value(s) > 200 (likely lb) and "
+                    f"{n_kg} value(s) < 100 (likely kg). "
+                    "Verify source data before relying on auto-conversion."
+                )
+
+    # ── Optional BSA cross-check ─────────────────────────────────────────
+    bsa_col: Optional[str] = next(
+        (c for c in ("BSA, m2", "bsa_m2") if c in out.columns), None
+    )
+    if bsa_col is not None and (
+        unit_summary["height_converted"] or unit_summary["weight_converted"]
+    ):
+        if h_col is not None and w_col is not None:
+            bsa_s = pd.to_numeric(out[bsa_col], errors="coerce")
+            h_s = pd.to_numeric(out[h_col], errors="coerce")
+            w_s = pd.to_numeric(out[w_col], errors="coerce")
+            valid = h_s.notna() & w_s.notna() & bsa_s.notna()
+            if valid.sum() >= 3:
+                try:
+                    computed = 0.007184 * (h_s[valid] ** 0.725) * (w_s[valid] ** 0.425)
+                    ratio = float((computed / bsa_s[valid]).median())
+                    if abs(ratio - 1.0) > 0.20:
+                        unit_summary["warnings"].append(
+                            f"BSA cross-check: computed BSA diverges from recorded BSA by "
+                            f"{abs(ratio - 1.0) * 100:.0f}% (median ratio {ratio:.2f}). "
+                            "Review unit conversion."
+                        )
+                except Exception:
+                    pass
+
+    return out, unit_summary
+
+
+# ── Clinical scope rules ─────────────────────────────────────────────────
+#
+# STS_UNSUPPORTED_SURGERY_KEYWORDS is imported from sts_calculator — single
+# canonical source shared by classify_sts_eligibility and apply_external_scope_rules.
+
+
+def _find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    """Return the first *candidates* column name present in *df*, else ``None``."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def apply_external_scope_rules(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, dict]:
+    """Apply clinical scope rules and flag out-of-scope patients.
+
+    Actions (in order):
+
+    1. **Pediatric flag** — rows with ``Age (years)`` < 18 receive
+       ``is_pediatric = True``.  These rows are outside adult STS ACSD
+       scope and will be marked ``sts_input_ready = False`` downstream.
+
+    2. **Surgery-text cleaning** — the surgery column is stripped, internal
+       spaces collapsed, and separators standardised (``;`` / ``+`` → ``,``).
+       The result is stored in ``_surgery_cleaned`` for downstream matching.
+
+    3. **STS scope exclusion flag** — rows whose cleaned surgery text
+       contains any keyword in :data:`STS_UNSUPPORTED_SURGERY_KEYWORDS` receive
+       ``sts_scope_excluded = True`` and a human-readable ``sts_scope_reason``.
+
+    Returns
+    -------
+    (df, scope_summary)
+        Keys: ``n_pediatric``, ``n_sts_scope_excluded``, ``n_surgery_cleaned``,
+        ``age_column_found``, ``surgery_column_found``, ``warnings``.
+    """
+    out = df.copy()
+    scope_summary: dict = {
+        "n_pediatric": 0,
+        "n_sts_scope_excluded": 0,
+        "n_surgery_cleaned": 0,
+        "age_column_found": False,
+        "surgery_column_found": False,
+        "warnings": [],
+    }
+
+    # ── 1. Pediatric flag ─────────────────────────────────────────────────
+    age_col = _find_col(out, ["Age (years)", "age_years", "age"])
+    if age_col is not None:
+        scope_summary["age_column_found"] = True
+        ages = pd.to_numeric(out[age_col], errors="coerce")
+        is_ped = (ages < 18) & ages.notna()
+        out["is_pediatric"] = is_ped
+        scope_summary["n_pediatric"] = int(is_ped.sum())
+        if scope_summary["n_pediatric"] > 0:
+            scope_summary["warnings"].append(
+                f"{scope_summary['n_pediatric']} patient(s) with age < 18 flagged "
+                "as pediatric — excluded from adult STS ACSD processing."
+            )
+    else:
+        out["is_pediatric"] = False
+
+    # ── 2. Surgery-text cleaning ──────────────────────────────────────────
+    surg_col = _find_col(out, ["Surgery", "surgery_pre", "surgery"])
+    if surg_col is not None:
+        scope_summary["surgery_column_found"] = True
+        raw_surg = out[surg_col].astype(str)
+        cleaned_surg = (
+            raw_surg
+            .str.strip()
+            .str.replace(r"\s+", " ", regex=True)
+            .str.replace(";", ",", regex=False)
+            .str.replace("+", ",", regex=False)
+        )
+        scope_summary["n_surgery_cleaned"] = int((cleaned_surg != raw_surg).sum())
+        out["_surgery_cleaned"] = cleaned_surg
+    else:
+        out["_surgery_cleaned"] = pd.Series("", index=out.index, dtype=object)
+
+    # ── 3. STS scope exclusion flag ───────────────────────────────────────
+    excluded = pd.Series(False, index=out.index, dtype=bool)
+    reasons_series = pd.Series("", index=out.index, dtype=object)
+
+    surg_upper = out["_surgery_cleaned"].astype(str).str.upper()
+    for idx, s in surg_upper.items():
+        for kw in sorted(STS_UNSUPPORTED_SURGERY_KEYWORDS):  # sorted for determinism
+            if kw in s:
+                excluded.at[idx] = True
+                reasons_series.at[idx] = (
+                    f"procedure outside STS ACSD scope: keyword '{kw}' found"
+                )
+                break
+
+    out["sts_scope_excluded"] = excluded
+    out["sts_scope_reason"] = reasons_series
+    scope_summary["n_sts_scope_excluded"] = int(excluded.sum())
+    if scope_summary["n_sts_scope_excluded"] > 0:
+        scope_summary["warnings"].append(
+            f"{scope_summary['n_sts_scope_excluded']} row(s) with surgery outside "
+            "STS ACSD scope (dissection / aneurysm / Bentall / Ross / transplant / homograft)."
+        )
+
+    return out, scope_summary
+
+
+def build_sts_readiness_flags(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, dict]:
+    """Build per-row STS preflight readiness flags.
+
+    For each row, determines whether the patient is ready for an STS ACSD
+    query by checking in order:
+
+    1. **Pediatric** (``is_pediatric == True``) → ``sts_input_ready = False``
+    2. **Scope excluded** (``sts_scope_excluded == True``) → ``False``
+    3. **Missing required fields** (age, sex, surgery, surgical_priority) → ``False``
+    4. **Invalid age** (outside [1, 110]) → ``False``
+    5. All checks pass → ``sts_input_ready = True``
+
+    If :func:`apply_external_scope_rules` has not been run first, the
+    ``is_pediatric`` and ``sts_scope_excluded`` flags are computed inline.
+
+    Adds columns:
+
+    * ``sts_input_ready`` (bool)
+    * ``sts_missing_required_fields`` (str, comma-separated field names)
+    * ``sts_invalid_required_fields`` (str, comma-separated descriptions)
+    * ``sts_readiness_reason`` (str)
+
+    Returns
+    -------
+    (df, sts_readiness_summary)
+        Keys: ``n_total``, ``n_ready``, ``n_pediatric_excluded``,
+        ``n_scope_excluded``, ``n_missing_fields``, ``n_invalid_fields``,
+        ``n_ready_pct``, ``required_fields_checked``.
+    """
+    out = df.copy()
+
+    # Ensure scope flags exist (populated by apply_external_scope_rules if called)
+    if "is_pediatric" not in out.columns:
+        _ac = _find_col(out, ["Age (years)", "age_years"])
+        if _ac is not None:
+            _ages = pd.to_numeric(out[_ac], errors="coerce")
+            out["is_pediatric"] = (_ages < 18) & _ages.notna()
+        else:
+            out["is_pediatric"] = False
+
+    if "sts_scope_excluded" not in out.columns:
+        out["sts_scope_excluded"] = False
+        out["sts_scope_reason"] = ""
+
+    _STS_REQ: Dict[str, List[str]] = {
+        "age":               ["Age (years)", "age_years"],
+        "sex":               ["Sex", "sex"],
+        "surgery":           ["Surgery", "surgery_pre"],
+        "surgical_priority": ["Surgical Priority", "surgical_priority"],
+    }
+    _resolved: Dict[str, Optional[str]] = {
+        k: _find_col(out, v) for k, v in _STS_REQ.items()
+    }
+
+    ready_flags: List[bool] = []
+    missing_lists: List[str] = []
+    invalid_lists: List[str] = []
+    reasons: List[str] = []
+
+    for _, row in out.iterrows():
+        is_ped = bool(row.get("is_pediatric", False))
+        scope_exc = bool(row.get("sts_scope_excluded", False))
+        scope_reason = str(row.get("sts_scope_reason", ""))
+
+        missing: List[str] = []
+        invalid: List[str] = []
+
+        # age
+        age_r = _resolved["age"]
+        if age_r:
+            age_val = pd.to_numeric(row.get(age_r), errors="coerce")
+            if pd.isna(age_val):
+                missing.append("age")
+            elif not (1 <= float(age_val) <= 110):
+                invalid.append(f"age={age_val:.0f} (must be 1\u2013110)")
+        else:
+            missing.append("age")
+
+        # sex
+        sex_r = _resolved["sex"]
+        if sex_r:
+            sv = str(row.get(sex_r) or "").strip()
+            if not sv or sv.lower() in ("nan", "none", ""):
+                missing.append("sex")
+        else:
+            missing.append("sex")
+
+        # surgery
+        surg_r = _resolved["surgery"]
+        if surg_r:
+            sv = str(row.get(surg_r) or "").strip()
+            if not sv or sv.lower() in ("nan", "none", ""):
+                missing.append("surgery")
+        else:
+            missing.append("surgery")
+
+        # surgical_priority
+        prio_r = _resolved["surgical_priority"]
+        if prio_r:
+            sv = str(row.get(prio_r) or "").strip()
+            if not sv or sv.lower() in ("nan", "none", ""):
+                missing.append("surgical_priority")
+        else:
+            missing.append("surgical_priority")
+
+        # Determine readiness
+        if is_ped:
+            ready = False
+            reason = "pediatric patient (age < 18) \u2014 outside adult STS ACSD scope"
+        elif scope_exc:
+            ready = False
+            reason = scope_reason or "surgery outside STS ACSD scope"
+        elif missing:
+            ready = False
+            reason = f"missing required fields: {', '.join(missing)}"
+        elif invalid:
+            ready = False
+            reason = f"invalid required fields: {', '.join(invalid)}"
+        else:
+            ready = True
+            reason = "all required fields present and valid"
+
+        ready_flags.append(ready)
+        missing_lists.append(", ".join(missing))
+        invalid_lists.append(", ".join(invalid))
+        reasons.append(reason)
+
+    out["sts_input_ready"] = ready_flags
+    out["sts_missing_required_fields"] = missing_lists
+    out["sts_invalid_required_fields"] = invalid_lists
+    out["sts_readiness_reason"] = reasons
+
+    n_total = len(out)
+    n_ready = int(sum(ready_flags))
+
+    return out, {
+        "n_total": n_total,
+        "n_ready": n_ready,
+        "n_pediatric_excluded": int(out["is_pediatric"].sum()),
+        "n_scope_excluded": int(out["sts_scope_excluded"].sum()),
+        "n_missing_fields": int(sum(1 for m in missing_lists if m)),
+        "n_invalid_fields": int(sum(1 for m in invalid_lists if m)),
+        "n_ready_pct": round(n_ready / n_total * 100, 1) if n_total > 0 else 0.0,
+        "required_fields_checked": [k for k, v in _resolved.items() if v is not None],
+    }
+
+
+def normalize_external_dataset(
+    df_raw: pd.DataFrame,
+    source_name: Optional[str] = None,
+    read_meta: Optional[ExternalReadMeta] = None,
+) -> Tuple[pd.DataFrame, ExternalNormalizationReport]:
+    """Orchestrating entry point for the external-dataset normalization pipeline.
+
+    Runs the full staged pipeline:
+
+    1. :func:`canonicalize_external_columns` — trim and map column aliases
+    2. :func:`normalize_external_tokens`     — Yes/No linguistic normalization
+    3. :func:`normalize_external_units`      — height/weight unit detection
+    4. :func:`apply_external_scope_rules`    — pediatric flag + surgery cleaning
+    5. :func:`build_sts_readiness_flags`     — per-row STS preflight assessment
+
+    Call this function **before** passing an external CSV/Parquet dataset to
+    :func:`prepare_master_dataset` or the temporal-validation STS batch.
+
+    Parameters
+    ----------
+    df_raw : DataFrame
+        Raw external dataframe (not modified in place; a copy is returned).
+    source_name : str, optional
+        Human-readable source identifier (e.g. filename) for audit purposes.
+    read_meta : ExternalReadMeta, optional
+        Encoding/delimiter metadata from :func:`read_external_table_with_fallback`.
+
+    Returns
+    -------
+    (normalized_df, ExternalNormalizationReport)
+    """
+    df = df_raw.copy()
+
+    df, column_mapping = canonicalize_external_columns(df)
+    df, token_summary = normalize_external_tokens(df)
+    df, unit_summary = normalize_external_units(df)
+    df, scope_summary = apply_external_scope_rules(df)
+    df, sts_readiness_summary = build_sts_readiness_flags(df)
+
+    all_warnings: List[str] = (
+        list(scope_summary.get("warnings", []))
+        + list(unit_summary.get("warnings", []))
+    )
+
+    report = ExternalNormalizationReport(
+        source_name=source_name,
+        read_meta=read_meta,
+        column_mapping=column_mapping,
+        token_summary=token_summary,
+        unit_summary=unit_summary,
+        scope_summary=scope_summary,
+        sts_readiness_summary=sts_readiness_summary,
+        warnings=all_warnings,
+    )
+    return df, report
+
+
+def dry_run_external_ingestion(path: str) -> dict:
+    """Read and normalize an external file without running any model inference.
+
+    Performs file read (encoding auto-detection), column canonicalization, token
+    and unit normalization, clinical scope checks, and STS preflight assessment.
+    **Does not** call the AI Risk model, EuroSCORE II, or the STS ACSD web
+    calculator.
+
+    Parameters
+    ----------
+    path : str
+        Absolute or relative path to a ``.csv`` or ``.parquet`` file.
+
+    Returns
+    -------
+    dict with keys:
+        ``path``                 — original path argument (str)
+        ``read_meta``            — :class:`ExternalReadMeta` from file read
+        ``normalized_df``        — normalized :class:`pandas.DataFrame`
+        ``normalization_report`` — :class:`ExternalNormalizationReport`
+        ``summary_lines``        — list[str] from ``report.summary_lines()``
+        ``n_sts_ready``          — int: rows ready for STS processing
+        ``n_sts_not_ready``      — int: rows excluded from STS processing
+        ``warnings``             — list[str]: all normalization warnings
+        ``error``                — str or None: read/parse error, if any
+
+    Raises
+    ------
+    Does not raise — errors are captured in the ``error`` key so callers
+    can surface them without a try/except.
+    """
+    result: dict = {
+        "path": path,
+        "read_meta": None,
+        "normalized_df": None,
+        "normalization_report": None,
+        "summary_lines": [],
+        "n_sts_ready": 0,
+        "n_sts_not_ready": 0,
+        "warnings": [],
+        "error": None,
+    }
+    try:
+        ext = Path(path).suffix.lower()
+        if ext == ".parquet":
+            df_raw = pd.read_parquet(path)
+            read_meta = ExternalReadMeta(
+                encoding_used="parquet",
+                delimiter="N/A",
+                rows_loaded=len(df_raw),
+                columns_loaded=len(df_raw.columns),
+            )
+        elif ext == ".csv":
+            df_raw, read_meta = read_external_table_with_fallback(path)
+        else:
+            result["error"] = (
+                f"Unsupported file type {ext!r}. dry_run_external_ingestion"
+                " accepts .csv and .parquet only."
+            )
+            return result
+
+        df_norm, report = normalize_external_dataset(
+            df_raw, source_name=Path(path).name, read_meta=read_meta
+        )
+        rs = report.sts_readiness_summary or {}
+        result.update(
+            read_meta=read_meta,
+            normalized_df=df_norm,
+            normalization_report=report,
+            summary_lines=report.summary_lines(),
+            n_sts_ready=int(rs.get("n_ready", 0)),
+            n_sts_not_ready=int(rs.get("n_total", 0)) - int(rs.get("n_ready", 0)),
+            warnings=list(report.warnings),
+        )
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = str(exc)
+    return result
 
 
 def prepare_flat_dataset(source_path: str) -> PreparedData:
