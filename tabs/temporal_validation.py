@@ -76,6 +76,10 @@ from model_metadata import (
     build_model_metadata,
     format_locked_model_for_display,
     build_temporal_validation_summary,
+    build_exploratory_recalibration_summary,
+    build_exploratory_threshold_summary,
+    build_exploratory_temporal_validation_section,
+    build_sts_accounting_table,
     check_temporal_overlap,
     is_surrogate_timeline,
     build_surrogate_timeline_note,
@@ -209,11 +213,21 @@ def _build_sts_patient_audit(
 
     Returns
     -------
-    list of dict with 14 fields per eligible patient:
+    list of dict with 15 fields per eligible patient:
       row_index, patient_id, sts_eligibility_status, sts_supported_class,
-      sts_input_ready, sts_query_attempted, sts_query_success, sts_parse_success,
-      sts_score_present_final, sts_batch_aborted_before_query,
-      sts_failure_stage, sts_failure_reason, sts_chunk_index, sts_retry_attempted
+      sts_input_ready, sts_score_from_cache, sts_query_attempted,
+      sts_query_success, sts_parse_success, sts_score_present_final,
+      sts_batch_aborted_before_query, sts_failure_stage, sts_failure_reason,
+      sts_chunk_index, sts_retry_attempted
+
+    Consistency invariants
+    ----------------------
+    * ``sts_score_from_cache=True``  → ``sts_query_attempted=False``,
+      ``sts_score_present_final=True`` (score came from Phase A cache hit).
+    * ``sts_query_attempted=True, sts_query_success=True``
+      → ``sts_score_present_final=True`` (live query returned predmort).
+    * ``sts_score_present_final=False, sts_score_from_cache=False,
+      sts_query_attempted=False`` → either build_input failed or batch_aborted.
     """
     _elig_by_cohort: dict = {e["row_index"]: e for e in eligibility_log}
     _fail_by_pos: dict = {f["idx"]: f for f in fail_log}
@@ -232,8 +246,12 @@ def _build_sts_patient_audit(
         # Was the STS input dict built without error?
         input_ready = _fail_stage != "build_input"
 
+        # Did this patient get its score from the Phase-A memory/disk cache?
+        # When True, no live network query was issued; score_present will also be True.
+        from_cache = _exec_status == "cached"
+
         # Was a live network query sent to the STS endpoint?
-        # True for: fetch failures (stage="fetch"), fresh/refreshed/stale_fallback successes.
+        # True for: fetch failures (stage="fetch"), fresh/refreshed/stale_fallback.
         # False for: cached (Phase A short-circuit), build_input failures, batch_abort.
         query_attempted = (
             _fail_stage == "fetch"
@@ -266,6 +284,7 @@ def _build_sts_patient_audit(
             "sts_eligibility_status":         elig.get("eligibility", "supported"),
             "sts_supported_class":            elig.get("reason", ""),
             "sts_input_ready":                input_ready,
+            "sts_score_from_cache":           from_cache,
             "sts_query_attempted":            query_attempted,
             "sts_query_success":              query_success,
             "sts_parse_success":              parse_success,
@@ -1003,6 +1022,52 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             "n_low":      int(_comp_counts.get("low", 0)),
                         }
 
+                        # ── Extra analytics (STS thread-done path) ───────────────────
+                        _tv_thresholds_fixed = [0.02, 0.05, 0.08, 0.10]
+                        _tv_youden: dict = {}
+                        _tv_thresh_tables: dict = {}
+                        for _sc in _tv_score_cols:
+                            _sub = _tv_data[["morte_30d", _sc]].dropna()
+                            if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
+                                _tv_youden[_sc] = youden_threshold(
+                                    _sub["morte_30d"].values, _sub[_sc].values
+                                )
+                                _tv_thresh_tables[_sc] = threshold_analysis_table(
+                                    _sub["morte_30d"].values,
+                                    _sub[_sc].values,
+                                    _tv_thresholds_fixed,
+                                )
+
+                        _tv_exploratory_recal: dict = {}
+                        for _sc in _tv_score_cols:
+                            _sub = _tv_data[["morte_30d", _sc]].dropna()
+                            if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
+                                _ery = _sub["morte_30d"].values
+                                _erp = _sub[_sc].values
+                                _tv_exploratory_recal[_sc] = {}
+                                for _mkey, _mfn in (
+                                    ("intercept_only", recalibrate_intercept_only),
+                                    ("logistic",        recalibrate_logistic),
+                                    ("isotonic",        recalibrate_isotonic),
+                                ):
+                                    try:
+                                        _tv_exploratory_recal[_sc][_mkey] = _mfn(_ery, _erp)
+                                    except Exception:
+                                        pass
+
+                        _tv_exploratory_thresh_tables: dict = {}
+                        for _sc in _tv_score_cols:
+                            _sub = _tv_data[["morte_30d", _sc]].dropna()
+                            if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
+                                _ethr_set = set(_tv_thresholds_fixed) | {_tv_locked_threshold}
+                                if _sc in _tv_youden:
+                                    _ethr_set.add(_tv_youden[_sc][0])
+                                _tv_exploratory_thresh_tables[_sc] = threshold_analysis_table(
+                                    _sub["morte_30d"].values,
+                                    _sub[_sc].values,
+                                    sorted(_ethr_set),
+                                )
+
                         st.session_state["_tv_result"] = {
                             "data": _tv_data.copy(),
                             "perf": _tv_perf,
@@ -1041,6 +1106,18 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             "sts_availability": _tv_sts_availability,
                             "sts_n_score":      _tv_sts_n_score,
                             "sts_n_eligible":   _tv_sts_n_eligible,
+                            "sts_n_not_supported": int(_sts_n_ns),
+                            "sts_n_uncertain":     int(_sts_n_unc),
+                            # ── Common cohort ──────────────────────────────────────────
+                            "common_perf": (
+                                _tv_common_perf.to_dict(orient="list")
+                                if _tv_common_perf is not None else None
+                            ),
+                            "n_common": int(_tv_n_common),
+                            # ── Exploratory analytics ──────────────────────────────────
+                            "youden":                  dict(_tv_youden),
+                            "exploratory_recal":       dict(_tv_exploratory_recal),
+                            "exploratory_thresh_tables": dict(_tv_exploratory_thresh_tables),
                         }
                         st.session_state["_tv_result_sig"]   = _tv_context_sig_r
                         st.session_state[_TV_STS_ST]         = "idle"  # clear running state
@@ -1207,6 +1284,15 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _tv_sts_polling_fragment()
 
                 if _tv_run:
+                    # ── Exploratory analytics — initialised here so the thread-done ──────
+                    # save block (which runs before the computation block) always has
+                    # a defined value to store even if computation is skipped/fails.
+                    _tv_youden: dict = {}
+                    _tv_thresh_tables: dict = {}
+                    _tv_thresholds_fixed: list = [0.02, 0.05, 0.08, 0.10]
+                    _tv_exploratory_recal: dict = {}
+                    _tv_exploratory_thresh_tables: dict = {}
+
                     # ── Reset residual STS thread state from any previous run ──────────
                     # A fresh run must start with a clean slate; stale events/dicts from
                     # an earlier (possibly cancelled) run must not bleed into this one.
@@ -1646,9 +1732,6 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                     }
 
                     # ── Extra analytics for interactive graphs ─────────────────────────
-                    _tv_thresholds_fixed = [0.02, 0.05, 0.08, 0.10]
-                    _tv_youden: dict = {}
-                    _tv_thresh_tables: dict = {}
                     for _sc in _tv_score_cols:
                         _sub = _tv_data[["morte_30d", _sc]].dropna()
                         if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
@@ -1659,6 +1742,38 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 _sub["morte_30d"].values,
                                 _sub[_sc].values,
                                 _tv_thresholds_fixed,
+                            )
+
+                    # ── Exploratory: all recalibration methods for each score ──────────
+                    _tv_exploratory_recal = {}
+                    for _sc in _tv_score_cols:
+                        _sub = _tv_data[["morte_30d", _sc]].dropna()
+                        if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
+                            _ery = _sub["morte_30d"].values
+                            _erp = _sub[_sc].values
+                            _tv_exploratory_recal[_sc] = {}
+                            for _mkey, _mfn in (
+                                ("intercept_only", recalibrate_intercept_only),
+                                ("logistic",        recalibrate_logistic),
+                                ("isotonic",        recalibrate_isotonic),
+                            ):
+                                try:
+                                    _tv_exploratory_recal[_sc][_mkey] = _mfn(_ery, _erp)
+                                except Exception:
+                                    pass
+
+                    # ── Exploratory: per-score threshold tables (locked + Youden + fixed) ──
+                    _tv_exploratory_thresh_tables = {}
+                    for _sc in _tv_score_cols:
+                        _sub = _tv_data[["morte_30d", _sc]].dropna()
+                        if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
+                            _ethr_set = set(_tv_thresholds_fixed) | {_tv_locked_threshold}
+                            if _sc in _tv_youden:
+                                _ethr_set.add(_tv_youden[_sc][0])
+                            _tv_exploratory_thresh_tables[_sc] = threshold_analysis_table(
+                                _sub["morte_30d"].values,
+                                _sub[_sc].values,
+                                sorted(_ethr_set),
                             )
 
                     # ── Common-cohort (STS-available subset) comparison ────────────────
@@ -2041,8 +2156,39 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         "sts_availability": _tv_sts_availability,
                         "sts_n_score": _tv_sts_n_score,
                         "sts_n_eligible": _tv_sts_n_eligible,
+                        "sts_n_not_supported": int(sum(
+                            1 for e in _tv_sts_eligibility_log
+                            if e.get("eligibility") == "not_supported"
+                        )),
+                        "sts_n_uncertain": int(sum(
+                            1 for e in _tv_sts_eligibility_log
+                            if e.get("eligibility") == "uncertain"
+                        )),
+                        # ── Common cohort ────────────────────────────────────────────
+                        "common_perf": (
+                            _tv_common_perf.to_dict(orient="list")
+                            if _tv_common_perf is not None else None
+                        ),
+                        "n_common": int(_tv_n_common),
+                        # ── Exploratory analytics ──────────────────────────────────────
+                        "youden":                  dict(_tv_youden),
+                        "exploratory_recal":       dict(_tv_exploratory_recal),
+                        "exploratory_thresh_tables": dict(_tv_exploratory_thresh_tables),
                     }
                     st.session_state["_tv_result_sig"] = _tv_context_sig
+
+                # Analytics variables computed in the _tv_run branch; initialize safe
+                # defaults here so the shared display section never hits UnboundLocalError
+                # on the cached-restore path.  The _tv_run branch overwrites these below.
+                _tv_youden: dict = {}
+                _tv_thresh_tables: dict = {}
+                _tv_thresholds_fixed: list = [0.02, 0.05, 0.08, 0.10]
+                _tv_common_perf = None
+                _tv_n_common: int = 0
+                _tv_exploratory_recal: dict = {}
+                _tv_exploratory_thresh_tables: dict = {}
+                _tv_n_not_supported: int = 0
+                _tv_n_uncertain: int = 0
 
                 # ── Display results (runs on fresh compute OR valid session cache) ──
                 if _tv_run or _tv_has_cached:
@@ -2074,6 +2220,17 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _tv_sts_availability = _saved.get("sts_availability", "no_sts")
                         _tv_sts_n_score = int(_saved.get("sts_n_score", 0) or 0)
                         _tv_sts_n_eligible = int(_saved.get("sts_n_eligible", 0) or 0)
+                        _tv_youden = _saved.get("youden", {})
+                        _tv_exploratory_recal = _saved.get("exploratory_recal", {})
+                        _tv_exploratory_thresh_tables = _saved.get("exploratory_thresh_tables", {})
+                        _tv_n_not_supported = int(_saved.get("sts_n_not_supported", 0) or 0)
+                        _tv_n_uncertain     = int(_saved.get("sts_n_uncertain",     0) or 0)
+                        _tv_common_perf_dict = _saved.get("common_perf")
+                        _tv_common_perf = (
+                            pd.DataFrame(_tv_common_perf_dict)
+                            if _tv_common_perf_dict else None
+                        )
+                        _tv_n_common = int(_saved.get("n_common", 0) or 0)
 
                         st.success(tr(
                             "Temporal validation results restored from session — "
@@ -2451,6 +2608,19 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             {tr("Level", "Nível"): tr("Heavily imputed", "Muito imputado"), "n": _cs["n_low"], "%": f"{_cs['n_low']/_cs['n_total']*100:.1f}" if _cs["n_total"] else "0"},
                         ])
                         st.dataframe(_comp_df, width="stretch", hide_index=True)
+
+                        # STS accounting table (only when STS was attempted)
+                        if _tv_sts_availability != "no_sts" and _tv_sts_n_eligible > 0:
+                            st.markdown(tr("**STS pipeline accounting**", "**Accounting do pipeline STS**"))
+                            _acct_df = build_sts_accounting_table(
+                                n_total=_cs["n_total"],
+                                n_not_supported=_tv_n_not_supported,
+                                n_uncertain=_tv_n_uncertain,
+                                n_supported=_tv_sts_n_eligible,
+                                n_final_usable=_tv_sts_n_score,
+                                language=language,
+                            )
+                            st.dataframe(_acct_df, width="stretch", hide_index=True)
 
                     # 7.2 Performance table
                     if not _tv_perf.empty:
@@ -2886,10 +3056,26 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     "Specificity": tr("Specificity", "Especificidade"),
                                     "PPV": "PPV",
                                     "NPV": "NPV",
+                                    "TP": "TP",
+                                    "FP": "FP",
+                                    "TN": "TN",
+                                    "FN": "FN",
                                     "N_Flagged": tr("N Flagged", "N Sinalizados"),
                                     "Positives_per_1000": tr("Per 1000", "Por 1000"),
                                     "Flag_Rate_pct": tr("Flag Rate %", "Taxa sinalizados %"),
                                 })
+                                # Put TP/FP/TN/FN right after threshold for readability
+                                _ordered_cols = [
+                                    "Threshold",
+                                    "TP", "FP", "TN", "FN",
+                                    tr("Sensitivity", "Sensibilidade"),
+                                    tr("Specificity", "Especificidade"),
+                                    "PPV", "NPV",
+                                    tr("N Flagged", "N Sinalizados"),
+                                    tr("Per 1000", "Por 1000"),
+                                    tr("Flag Rate %", "Taxa sinalizados %"),
+                                ]
+                                _tbl_disp = _tbl_disp[[c for c in _ordered_cols if c in _tbl_disp.columns]]
                                 st.dataframe(_tbl_disp, hide_index=True)
                                 if _sc in _tv_youden:
                                     _yt, _yj = _tv_youden[_sc]
@@ -3114,13 +3300,37 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                     st.divider()
                     st.markdown(tr("### Export results", "### Exportar resultados"))
 
-                    # Build markdown report
+                    # Build markdown report (primary)
+                    _sts_acct_for_report = {
+                        "n_total":         _tv_cohort_summary.get("n_total", 0),
+                        "n_not_supported": _tv_n_not_supported,
+                        "n_uncertain":     _tv_n_uncertain,
+                        "n_supported":     _tv_sts_n_eligible,
+                        "n_final_usable":  _tv_sts_n_score,
+                    } if _tv_sts_n_eligible > 0 else None
                     _tv_md = build_temporal_validation_summary(
                         _tv_cohort_summary, _tv_perf, _tv_pairwise, _tv_calib_df,
                         _tv_risk_cat, _tv_meta, _tv_locked_threshold, language,
                         sts_availability=_tv_sts_availability_note,
                         normalization_report=_tv_norm_report,
+                        sts_accounting=_sts_acct_for_report,
+                        common_cohort_perf=_tv_common_perf,
+                        n_common=_tv_n_common,
                     )
+
+                    # Build exploratory appendix and append to Markdown / PDF export
+                    _expl_recal_sum = build_exploratory_recalibration_summary(
+                        _tv_exploratory_recal, _tv_rename, language,
+                    )
+                    _expl_thresh_sum = build_exploratory_threshold_summary(
+                        _tv_exploratory_thresh_tables, _tv_locked_threshold,
+                        _tv_youden, _tv_rename, language,
+                    )
+                    _expl_md = build_exploratory_temporal_validation_section(
+                        _expl_recal_sum, _expl_thresh_sum, language,
+                    )
+                    if _expl_md:
+                        _tv_md = _tv_md + "\n" + _expl_md
 
                     # 9.1 XLSX
                     _tv_xlsx_buf = BytesIO()
@@ -3145,10 +3355,22 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         # Case-level predictions sheet
                         _tv_case_export = _tv_data[_tv_export_case_cols].copy()
                         _tv_case_export.to_excel(_tv_writer, sheet_name="case_level_predictions", index=False)
+                        # Common cohort comparison sheet
+                        if _tv_common_perf is not None and not _tv_common_perf.empty:
+                            _tv_common_perf.to_excel(_tv_writer, sheet_name="common_cohort", index=False)
                         # Normalization summary sheet (only when pipeline was run)
                         if _tv_norm_report is not None:
                             pd.DataFrame(_tv_norm_report.to_export_rows()).to_excel(
                                 _tv_writer, sheet_name="Normalization_Summary", index=False
+                            )
+                        # Exploratory sheets (separate — do not overwrite primary sheets)
+                        if _expl_recal_sum.get("available") and not _expl_recal_sum["table"].empty:
+                            _expl_recal_sum["table"].to_excel(
+                                _tv_writer, sheet_name="Exploratory_Recalibration", index=False
+                            )
+                        if _expl_thresh_sum.get("available") and not _expl_thresh_sum["table"].empty:
+                            _expl_thresh_sum["table"].to_excel(
+                                _tv_writer, sheet_name="Exploratory_Thresholds", index=False
                             )
                     _tv_xlsx_bytes = _tv_xlsx_buf.getvalue()
 

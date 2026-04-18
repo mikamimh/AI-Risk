@@ -20,7 +20,9 @@ Tests are independent of Streamlit and make no network calls.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import inspect
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -37,6 +39,20 @@ from sts_calculator import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+@contextlib.contextmanager
+def _patch_run_async(side_effect):
+    """Context manager that patches ``_run_async`` with *side_effect* while
+    ensuring any coroutine object passed to the mock is closed immediately
+    (preventing ``RuntimeWarning: coroutine … was never awaited`` from GC)."""
+    def _closing_wrapper(coro):
+        if inspect.iscoroutine(coro):
+            coro.close()
+        return side_effect(coro)
+
+    with patch("sts_calculator._run_async", side_effect=_closing_wrapper):
+        yield
+
+
 def _row(name="Patient A", surgery="CABG"):
     """Minimal patient row for the STS pipeline."""
     return {
@@ -52,7 +68,7 @@ def _row(name="Patient A", surgery="CABG"):
 def _make_batch(rows: list, *, run_async_side_effect):
     """Run calculate_sts_batch with ``_run_async`` patched to the given
     side_effect callable.  Returns the batch result list."""
-    with patch("sts_calculator._run_async", side_effect=run_async_side_effect):
+    with _patch_run_async(run_async_side_effect):
         results = calculate_sts_batch(
             rows,
             patient_ids=[r["Name"] for r in rows],
@@ -218,7 +234,7 @@ def test_batch_abort_after_consecutive_failures():
     def _all_fail(coro):
         return {0: {}}
 
-    with patch("sts_calculator._run_async", side_effect=_all_fail):
+    with _patch_run_async(_all_fail):
         results = calculate_sts_batch(
             rows,
             patient_ids=[r["Name"] for r in rows],
@@ -237,7 +253,7 @@ def test_batch_abort_marks_unqueried_rows_as_batch_abort():
     def _all_fail(coro):
         return {0: {}}
 
-    with patch("sts_calculator._run_async", side_effect=_all_fail):
+    with _patch_run_async(_all_fail):
         calculate_sts_batch(rows, patient_ids=[r["Name"] for r in rows], chunk_size=1)
 
     abort_entries = [f for f in calculate_sts_batch.failure_log if f["stage"] == "batch_abort"]
@@ -256,7 +272,7 @@ def test_batch_abort_count_exposed():
     def _all_fail(coro):
         return {0: {}}
 
-    with patch("sts_calculator._run_async", side_effect=_all_fail):
+    with _patch_run_async(_all_fail):
         calculate_sts_batch(rows, patient_ids=[r["Name"] for r in rows], chunk_size=1)
 
     abort_count = calculate_sts_batch._abort_before_query_count
@@ -306,7 +322,7 @@ def test_execution_log_and_failure_log_are_consistent():
     def _all_fail(coro):
         return {0: {}}
 
-    with patch("sts_calculator._run_async", side_effect=_all_fail):
+    with _patch_run_async(_all_fail):
         calculate_sts_batch(rows, patient_ids=[r["Name"] for r in rows], chunk_size=1)
 
     exec_log = calculate_sts_batch.last_execution_log
@@ -337,7 +353,7 @@ def test_chunk_log_populated_after_batch():
     def _all_succeed(coro):
         return {0: _fresh_result()}
 
-    with patch("sts_calculator._run_async", side_effect=_all_succeed):
+    with _patch_run_async(_all_succeed):
         calculate_sts_batch(rows, patient_ids=[r["Name"] for r in rows], chunk_size=1)
 
     chunk_log = calculate_sts_batch.chunk_log
@@ -357,7 +373,7 @@ def test_chunk_log_marks_abort_chunk():
     def _all_fail(coro):
         return {0: {}}
 
-    with patch("sts_calculator._run_async", side_effect=_all_fail):
+    with _patch_run_async(_all_fail):
         calculate_sts_batch(rows, patient_ids=[r["Name"] for r in rows], chunk_size=1)
 
     abort_chunks = [c for c in calculate_sts_batch.chunk_log if c.get("aborted_after_this_chunk")]
@@ -375,7 +391,7 @@ def test_attributes_reset_between_calls():
     def _fail(coro):
         return {0: {}}
 
-    with patch("sts_calculator._run_async", side_effect=_succeed):
+    with _patch_run_async(_succeed):
         calculate_sts_batch(rows, patient_ids=["P1"], chunk_size=1)
     first_fail_count = len(calculate_sts_batch.failure_log)
 
@@ -383,7 +399,7 @@ def test_attributes_reset_between_calls():
     # the second call is not served from cache and actually hits Phase B.
     _sts_mod._sts_memory_cache.clear()
 
-    with patch("sts_calculator._run_async", side_effect=_fail):
+    with _patch_run_async(_fail):
         calculate_sts_batch(rows, patient_ids=["P1"], chunk_size=1)
     second_fail_count = len(calculate_sts_batch.failure_log)
 

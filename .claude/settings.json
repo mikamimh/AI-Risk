@@ -11,7 +11,8 @@
       "Bash(pip show:*)",
       "Bash(python -m pip list)",
       "Bash(python -m pip show numpy xgboost scikit-learn streamlit)",
-      "Bash(python -m pytest tests/test_sts_scope_centralization.py -v)"
+      "Bash(python -m pytest tests/test_sts_scope_centralization.py -v)",
+      "Bash(python -m pytest tests/ -q --tb=short)"
     ]
   }
 }

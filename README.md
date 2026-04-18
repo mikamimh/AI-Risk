@@ -313,7 +313,6 @@ The Temporal Validation tab applies the frozen trained model to an **independent
 - The locked threshold (8% clinical default) is applied from training and is not recalculated
 - All three scores are computed: AI Risk (via the frozen model), EuroSCORE II, and STS Score (via the web calculator with the same cache path as other flows)
 - Performance metrics are reported at the fixed 8% threshold
-- Export options: XLSX (full results table), CSV (predictions), PDF (summary report)
 - Results persist in session state for tab-navigation reuse (see "Session reuse" above)
 - Pairwise ROC comparison uses both bootstrap ΔAUC with 95% CI (always applicable) and the DeLong test. DeLong is **suppressed** when the validation cohort has fewer than 2 events or fewer than 2 non-events — its covariance estimate is mathematically undefined below that floor. In that case the report shows an em dash ('—') for the DeLong p-value with a short footnote explaining the skip, and the bootstrap ΔAUC remains the primary comparison statistic.
 
@@ -322,6 +321,64 @@ The Temporal Validation tab applies the frozen trained model to an **independent
 **STS mode selector:** A checkbox allows the user to include or exclude STS Score from the temporal validation run. When unchecked, STS queries are skipped entirely and the analysis proceeds with AI Risk and EuroSCORE II only. The checkbox defaults to enabled when `websockets` is installed.
 
 **Partial STS availability policy:** Temporal validation now classifies STS coverage for the cohort as `complete`, `partial`, or `unavailable` based on usable final STS scores among STS-eligible rows. When coverage is partial, the UI and PDF report show an explicit warning with exact counts (for example, `6 of 22 eligible`) and label STS summaries as subset-only. When coverage is unavailable, STS-specific cohort-level summaries are omitted and replaced by a clear note. Raw CSV/XLSX exports still retain the STS columns.
+
+### Primary analysis
+
+The primary analysis is methodologically locked:
+
+- The **frozen model** is applied as-is — no retraining, no recalibration.
+- The **locked threshold (8%)** remains unchanged for all primary classification metrics.
+- Comparisons with EuroSCORE II and STS use the same cohort and the same outcome definition.
+- Metrics reported: AUC, AUPRC, Brier score, calibration intercept and slope, Hosmer–Lemeshow p, sensitivity, specificity, PPV, NPV (at the locked threshold), pairwise DeLong AUC comparisons, and risk-category distributions.
+
+### Exploratory analysis
+
+An optional **exploratory appendix** is appended to the report and clearly labelled as supplementary. It includes:
+
+- **Post-hoc recalibration** — intercept-only, intercept + slope (logistic), and isotonic regression, applied to the validation cohort after the fact.
+- **Threshold comparison** — fixed clinical thresholds (2%, 5%, 8%, 10%) and the **Youden's J optimum** per model.
+- **Confusion matrix components** (TP, FP, TN, FN) for each threshold row.
+
+> **Important:** The exploratory section does not alter the primary results. Recalibration is post-hoc and data-driven; Youden's J is optimised on the same cohort being evaluated. Neither should be used to report primary model performance or to replace the locked threshold in clinical decision-making.
+
+### STS availability
+
+STS scoring requires a network call to an external endpoint and is only valid for patients classified as **supported** (within STS ACSD surgical scope). Patients are classified as:
+
+| Status | Description |
+|---|---|
+| `supported` | STS-eligible; query attempted |
+| `not_supported` | Outside STS ACSD scope (e.g. Bentall, aortic dissection repair); skipped |
+| `uncertain` | Ambiguous surgery type or missing fields; skipped |
+
+The report includes a **STS pipeline accounting table** that shows total cohort size, counts per eligibility category, final usable STS scores, and coverage percentage among supported patients.
+
+When STS coverage is **partial**, STS-based metrics reflect only the eligible subset and are not directly comparable to full-cohort AI Risk and EuroSCORE II metrics. A **common-cohort comparison** (all three models evaluated on the STS-available subset) is included in the report when applicable, enabling fair side-by-side comparison.
+
+### Exports and artefacts
+
+| Artefact | Format | Contents |
+|---|---|---|
+| Full report | PDF / Markdown | Primary results + STS accounting + common cohort + exploratory appendix |
+| Summary tables | XLSX (multi-sheet) | Performance, pairwise, calibration, risk categories, common cohort, exploratory recalibration and thresholds |
+| Case-level predictions | CSV | Per-patient scores and risk classes |
+| STS eligibility log | CSV | One row per patient with eligibility status and reason |
+| STS patient audit | CSV | Per-eligible-patient traceability: cache vs. live query, query success, parse success, failure stage/reason |
+
+### Auditability
+
+The **execution details** expander (visible after a run) exposes:
+
+- Pipeline provenance: data loading, surgery classification, STS input builder, model inference steps.
+- Content hash and context signature used for session caching.
+- STS eligibility breakdown and per-chunk execution log.
+- Detailed per-patient failure log when STS queries fail or the batch is aborted early.
+
+### Performance and interpretation notes
+
+**Performance.** Large cohorts, interactive charts, threshold sweeps, and exploratory recalibration can increase processing time. STS scoring time depends on endpoint response latency and cohort size. The STS batch will abort automatically after a configurable number of consecutive failures to avoid unbounded waits.
+
+**Statistical interpretation.** In temporal cohorts with a different event rate from the training set, discrimination (AUC) may remain acceptable while calibration is shifted. This is expected when the baseline risk or case-mix has changed over time and does not by itself invalidate the model — it is one reason the exploratory recalibration module exists.
 
 ## Decision threshold
 

@@ -23,7 +23,7 @@ public name is ``extract_year_quarter_range`` (no leading underscore).
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -193,6 +193,59 @@ def build_sts_availability_summary(
         "comparator_scope_note": comparator_scope_note,
         "score_label": score_label,
     }
+
+# ---------------------------------------------------------------------------
+# STS accounting table
+# ---------------------------------------------------------------------------
+
+def build_sts_accounting_table(
+    n_total: int,
+    n_not_supported: int,
+    n_uncertain: int,
+    n_supported: int,
+    n_final_usable: int,
+    language: str = "English",
+) -> pd.DataFrame:
+    """Build an explicit STS pipeline accounting table.
+
+    Parameters
+    ----------
+    n_total:          Total cohort size.
+    n_not_supported:  Patients excluded (not in STS ACSD scope).
+    n_uncertain:      Patients with uncertain eligibility (missing/ambiguous surgery).
+    n_supported:      Patients classified as STS-eligible (supported).
+    n_final_usable:   Patients with a final usable STS score in the output.
+    language:         ``"English"`` or any other value for Portuguese.
+
+    Returns
+    -------
+    pd.DataFrame with columns ``Category`` and ``Count``
+    (plus ``Pct_of_Supported`` for the final-usable coverage row).
+    """
+    _pt = language not in (None, "", "English")
+
+    def _tr(en: str, pt: str) -> str:
+        return pt if _pt else en
+
+    n_supported_no_score = max(0, n_supported - n_final_usable)
+    coverage_pct = (n_final_usable / n_supported * 100.0) if n_supported > 0 else 0.0
+
+    rows = [
+        (_tr("Total cohort",                         "Total da coorte"),              n_total,             ""),
+        (_tr("Not supported (out of STS scope)",      "Não suportado (fora do escopo STS)"), n_not_supported, ""),
+        (_tr("Uncertain (ambiguous surgery type)",    "Incerto (tipo de cirurgia ambíguo)"), n_uncertain,    ""),
+        (_tr("Supported (STS-eligible)",              "Suportado (STS-elegível)"),     n_supported,         ""),
+        (_tr("Final usable STS score",                "Escore STS final utilizável"),  n_final_usable,      f"{coverage_pct:.1f}%"),
+        (_tr("Supported but no final STS score",      "Suportado sem escore STS final"), n_supported_no_score, ""),
+    ]
+
+    col_cat   = _tr("Category", "Categoria")
+    col_count = _tr("Count", "Contagem")
+    col_cov   = _tr("Coverage (% of supported)", "Cobertura (% dos suportados)")
+
+    df = pd.DataFrame(rows, columns=[col_cat, col_count, col_cov])
+    return df
+
 
 # ---------------------------------------------------------------------------
 # Surrogate / de-identified timeline detection
@@ -525,6 +578,9 @@ def build_temporal_validation_summary(
     language: str = "English",
     sts_availability: Optional[dict] = None,
     normalization_report=None,
+    sts_accounting: Optional[dict] = None,
+    common_cohort_perf: Optional[pd.DataFrame] = None,
+    n_common: int = 0,
 ) -> str:
     """Build Markdown summary for temporal validation results.
 
@@ -773,6 +829,25 @@ def build_temporal_validation_summary(
         lines.append(f"| {_tr(level_label_en, level_label_pt)} | {n} ({pct:.1f}%) |")
     lines.append("")
 
+    # ── STS pipeline accounting table ─────────────────────────────────────
+    if sts_accounting is not None and sts_accounting.get("n_supported", 0) > 0:
+        lines.append(f"## {_tr('STS Pipeline Accounting', 'Accounting do Pipeline STS')}")
+        lines.append("")
+        _acct = sts_accounting
+        _acct_n_sup    = int(_acct.get("n_supported", 0))
+        _acct_n_usable = int(_acct.get("n_final_usable", 0))
+        _acct_cov      = (_acct_n_usable / _acct_n_sup * 100.0) if _acct_n_sup > 0 else 0.0
+        _acct_no_score = max(0, _acct_n_sup - _acct_n_usable)
+        lines.append(f"| {_tr('Category', 'Categoria')} | {_tr('Count', 'Contagem')} | {_tr('Coverage', 'Cobertura')} |")
+        lines.append("|:--|--:|:--|")
+        lines.append(f"| {_tr('Total cohort', 'Total da coorte')} | {_acct.get('n_total', 0)} | |")
+        lines.append(f"| {_tr('Not supported (out of STS scope)', 'Não suportado (fora do escopo STS)')} | {_acct.get('n_not_supported', 0)} | |")
+        lines.append(f"| {_tr('Uncertain (ambiguous surgery type)', 'Incerto (tipo de cirurgia ambíguo)')} | {_acct.get('n_uncertain', 0)} | |")
+        lines.append(f"| {_tr('Supported (STS-eligible)', 'Suportado (STS-elegível)')} | {_acct_n_sup} | |")
+        lines.append(f"| {_tr('Final usable STS score', 'Escore STS final utilizável')} | {_acct_n_usable} | {_acct_cov:.1f}% {_tr('of supported', 'dos suportados')} |")
+        lines.append(f"| {_tr('Supported but no final STS score', 'Suportado sem escore STS final')} | {_acct_no_score} | |")
+        lines.append("")
+
     # ── Performance — split into two narrow sub-tables ────────────────────
     if not performance_df.empty:
         lines.append(f"## {_tr('Discrimination and Calibration', 'Discriminação e Calibração')}")
@@ -857,6 +932,34 @@ def build_temporal_validation_summary(
         lines.append(f"*{sts_note['risk_category_note']}*")
         lines.append("")
 
+    # ── Common cohort comparison ───────────────────────────────────────────
+    if common_cohort_perf is not None and not common_cohort_perf.empty and n_common > 0:
+        lines.append(f"## {_tr('Common STS-Available Cohort Comparison', 'Comparação da Coorte Comum com STS Disponível')}")
+        lines.append("")
+        lines.append(_tr(
+            f"Metrics below use only the {n_common} rows where **all three** models "
+            "(AI Risk, EuroSCORE II, and STS Score) have non-missing predictions. "
+            "This common cohort is a strict STS-available subset and should not be used "
+            "to replace the full-cohort primary results.",
+            f"As métricas abaixo usam apenas as {n_common} linhas em que os **três** modelos "
+            "(AI Risk, EuroSCORE II e STS Score) têm predições não ausentes. "
+            "Esta coorte comum é um subconjunto restrito com STS disponível e não deve substituir "
+            "os resultados primários da coorte completa.",
+        ))
+        lines.append("")
+        tbl_cc_a = _build_sub_table(common_cohort_perf, _PERF_A)
+        if tbl_cc_a:
+            lines.append(f"### {_tr('Discrimination (Common Cohort)', 'Discriminação (Coorte Comum)')}")
+            lines.append("")
+            lines.extend(tbl_cc_a)
+            lines.append("")
+        tbl_cc_b = _build_sub_table(common_cohort_perf, _PERF_B)
+        if tbl_cc_b:
+            lines.append(f"### {_tr('Calibration and Classification (Common Cohort)', 'Calibração e Classificação (Coorte Comum)')}")
+            lines.append("")
+            lines.extend(tbl_cc_b)
+            lines.append("")
+
     lines.append("---")
     lines.append(
         f"*{_tr('Generated by AI Risk — Temporal Validation Module', 'Gerado pelo AI Risk — Módulo de Validação Temporal')}*"
@@ -866,3 +969,394 @@ def build_temporal_validation_summary(
     report = report.replace("DistribuiÃ§Ã£o por Classe de Risco", "Distribuição por Classe de Risco")
     report = report.replace("DistribuiÃƒÂ§ÃƒÂ£o por Classe de Risco", "Distribuição por Classe de Risco")
     return report
+
+
+# ---------------------------------------------------------------------------
+# Exploratory helpers — post-hoc recalibration and threshold analysis
+# ---------------------------------------------------------------------------
+
+_RECAL_METHOD_LABELS: Dict[str, Dict[str, str]] = {
+    "original":       {"English": "Original (no recalibration)", "Portuguese": "Original (sem recalibração)"},
+    "intercept_only": {"English": "Intercept-only (slope = 1)",  "Portuguese": "Apenas intercepto (slope = 1)"},
+    "logistic":       {"English": "Intercept + Slope (logistic)", "Portuguese": "Intercepto + Slope (logístico)"},
+    "isotonic":       {"English": "Isotonic regression",          "Portuguese": "Regressão isotônica"},
+}
+
+_THRESHOLD_TYPE_LABELS: Dict[str, Dict[str, str]] = {
+    "locked":  {"English": "Locked — operational",     "Portuguese": "Bloqueado — operacional"},
+    "youden":  {"English": "Youden J — exploratory",   "Portuguese": "Youden J — exploratório"},
+    "fixed":   {"English": "Fixed clinical",           "Portuguese": "Limiar clínico fixo"},
+}
+
+
+def build_exploratory_recalibration_summary(
+    recal_data: Dict[str, Dict[str, dict]],
+    rename: Dict[str, str],
+    language: str = "English",
+) -> dict:
+    """Format pre-computed recalibration results into a report-ready structure.
+
+    Parameters
+    ----------
+    recal_data:
+        Mapping ``{score_col: {method_key: result_dict}}`` where ``method_key``
+        is one of ``"intercept_only"``, ``"logistic"``, ``"isotonic"`` and
+        ``result_dict`` is the dict returned by the corresponding
+        ``recalibrate_*`` function in ``stats_compare``.
+    rename:
+        Display-name mapping ``{col -> label}`` (same dict used by the tab).
+    language:
+        ``"English"`` or ``"Portuguese"``.
+
+    Returns
+    -------
+    dict with keys:
+        ``"table"``     — :class:`pd.DataFrame` with one row per (score, method).
+        ``"available"`` — ``bool``, ``True`` when at least one score had data.
+    """
+    _lang = "Portuguese" if language not in (None, "", "English") else "English"
+
+    rows = []
+    for score_col, methods in recal_data.items():
+        label = rename.get(score_col, score_col)
+        # Pull "before" stats from any available method (all share the same original).
+        _any = next(iter(methods.values()), {}) if methods else {}
+        brier_before = _any.get("brier_before")
+        cal_int_before = _any.get("cal_intercept_before")
+        cal_slp_before = _any.get("cal_slope_before")
+
+        # Original row (no recalibration).
+        rows.append({
+            "Score": label,
+            "Method": _RECAL_METHOD_LABELS["original"][_lang],
+            "Brier_Before": brier_before,
+            "Brier_After": brier_before,
+            "Cal_Intercept_Before": cal_int_before,
+            "Cal_Intercept_After": cal_int_before,
+            "Cal_Slope_Before": cal_slp_before,
+            "Cal_Slope_After": cal_slp_before,
+        })
+
+        for method_key in ("intercept_only", "logistic", "isotonic"):
+            res = methods.get(method_key)
+            if res is None:
+                continue
+            rows.append({
+                "Score": label,
+                "Method": _RECAL_METHOD_LABELS[method_key][_lang],
+                "Brier_Before": res.get("brier_before"),
+                "Brier_After": res.get("brier_after"),
+                "Cal_Intercept_Before": res.get("cal_intercept_before"),
+                "Cal_Intercept_After": res.get("cal_intercept_after"),
+                "Cal_Slope_Before": res.get("cal_slope_before"),
+                "Cal_Slope_After": res.get("cal_slope_after"),
+            })
+
+    if not rows:
+        return {"table": pd.DataFrame(), "available": False}
+
+    cols = [
+        "Score", "Method",
+        "Brier_Before", "Brier_After",
+        "Cal_Intercept_Before", "Cal_Intercept_After",
+        "Cal_Slope_Before", "Cal_Slope_After",
+    ]
+    return {"table": pd.DataFrame(rows)[cols], "available": True}
+
+
+def build_exploratory_threshold_summary(
+    threshold_tables: Dict[str, pd.DataFrame],
+    locked_threshold: float,
+    youden_thresholds: Dict[str, Tuple[float, float]],
+    rename: Dict[str, str],
+    language: str = "English",
+) -> dict:
+    """Format pre-computed threshold-analysis tables into a report-ready structure.
+
+    Parameters
+    ----------
+    threshold_tables:
+        Mapping ``{score_col: df}`` where ``df`` comes from
+        ``threshold_analysis_table()`` in ``stats_compare``.  Must contain
+        columns ``Threshold``, ``Sensitivity``, ``Specificity``, ``PPV``,
+        ``NPV``, ``TP``, ``FP``, ``TN``, ``FN``, ``N_Flagged``, ``Flag_Rate_pct``.
+    locked_threshold:
+        The operationally locked threshold (float, e.g. ``0.08``).
+    youden_thresholds:
+        Mapping ``{score_col: (threshold, j_score)}``.
+    rename:
+        Display-name mapping ``{col -> label}``.
+    language:
+        ``"English"`` or ``"Portuguese"``.
+
+    Returns
+    -------
+    dict with keys:
+        ``"table"``       — :class:`pd.DataFrame` with one row per (score, threshold).
+        ``"note_locked"`` — ``str`` explanatory note about the locked threshold.
+        ``"note_youden"`` — ``str`` explanatory note about Youden's J.
+        ``"available"``   — ``bool``.
+    """
+    _lang = "Portuguese" if language not in (None, "", "English") else "English"
+
+    def _type_label(thr: float, score_col: str) -> str:
+        if abs(thr - locked_threshold) < 1e-9:
+            return _THRESHOLD_TYPE_LABELS["locked"][_lang]
+        if score_col in youden_thresholds and abs(thr - youden_thresholds[score_col][0]) < 1e-9:
+            return _THRESHOLD_TYPE_LABELS["youden"][_lang]
+        return _THRESHOLD_TYPE_LABELS["fixed"][_lang]
+
+    rows = []
+    for score_col, df in threshold_tables.items():
+        if df.empty:
+            continue
+        label = rename.get(score_col, score_col)
+        for _, row in df.iterrows():
+            thr = float(row["Threshold"])
+            tp = float(row.get("TP", 0))
+            fp = float(row.get("FP", 0))
+            fn = float(row.get("FN", 0))
+            tn = float(row.get("TN", 0))
+            era = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
+            erb = fn / (fn + tn) if (fn + tn) > 0 else float("nan")
+            rows.append({
+                "Score": label,
+                "Threshold": thr,
+                "Type": _type_label(thr, score_col),
+                "TP": int(tp),
+                "FP": int(fp),
+                "TN": int(tn),
+                "FN": int(fn),
+                "Sensitivity": row.get("Sensitivity"),
+                "Specificity": row.get("Specificity"),
+                "PPV": row.get("PPV"),
+                "NPV": row.get("NPV"),
+                "N_Flagged": row.get("N_Flagged"),
+                "Flag_Rate_pct": row.get("Flag_Rate_pct"),
+                "Event_Rate_Above": era,
+                "Event_Rate_Below": erb,
+            })
+
+    if not rows:
+        return {
+            "table": pd.DataFrame(),
+            "note_locked": "",
+            "note_youden": "",
+            "available": False,
+        }
+
+    cols = [
+        "Score", "Threshold", "Type",
+        "TP", "FP", "TN", "FN",
+        "Sensitivity", "Specificity", "PPV", "NPV",
+        "N_Flagged", "Flag_Rate_pct",
+        "Event_Rate_Above", "Event_Rate_Below",
+    ]
+    if _lang == "Portuguese":
+        note_locked = (
+            f"**Limiar bloqueado ({locked_threshold:.1%}):** O limiar operacional pré-especificado "
+            f"do estudo primário. Permanece inalterado. Todas as métricas primárias de "
+            f"sensibilidade/especificidade reportadas em outros locais utilizam este limiar."
+        )
+        note_youden = (
+            "**Ótimo de Youden J:** Derivado da coorte de validação maximizando "
+            "Sensibilidade + Especificidade − 1. Trata-se de um ótimo post-hoc orientado pelos "
+            "dados e não deve ser utilizado como limiar operacional primário. Uso apenas "
+            "exploratório/suplementar."
+        )
+    else:
+        note_locked = (
+            f"**Locked threshold ({locked_threshold:.1%}):** The prespecified operational "
+            f"threshold from the primary study. Remains unchanged. All primary "
+            f"sensitivity/specificity metrics reported elsewhere use this threshold."
+        )
+        note_youden = (
+            "**Youden's J optimum:** Derived from the validation cohort by maximising "
+            "Sensitivity + Specificity − 1. This is a data-driven, post-hoc optimum and must "
+            "not be used as the primary operating threshold. Exploratory/supplementary use only."
+        )
+
+    return {
+        "table": pd.DataFrame(rows)[cols],
+        "note_locked": note_locked,
+        "note_youden": note_youden,
+        "available": True,
+    }
+
+
+def build_exploratory_temporal_validation_section(
+    recal_summary: Optional[dict],
+    threshold_summary: Optional[dict],
+    language: str = "English",
+) -> str:
+    """Build the Markdown string for the exploratory appendix section.
+
+    This section is appended AFTER the main temporal-validation report and is
+    clearly labelled as exploratory.  It must not alter the primary metrics.
+
+    Parameters
+    ----------
+    recal_summary:
+        Output of :func:`build_exploratory_recalibration_summary`, or ``None``.
+    threshold_summary:
+        Output of :func:`build_exploratory_threshold_summary`, or ``None``.
+    language:
+        ``"English"`` or ``"Portuguese"``.
+
+    Returns
+    -------
+    str — Markdown text (may be empty string when both inputs are ``None``).
+    """
+    _lang = "Portuguese" if language not in (None, "", "English") else "English"
+
+    def _tr(en: str, pt: str) -> str:
+        return en if _lang == "English" else pt
+
+    def _fv(val, decimals: int = 3) -> str:
+        try:
+            if val is None:
+                return "N/A"
+            if isinstance(val, float) and (val != val):  # NaN check without numpy
+                return "N/A"
+            if isinstance(val, float):
+                return f"{val:.{decimals}f}"
+            return str(val)
+        except Exception:
+            return "N/A"
+
+    def _pct(val) -> str:
+        try:
+            if val is None:
+                return "N/A"
+            if isinstance(val, float) and (val != val):
+                return "N/A"
+            return f"{float(val):.1%}"
+        except Exception:
+            return "N/A"
+
+    has_recal = recal_summary is not None and recal_summary.get("available", False)
+    has_thresh = threshold_summary is not None and threshold_summary.get("available", False)
+
+    if not has_recal and not has_thresh:
+        return ""
+
+    lines: List[str] = []
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"## {_tr('Appendix: Exploratory Post-hoc Recalibration and Threshold Analysis', 'Apêndice: Análise Exploratória de Recalibração Pós-hoc e Limiar')}")
+    lines.append("")
+    lines.append(
+        f"> **{_tr('Exploratory only', 'Apenas exploratório')}.**"
+        f" {_tr('Recalibration was applied post-hoc to the validation cohort itself.', 'A recalibração foi aplicada post-hoc à própria coorte de validação.')}"
+        f" {_tr('These results were not clinically validated and must not be used to report the primary model performance or guide clinical decisions.', 'Estes resultados não foram validados clinicamente e não devem ser usados para reportar o desempenho primário do modelo nem orientar decisões clínicas.')}"
+        f" {_tr('The frozen model and locked threshold remain unchanged.', 'O modelo congelado e o limiar bloqueado permanecem inalterados.')}"
+    )
+    lines.append("")
+
+    # ── Recalibration section ────────────────────────────────────────────────
+    if has_recal:
+        lines.append(f"### {_tr('Post-hoc Recalibration Summary', 'Resumo da Recalibração Pós-hoc')}")
+        lines.append("")
+        lines.append(_tr(
+            "Four conditions are compared: Original (no recalibration), Intercept-only "
+            "(slope fixed at 1), Intercept + Slope (logistic), and Isotonic Regression. "
+            "All methods are applied to the same validation cohort.",
+            "Quatro condições são comparadas: Original (sem recalibração), Apenas intercepto "
+            "(slope fixo em 1), Intercepto + Slope (logístico) e Regressão isotônica. "
+            "Todos os métodos são aplicados à mesma coorte de validação.",
+        ))
+        lines.append("")
+
+        tbl = recal_summary["table"]
+        # Build Markdown table
+        headers = [
+            _tr("Score", "Escore"),
+            _tr("Method", "Método"),
+            _tr("Brier Before", "Brier Antes"),
+            _tr("Brier After", "Brier Depois"),
+            _tr("Cal.Int. Before", "Int.Cal. Antes"),
+            _tr("Cal.Int. After", "Int.Cal. Depois"),
+            _tr("Cal.Slope Before", "Slope.Cal. Antes"),
+            _tr("Cal.Slope After", "Slope.Cal. Depois"),
+        ]
+        lines.append("| " + " | ".join(headers) + " |")
+        lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+        for _, row in tbl.iterrows():
+            cells = [
+                str(row.get("Score", "")),
+                str(row.get("Method", "")),
+                _fv(row.get("Brier_Before"), 4),
+                _fv(row.get("Brier_After"), 4),
+                _fv(row.get("Cal_Intercept_Before"), 3),
+                _fv(row.get("Cal_Intercept_After"), 3),
+                _fv(row.get("Cal_Slope_Before"), 3),
+                _fv(row.get("Cal_Slope_After"), 3),
+            ]
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
+
+    # ── Threshold comparison section ─────────────────────────────────────────
+    if has_thresh:
+        lines.append(f"### {_tr('Threshold Comparison', 'Comparação de Limiares')}")
+        lines.append("")
+        lines.append(_tr(
+            "The table below compares the prespecified locked threshold with the Youden J "
+            "optimum and optional fixed clinical thresholds. "
+            "**Only the locked threshold governs primary analysis.**",
+            "A tabela abaixo compara o limiar bloqueado pré-especificado com o ótimo de "
+            "Youden J e limiares clínicos fixos opcionais. "
+            "**Apenas o limiar bloqueado rege a análise primária.**",
+        ))
+        lines.append("")
+
+        ttbl = threshold_summary["table"]
+        headers = [
+            _tr("Score", "Escore"),
+            _tr("Threshold", "Limiar"),
+            _tr("Type", "Tipo"),
+            "TP", "FP", "TN", "FN",
+            _tr("Sensitivity", "Sensibilidade"),
+            _tr("Specificity", "Especificidade"),
+            "PPV",
+            "NPV",
+            _tr("N Flagged", "N Sinalizados"),
+            _tr("Flag Rate %", "Taxa sinalizados %"),
+            _tr("Event Rate (Above)", "Taxa evento (acima)"),
+            _tr("Event Rate (Below)", "Taxa evento (abaixo)"),
+        ]
+        lines.append("| " + " | ".join(headers) + " |")
+        lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+        for _, row in ttbl.iterrows():
+            cells = [
+                str(row.get("Score", "")),
+                _pct(row.get("Threshold")),
+                str(row.get("Type", "")),
+                str(int(row["TP"]) if row.get("TP") is not None else "N/A"),
+                str(int(row["FP"]) if row.get("FP") is not None else "N/A"),
+                str(int(row["TN"]) if row.get("TN") is not None else "N/A"),
+                str(int(row["FN"]) if row.get("FN") is not None else "N/A"),
+                _fv(row.get("Sensitivity"), 3),
+                _fv(row.get("Specificity"), 3),
+                _fv(row.get("PPV"), 3),
+                _fv(row.get("NPV"), 3),
+                str(int(row["N_Flagged"]) if row.get("N_Flagged") is not None else "N/A"),
+                _fv(row.get("Flag_Rate_pct"), 1),
+                _pct(row.get("Event_Rate_Above")),
+                _pct(row.get("Event_Rate_Below")),
+            ]
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
+
+        if threshold_summary.get("note_locked"):
+            lines.append(f"> {threshold_summary['note_locked']}")
+            lines.append("")
+        if threshold_summary.get("note_youden"):
+            lines.append(f"> {threshold_summary['note_youden']}")
+            lines.append("")
+
+    lines.append("---")
+    lines.append(
+        f"*{_tr('Generated by AI Risk — Exploratory Module', 'Gerado pelo AI Risk — Módulo Exploratório')}*"
+    )
+    return "\n".join(lines)
