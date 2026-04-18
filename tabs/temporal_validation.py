@@ -1080,18 +1080,29 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             )
 
                             _cache_hits_f  = max(0, _sts_n_elig_f - _total_pend_f) if _total_pend_f > 0 else 0
-                            _completed_f   = _cache_hits_f + _net_comp_f
-                            _failed_f      = _net_fail_f
+                            # finalized = every patient with a definitive outcome
+                            #             (cache hit  OR  network success  OR  network failure)
+                            _finalized_f   = _cache_hits_f + _net_comp_f + _net_fail_f
+                            # in_flight = 1 while chunk_start has fired but chunk_done has not yet
+                            # Formula: dispatched_so_far - finalized_so_far
+                            #   dispatched = cache_hits + (pat_n + 1)   [pat_n is 0-based index]
+                            #   in window between chunk_done and next chunk_start this equals 0
+                            _in_flight_f   = (
+                                max(0, (_cache_hits_f + _pat_n_f + 1) - _finalized_f)
+                                if _total_pend_f > 0 else 0
+                            )
+                            # remaining = patients not yet started (neither finalized nor in-flight)
+                            _remaining_f   = max(0, _sts_n_elig_f - _finalized_f - _in_flight_f)
                             _skipped_f     = _sts_n_ns_f + _sts_n_unc_f
-                            _cur_num_f     = _cache_hits_f + _pat_n_f + 1 if _total_pend_f > 0 else "?"
-                            _remaining_f   = max(0, _total_pend_f - _pat_n_f - 1) if _total_pend_f > 0 else "?"
+                            # cur_num = 1-based position of the patient currently being processed
+                            _cur_num_f     = _finalized_f + _in_flight_f if _total_pend_f > 0 else "?"
 
-                            # Progress bar
+                            # Progress bar — numerator = finalized (not completed-only)
                             if _sts_n_elig_f > 0 and _total_pend_f > 0:
-                                _prog_frac_f = min(1.0, (_cache_hits_f + _pat_n_f) / _sts_n_elig_f)
+                                _prog_frac_f = min(1.0, _finalized_f / _sts_n_elig_f)
                                 _prog_text_f = tr(
-                                    f"STS Score — {_completed_f} of {_sts_n_elig_f} processed ({_prog_frac_f:.0%})",
-                                    f"STS Score — {_completed_f} de {_sts_n_elig_f} processados ({_prog_frac_f:.0%})",
+                                    f"STS Score — {_finalized_f} of {_sts_n_elig_f} finalized ({_prog_frac_f:.1%})",
+                                    f"STS Score — {_finalized_f} de {_sts_n_elig_f} finalizados ({_prog_frac_f:.1%})",
                                 )
                             elif _sts_n_elig_f > 0 and _total_pend_f == 0 and _pat_start_f is None:
                                 _prog_frac_f = 0.10
@@ -1133,9 +1144,12 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 f"lote: {_batch_elapsed_f} s",
                             )
                             if _pat_elapsed_f is not None and _total_pend_f > 0:
+                                # Show wall-clock time and the per-patient limit as two separate
+                                # values (· not /) so the display is honest when setup/teardown
+                                # overhead makes the elapsed counter exceed the asyncio timeout.
                                 _time_disp_f = tr(
-                                    f"current query: {_pat_elapsed_f}/{STS_PER_PATIENT_TIMEOUT_S} s · {_batch_str_f}",
-                                    f"consulta atual: {_pat_elapsed_f}/{STS_PER_PATIENT_TIMEOUT_S} s · {_batch_str_f}",
+                                    f"current query: {_pat_elapsed_f} s · limit: {STS_PER_PATIENT_TIMEOUT_S} s · {_batch_str_f}",
+                                    f"consulta atual: {_pat_elapsed_f} s · limite: {STS_PER_PATIENT_TIMEOUT_S} s · {_batch_str_f}",
                                 )
                                 _pat_num_f = tr(
                                     f"patient {_cur_num_f}/{_sts_n_elig_f}"
@@ -1152,15 +1166,20 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 if _frag_state == "cancelling"
                                 else tr("Running", "Em execução")
                             )
+                            # All counters close: finalized + in_flight + remaining = eligible_total
                             _inf_col_f.caption(tr(
                                 f"STS — {_state_lbl_f}: "
                                 f"{_pat_num_f} · "
-                                f"completed {_completed_f} · failed {_failed_f} · skipped {_skipped_f} · remaining {_remaining_f} · "
+                                f"finalized {_finalized_f} · completed {_cache_hits_f + _net_comp_f} · "
+                                f"failed {_net_fail_f} · in-flight {_in_flight_f} · "
+                                f"remaining {_remaining_f} · skipped {_skipped_f} · "
                                 f"{_time_disp_f} · "
                                 f"phase: {_sts_prog_f.get('phase', '…')}",
                                 f"STS — {_state_lbl_f}: "
                                 f"{_pat_num_f} · "
-                                f"concluídos {_completed_f} · falhas {_failed_f} · ignorados {_skipped_f} · restantes {_remaining_f} · "
+                                f"finalizados {_finalized_f} · concluídos {_cache_hits_f + _net_comp_f} · "
+                                f"falhas {_net_fail_f} · em consulta {_in_flight_f} · "
+                                f"restantes {_remaining_f} · ignorados {_skipped_f} · "
                                 f"{_time_disp_f} · "
                                 f"fase: {_sts_prog_f.get('phase', '…')}",
                             ))
