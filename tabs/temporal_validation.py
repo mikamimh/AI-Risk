@@ -1068,6 +1068,19 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     sorted(_ethr_set),
                                 )
 
+                        # ── Common-cohort (STS-available subset) ─────────────────────
+                        _tv_common_perf = None
+                        _tv_n_common = 0
+                        if "sts_score" in _tv_data.columns and len(_tv_score_cols) >= 2:
+                            _common_sub = _tv_data[_tv_score_cols + ["morte_30d"]].dropna()
+                            _tv_n_common = len(_common_sub)
+                            if _tv_n_common >= 10 and _common_sub["morte_30d"].nunique() >= 2:
+                                _tv_common_perf = evaluate_scores_temporal(
+                                    _common_sub, "morte_30d", _tv_score_cols
+                                )
+                                if _tv_common_perf is not None and not _tv_common_perf.empty:
+                                    _tv_common_perf["Score"] = _tv_common_perf["Score"].replace(_tv_rename)
+
                         st.session_state["_tv_result"] = {
                             "data": _tv_data.copy(),
                             "perf": _tv_perf,
