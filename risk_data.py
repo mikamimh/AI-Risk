@@ -51,6 +51,53 @@ NONE_IS_VALID_COLUMNS = {
     "tricuspid_regurgitation_pre",
 }
 
+# Binary history variables where a blank cell in the source data means the
+# condition is absent (implicit negative), NOT that the information is unknown.
+# This convention is standard in cardiac surgery registries (STS, EuroSCORE II):
+# if a historical flag is positive, it is always explicitly documented; blank
+# entries are used as shorthand for "No" by the data entry workflow.
+#
+# Populated by _impute_blank_as_no() AFTER normalize_dataframe() so that all
+# MISSING_TOKENS have already been standardised to NaN.
+#
+# Excluded from this set (intentionally):
+#   "Suspension of Anticoagulation (day)" — numeric, conditional on
+#   Anticoagulation=Yes; blank = N/A, not zero days.
+BLANK_MEANS_NO_COLUMNS: frozenset = frozenset({
+    "Previous surgery",
+    "HF",
+    "Arrhythmia Remote",
+    "Arrhythmia Recent",
+    "Family Hx of CAD",
+    "Anticoagulation/ Antiaggregation",
+})
+
+
+def _impute_blank_as_no(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill NaN with 'No' for BLANK_MEANS_NO_COLUMNS after missing-token normalisation.
+
+    Must be called AFTER normalize_dataframe() so that every MISSING_TOKEN
+    (empty string, '-', 'nan', etc.) has already been converted to NaN.
+
+    Semantics preserved:
+    - Existing "Yes" or "No" values are never overwritten.
+    - Columns absent from the DataFrame are silently skipped.
+    - Conditional/numeric fields (e.g. "Suspension of Anticoagulation (day)")
+      are not in BLANK_MEANS_NO_COLUMNS and are therefore untouched.
+    - True missing values in continuous/lab/echo fields are unaffected.
+
+    Returns a copy of *df*.
+    """
+    out = df.copy()
+    for col in BLANK_MEANS_NO_COLUMNS:
+        if col not in out.columns:
+            continue
+        n_filled = int(out[col].isna().sum())
+        if n_filled > 0:
+            out[col] = out[col].fillna("No")
+    return out
+
+
 REQUIRED_SOURCE_TABLES = [
     "Preoperative",
     "Pre-Echocardiogram",
@@ -2207,6 +2254,9 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
 
     # ── Unified normalization ──
     data, ingestion_report = normalize_dataframe(data, source_label="flat")
+    # Interpret blank as implicit "No" for binary history columns where the
+    # source data convention is: present → documented; absent → left blank.
+    data = _impute_blank_as_no(data)
 
     exclude_cols = {
         "morte_30d",
@@ -2350,6 +2400,9 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
 
     # ── Unified normalization ──
     pre_post, ingestion_report = normalize_dataframe(pre_post, source_label="master")
+    # Interpret blank as implicit "No" for binary history columns where the
+    # source data convention is: present → documented; absent → left blank.
+    pre_post = _impute_blank_as_no(pre_post)
 
     pre_cols_exclude = {
         "Name",

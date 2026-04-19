@@ -437,12 +437,12 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
 
     # ── Begin tab body ───────────────────────────────────────────────────
 
-    st.subheader(tr("Statistical performance comparison", "Comparação estatística de desempenho"))
+    st.subheader(tr("Comparison", "Comparison"))
     st.caption(tr(
-        "Primary analysis: triple cohort (same patients for all three scores). "
-        "Pairwise and reclassification analyses are complementary.",
-        "Análise principal: coorte tripla (mesmos pacientes para os três escores). "
-        "Análises pareadas e de reclassificação são complementares.",
+        "Primary analysis: head-to-head comparison between risk scores in the matched triple cohort. "
+        "Supplementary sections cover candidate thresholds, DCA, pairwise analyses, and diagnostics.",
+        "Análise principal: comparação direta entre escores de risco na coorte tripla pareada. "
+        "Seções suplementares cobrem limiares candidatos, DCA, análises pareadas e diagnósticos.",
     ))
 
     # ── Threshold mode selector ──
@@ -457,6 +457,7 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
         if _youden_available
         else tr("Youden threshold (not available — retrain required)", "Limiar de Youden (indisponível — retreino necessário)")
     )
+    st.markdown(tr("#### Operational threshold", "#### Limiar operacional"))
     _threshold_mode = st.radio(
         tr("Threshold mode", "Modo de limiar"),
         options=[_mode_fixed_label, _mode_youden_label],
@@ -474,12 +475,12 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
     _slider_default = _best_youden if _use_youden else _default_threshold
 
     if _use_youden:
-        st.info(tr(
+        st.caption(tr(
             f"**Active threshold: Best model Youden = {_slider_default*100:.1f}%** (probability {_slider_default:.4f})",
             f"**Limiar ativo: Youden do melhor modelo = {_slider_default*100:.1f}%** (probabilidade {_slider_default:.4f})",
         ))
     else:
-        st.info(tr(
+        st.caption(tr(
             f"**Active threshold: Fixed clinical = {_default_threshold*100:.1f}%** (probability {_default_threshold:.4f})",
             f"**Limiar ativo: Clínico fixo = {_default_threshold*100:.1f}%** (probabilidade {_default_threshold:.4f})",
         ))
@@ -520,7 +521,7 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
         )
 
     st.divider()
-    st.markdown(tr("### Main Result — Triple Cohort", "### Resultado Principal — Coorte Tripla"))
+    st.markdown(tr("### Main Result — Matched Triple Cohort", "### Resultado Principal — Coorte Tripla Pareada"))
     st.caption(tr(
         "AI Risk, EuroSCORE II, and STS Score evaluated in exactly the same patients (matched cohort). "
         "This is the primary comparative analysis.",
@@ -536,18 +537,13 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     _score_rename = {"ia_risk_oof": "AI Risk", "euroscore_calc": "EuroSCORE II", "sts_score": "STS"}
     if not metrics_all.empty:
         metrics_all["Score"] = metrics_all["Score"].replace(_score_rename)
-    st.markdown(tr("**Overall comparison (each score with all available patients)**", "**Comparação geral (cada escore com todos os pacientes disponíveis)**"))
-    st.caption(
-        tr(
-            "This table uses all available observations for each score separately. It is useful for a broad overview, but the fairest head-to-head comparison is the triple analysis below.",
-            "Esta tabela usa todas as observações disponíveis para cada escore separadamente. É útil para uma visão ampla, mas a comparação mais justa entre os três está na análise tripla abaixo.",
-        )
-    )
-    st.dataframe(metrics_all, width="stretch", column_config=stats_table_column_config("overall"))
 
     triple = df[["morte_30d", "ia_risk_oof", "euroscore_calc", "sts_score"]].dropna()
-    st.markdown(tr("**Three-way head-to-head (matched cohort)**", "**Comparação tripla (coorte pareada)**"))
-    st.caption(f"n = {len(triple)}")
+    st.markdown(tr("**Primary head-to-head table**", "**Tabela principal head-to-head**"))
+    st.caption(tr(
+        f"Matched triple cohort: n = {len(triple)}. Each score is evaluated in exactly the same patients.",
+        f"Coorte tripla pareada: n = {len(triple)}. Cada escore é avaliado exatamente nos mesmos pacientes.",
+    ))
     triple_ci = pd.DataFrame()
     threshold_metrics = pd.DataFrame()
     if len(triple) >= 30 and triple["morte_30d"].nunique() > 1:
@@ -614,6 +610,49 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
             calib_rows.append({"Score": label, **ci_vals, **hl_vals, "Brier": brier_val})
         calib_df = pd.DataFrame(calib_rows)
 
+        _best_auc_label = None
+        _best_auc_value = np.nan
+        _best_brier_label = None
+        _best_brier_value = np.nan
+        if not triple_ci.empty and "AUC" in triple_ci.columns:
+            _best_auc_row = triple_ci.sort_values("AUC", ascending=False).iloc[0]
+            _best_auc_label = _best_auc_row["Score"]
+            _best_auc_value = float(_best_auc_row["AUC"])
+        if not triple_ci.empty and "Brier" in triple_ci.columns:
+            _best_brier_row = triple_ci.sort_values("Brier", ascending=True).iloc[0]
+            _best_brier_label = _best_brier_row["Score"]
+            _best_brier_value = float(_best_brier_row["Brier"])
+        _best_cal_label = None
+        _best_cal_value = np.nan
+        if not calib_df.empty and "Calibration slope" in calib_df.columns:
+            _cal_rank = calib_df.assign(_slope_distance=(calib_df["Calibration slope"] - 1.0).abs())
+            _best_cal_row = _cal_rank.sort_values("_slope_distance", ascending=True).iloc[0]
+            _best_cal_label = _best_cal_row["Score"]
+            _best_cal_value = float(_best_cal_row["Calibration slope"])
+
+        _m1, _m2, _m3, _m4 = st.columns(4)
+        _m1.metric(tr("Triple cohort", "Coorte tripla"), f"n = {len(triple)}", border=True)
+        _m2.metric(
+            tr("Best AUC", "Melhor AUC"),
+            "N/A" if not np.isfinite(_best_auc_value) else f"{_best_auc_value:.3f}",
+            delta=_best_auc_label or "",
+            border=True,
+        )
+        _m3.metric(
+            tr("Lowest Brier", "Menor Brier"),
+            "N/A" if not np.isfinite(_best_brier_value) else f"{_best_brier_value:.3f}",
+            delta=_best_brier_label or "",
+            delta_color="off",
+            border=True,
+        )
+        _m4.metric(
+            tr("Calibration slope closest to 1", "Slope de calibração mais próximo de 1"),
+            "N/A" if not np.isfinite(_best_cal_value) else f"{_best_cal_value:.2f}",
+            delta=_best_cal_label or "",
+            delta_color="off",
+            border=True,
+        )
+
         # ── Calibration at a Glance ──────────────────────────────────────
         st.divider()
         st.markdown(tr("### Calibration at a Glance", "### Calibração em Resumo"))
@@ -635,6 +674,30 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
             "O Brier mede a acurácia probabilística. Calibration-in-the-large (intercepto) próximo de 0 e slope próximo de 1 são desejáveis. O teste de Hosmer-Lemeshow deve ser interpretado como complementar, e não isoladamente.",
         ))
         st.dataframe(calib_df, width="stretch", column_config=stats_table_column_config("calibration"))
+
+        st.markdown(tr("### Threshold Comparison", "### Comparação entre Limiares"))
+        st.caption(tr(
+            "The fixed 8% threshold remains the operational threshold of the study. "
+            "The other cutoffs are supplementary benchmarks for sensitivity, specificity, and case flagging.",
+            "O limiar fixo de 8% continua sendo o limiar operacional do estudo. "
+            "Os demais pontos de corte são referências suplementares para sensibilidade, especificidade e classificação de alto risco.",
+        ))
+        _threshold_comparison_for_display = _build_threshold_comparison_export_df(
+            df=df,
+            artifacts=artifacts,
+            forced_model=forced_model,
+        )
+        if not _threshold_comparison_for_display.empty:
+            st.dataframe(
+                _format_ppv_npv(_threshold_comparison_for_display),
+                width="stretch",
+                hide_index=True,
+            )
+        else:
+            st.info(tr(
+                "Threshold comparison is unavailable because the AI Risk outcome sample is insufficient.",
+                "A comparação entre limiares não está disponível porque a amostra de desfecho do AI Risk é insuficiente.",
+            ))
 
         scores_plot = {
             "AI Risk": triple["ia_risk_oof"].values,
@@ -666,14 +729,26 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     else:
         st.warning(tr("Insufficient sample for complete triple comparison.", "Amostra insuficiente para comparação tripla completa."))
 
+    st.divider()
+    st.markdown(tr("### Overall Comparison — Available Data", "### Comparação Geral — Dados Disponíveis"))
+    st.caption(
+        tr(
+            "Supplementary overview using all available observations for each score separately. "
+            "Because sample sizes can differ by score, the matched triple cohort above remains the primary head-to-head result.",
+            "Visão suplementar usando todas as observações disponíveis para cada escore separadamente. "
+            "Como os tamanhos amostrais podem diferir por escore, a coorte tripla pareada acima continua sendo o resultado head-to-head principal.",
+        )
+    )
+    st.dataframe(metrics_all, width="stretch", column_config=stats_table_column_config("overall"))
+
     # ── Read-only probability distribution diagnostics ────────────────────
     # Diagnostic-only panel: does NOT change thresholds, model logic,
     # methodology, or any metric shown above. Inspects the exact
     # probability source already used by this tab (calibrated OOF).
     with st.expander(
         tr(
-            "Probability distribution diagnostics (read-only)",
-            "Diagnóstico de distribuição de probabilidades (somente leitura)",
+            "Advanced diagnostics — probability distribution (read-only)",
+            "Diagnóstico avançado — distribuição de probabilidades (somente leitura)",
         ),
         expanded=False,
     ):
@@ -910,11 +985,11 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
                 ))
 
     st.divider()
-    st.markdown(tr("### Pairwise Comparisons", "### Comparações Pareadas"))
+    st.markdown(tr("### Supplementary Pairwise Comparisons", "### Comparações Pareadas Suplementares"))
     st.caption(tr(
-        "Formal ROC comparison between pairs of scores. "
+        "Formal ROC comparison between pairs of scores, positioned as supplementary evidence below the matched triple cohort. "
         "Bootstrap and DeLong results are complementary — interpret together.",
-        "Comparação formal entre pares de escores. "
+        "Comparação formal entre pares de escores, posicionada como evidência suplementar abaixo da coorte tripla pareada. "
         "Bootstrap e DeLong são complementares — interpretar em conjunto.",
     ))
 
@@ -1009,7 +1084,7 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     st.dataframe(delong_df, width="stretch", column_config=stats_table_column_config("comparison"))
 
     st.divider()
-    st.markdown(tr("### Clinical Utility", "### Utilidade Clínica"))
+    st.markdown(tr("### Supplementary Clinical Utility", "### Utilidade Clínica Suplementar"))
 
     st.markdown(tr("**Decision curve analysis (DCA)**", "**Decision curve analysis (DCA)**"))
     st.caption(
@@ -1093,6 +1168,10 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
 
     st.divider()
     st.markdown(tr("### Interpretation & Export", "### Interpretação e Exportação"))
+    st.caption(tr(
+        "Narrative interpretation and on-demand exports. Files are generated only when requested.",
+        "Interpretação narrativa e exports sob demanda. Os arquivos são gerados apenas quando solicitados.",
+    ))
 
     with st.expander(tr("Clinical interpretation", "Interpretação clínica"), expanded=False):
         if len(triple) >= 30 and triple["morte_30d"].nunique() > 1:
@@ -1233,10 +1312,14 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     _dca_df_for_export = dca_df if 'dca_df' in locals() else pd.DataFrame()
     _metrics_all_for_export = metrics_all if 'metrics_all' in locals() else pd.DataFrame()
     _pair_df_for_export = pd.DataFrame(pair_rows) if 'pair_rows' in locals() else pd.DataFrame()
-    _threshold_comparison_for_export = _build_threshold_comparison_export_df(
-        df=df,
-        artifacts=artifacts,
-        forced_model=forced_model,
+    _threshold_comparison_for_export = (
+        _threshold_comparison_for_display
+        if '_threshold_comparison_for_display' in locals()
+        else _build_threshold_comparison_export_df(
+            df=df,
+            artifacts=artifacts,
+            forced_model=forced_model,
+        )
     )
     _roc_plot_for_export, _calibration_plot_for_export, _dca_plot_for_export = _build_figure_export_data(
         triple=triple if 'triple' in locals() else pd.DataFrame(),

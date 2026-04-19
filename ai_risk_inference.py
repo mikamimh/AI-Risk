@@ -22,7 +22,26 @@ import pandas as pd
 
 from modeling import clean_features
 from model_metadata import assess_input_completeness
-from risk_data import is_combined_surgery, procedure_weight, thoracic_aorta_surgery
+from risk_data import (
+    BLANK_MEANS_NO_COLUMNS,
+    MISSING_TOKENS,
+    is_combined_surgery,
+    procedure_weight,
+    thoracic_aorta_surgery,
+)
+
+
+def _is_missing_token(value: object) -> bool:
+    """Return True for scalar values treated as missing by dataset ingestion."""
+    if value is None:
+        return True
+    try:
+        missing = pd.isna(value)
+        if isinstance(missing, (bool, np.bool_)) and missing:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip().lower() in MISSING_TOKENS
 
 
 def _get_numeric_columns_from_pipeline(model_pipeline) -> set:
@@ -74,44 +93,34 @@ def _build_input_row(feature_columns, form: Dict[str, object]) -> pd.DataFrame:
     _susp = row.get("Suspension of Anticoagulation (day)")
     if isinstance(_susp, str):
         _susp_clean = _susp.strip().replace(">", "").strip()
-        try:
-            row["Suspension of Anticoagulation (day)"] = float(_susp_clean)
-        except (ValueError, TypeError):
-            row["Suspension of Anticoagulation (day)"] = 0
+        if _susp_clean.lower() in MISSING_TOKENS:
+            row["Suspension of Anticoagulation (day)"] = np.nan
+        else:
+            try:
+                row["Suspension of Anticoagulation (day)"] = float(_susp_clean)
+            except (ValueError, TypeError):
+                row["Suspension of Anticoagulation (day)"] = np.nan
 
-    defaults = {
-        "HF": "No",
-        "Arrhythmia Remote": "No",
-        "Arrhythmia Recent": "No",
-        "Hypertension": "No",
-        "Diabetes": "No",
-        "Dyslipidemia": "No",
-        "CVA": "No",
-        "PVD": "No",
-        "Alcohol": "No",
-        "Smoking (Pack-year)": "Never",
-        "Ex-Smoker (Pack-year)": "Never",
-        "Cancer ≤ 5 yrs": "No",
-        "Family Hx of CAD": "No",
-        "Pneumonia": "No",
-        "Anticoagulation/ Antiaggregation": "No",
-        "Dialysis": "No",
-        "IE": "No",
+    defaults = {col: "No" for col in BLANK_MEANS_NO_COLUMNS}
+    defaults.update({
         "Aortic Stenosis": "None",
         "Aortic Regurgitation": "None",
         "Mitral Stenosis": "None",
         "Mitral Regurgitation": "None",
         "Tricuspid Regurgitation": "None",
-        "Aortic Root Abscess": "No",
-        "Suspension of Anticoagulation (day)": 0,
-    }
+    })
     # Apply defaults to the dict before constructing the DataFrame so that
     # columns receiving string defaults are not first typed as float64 (NaN),
     # which would trigger a pandas FutureWarning on mixed-type assignment.
     for c, v in defaults.items():
         if c in row:
             _cur = row[c]
-            if (_cur is None or (isinstance(_cur, float) and pd.isna(_cur)) or str(_cur).strip() == ""):
+            if c in BLANK_MEANS_NO_COLUMNS and _is_missing_token(_cur):
+                row[c] = v
+            elif (
+                c not in BLANK_MEANS_NO_COLUMNS
+                and (_cur is None or (isinstance(_cur, float) and pd.isna(_cur)) or str(_cur).strip() == "")
+            ):
                 row[c] = v
 
     out = pd.DataFrame([row])

@@ -4,7 +4,7 @@ Provides clinical definitions, origins, units, and model usage metadata
 for all variables used in the cardiac surgery risk prediction system.
 """
 
-from typing import List, Dict
+from typing import List, Dict, Sequence
 import pandas as pd
 
 
@@ -30,8 +30,8 @@ VARIABLE_DICTIONARY: List[Dict[str, str]] = [
     {"variable": "CCS4", "definition": "Canadian Cardiovascular Society class 4 angina", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Clinical"},
     {"variable": "Coronary Symptom", "definition": "Current coronary presentation (No symptoms, Stable Angina, Unstable Angina, NSTEMI, STEMI)", "origin": "Preoperative", "unit": "categorical", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Clinical"},
     {"variable": "HF", "definition": "Clinical diagnosis of heart failure", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Clinical"},
-    {"variable": "Critical preoperative state", "definition": "Severe preoperative instability (shock, inotropes, ventilation, resuscitation)", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Clinical"},
-    {"variable": "Poor mobility", "definition": "Severely reduced mobility (musculoskeletal/neurologic)", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder); set to False for all in EuroSCORE II (not reliably collected)", "in_model": "Yes", "domain": "Clinical"},
+    {"variable": "Critical preoperative state", "definition": "Severe preoperative instability (shock, inotropes, ventilation, resuscitation)", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "No (not retained in current model)", "domain": "Clinical"},
+    {"variable": "Poor mobility", "definition": "Severely reduced mobility (musculoskeletal/neurologic)", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder); set to False for all in EuroSCORE II (not reliably collected)", "in_model": "No (not retained in current model)", "domain": "Clinical"},
 
     # --- Comorbidities ---
     {"variable": "Diabetes", "definition": "Diabetes mellitus and treatment type", "origin": "Preoperative", "unit": "No/Oral/Insulin/Diet", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Comorbidities"},
@@ -46,7 +46,7 @@ VARIABLE_DICTIONARY: List[Dict[str, str]] = [
     {"variable": "Cancer ≤ 5 yrs", "definition": "Cancer diagnosed or treated within 5 years", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Comorbidities"},
     {"variable": "Pneumonia", "definition": "Recent pneumonia before surgery", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Comorbidities"},
     {"variable": "Arrhythmia Remote", "definition": "Past history of arrhythmia", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Comorbidities"},
-    {"variable": "Arrhythmia Recent", "definition": "Recent arrhythmia before surgery", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Comorbidities"},
+    {"variable": "Arrhythmia Recent", "definition": "Recent arrhythmia before surgery", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "No (not retained in current model)", "domain": "Comorbidities"},
     {"variable": "Family Hx of CAD", "definition": "Family history of coronary artery disease", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Comorbidities"},
     {"variable": "Alcohol", "definition": "Relevant alcohol use history", "origin": "Preoperative", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Comorbidities"},
     {"variable": "Smoking (Pack-year)", "definition": "Smoking history (pack-years)", "origin": "Preoperative", "unit": "numeric/categorical", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Comorbidities"},
@@ -76,13 +76,13 @@ VARIABLE_DICTIONARY: List[Dict[str, str]] = [
     {"variable": "Mitral Stenosis", "definition": "Severity of mitral stenosis", "origin": "Pre-Echocardiogram", "unit": "None/Trivial/Mild/Moderate/Severe", "transformation": "OrdinalEncoder (None<Trivial<Mild<Moderate<Severe)", "in_model": "Yes", "domain": "Echocardiographic"},
     {"variable": "Mitral Regurgitation", "definition": "Severity of mitral regurgitation", "origin": "Pre-Echocardiogram", "unit": "None/Trivial/Mild/Moderate/Severe", "transformation": "OrdinalEncoder (None<Trivial<Mild<Moderate<Severe)", "in_model": "Yes", "domain": "Echocardiographic"},
     {"variable": "Tricuspid Regurgitation", "definition": "Severity of tricuspid regurgitation", "origin": "Pre-Echocardiogram", "unit": "None/Trivial/Mild/Moderate/Severe", "transformation": "OrdinalEncoder (None<Trivial<Mild<Moderate<Severe)", "in_model": "Yes", "domain": "Echocardiographic"},
-    {"variable": "Aortic Root Abscess", "definition": "Echocardiographic evidence of aortic root abscess", "origin": "Pre-Echocardiogram", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Echocardiographic"},
+    {"variable": "Aortic Root Abscess", "definition": "Echocardiographic evidence of aortic root abscess", "origin": "Pre-Echocardiogram", "unit": "Yes/No", "transformation": "Categorical (TargetEncoder)", "in_model": "No (not retained in current model)", "domain": "Echocardiographic"},
     {"variable": "AVA (cm²)", "definition": "Aortic valve area", "origin": "Pre-Echocardiogram", "unit": "cm²", "transformation": "Numeric, continuous", "in_model": "Yes", "domain": "Echocardiographic"},
     {"variable": "MVA (cm²)", "definition": "Mitral valve area", "origin": "Pre-Echocardiogram", "unit": "cm²", "transformation": "Numeric, continuous", "in_model": "Yes", "domain": "Echocardiographic"},
     {"variable": "Aortic Mean gradient (mmHg)", "definition": "Mean transvalvular aortic gradient", "origin": "Pre-Echocardiogram", "unit": "mmHg", "transformation": "Numeric, continuous", "in_model": "Yes", "domain": "Echocardiographic"},
     {"variable": "Mitral Mean gradient (mmHg)", "definition": "Mean transmitral gradient", "origin": "Pre-Echocardiogram", "unit": "mmHg", "transformation": "Numeric, continuous", "in_model": "Yes", "domain": "Echocardiographic"},
     {"variable": "PHT Aortic", "definition": "Aortic pressure half-time", "origin": "Pre-Echocardiogram", "unit": "ms", "transformation": "Numeric, continuous", "in_model": "Yes", "domain": "Echocardiographic"},
-    {"variable": "PHT Mitral", "definition": "Mitral pressure half-time", "origin": "Pre-Echocardiogram", "unit": "ms", "transformation": "Numeric, continuous", "in_model": "Yes", "domain": "Echocardiographic"},
+    {"variable": "PHT Mitral", "definition": "Mitral pressure half-time", "origin": "Pre-Echocardiogram", "unit": "ms", "transformation": "Numeric, continuous", "in_model": "No (not retained in current model)", "domain": "Echocardiographic"},
     {"variable": "Vena contracta", "definition": "Vena contracta (aortic)", "origin": "Pre-Echocardiogram", "unit": "mm", "transformation": "Numeric, continuous", "in_model": "Yes", "domain": "Echocardiographic"},
     {"variable": "Vena contracta (mm)", "definition": "Vena contracta (mitral)", "origin": "Pre-Echocardiogram", "unit": "mm", "transformation": "Numeric, continuous", "in_model": "Yes", "domain": "Echocardiographic"},
 
@@ -92,13 +92,36 @@ VARIABLE_DICTIONARY: List[Dict[str, str]] = [
     {"variable": "Preoperative Medications", "definition": "List of preoperative medications", "origin": "Preoperative", "unit": "text", "transformation": "Used for STS medication mapping only", "in_model": "No (STS input only)", "domain": "Medication"},
 
     # --- Outcome ---
-    {"variable": "morte_30d", "definition": "30-day or in-hospital mortality (binary outcome)", "origin": "Derived from Postoperative Death column", "unit": "0/1", "transformation": "Binary (Operative or ≤30 days = 1; >30 or missing = 0)", "in_model": "Target variable", "domain": "Outcome"},
+    {"variable": "morte_30d", "definition": "30-day or in-hospital mortality (binary outcome)", "origin": "Derived from Postoperative Death column", "unit": "0/1", "transformation": "Binary (Operative or ≤30 days = 1; >30 or missing = 0)", "in_model": "Outcome (not predictor)", "domain": "Outcome"},
 ]
 
 
-def get_dictionary_dataframe(language: str = "English") -> pd.DataFrame:
+def _align_model_usage(df: pd.DataFrame, model_feature_columns: Sequence[str] | None) -> pd.DataFrame:
+    """Align the In model flag with the currently loaded bundle, when available."""
+    if model_feature_columns is None:
+        return df
+
+    feature_set = set(model_feature_columns)
+    df = df.copy()
+    for idx, row in df.iterrows():
+        variable = row["variable"]
+        current_value = str(row["in_model"])
+        if variable == "morte_30d":
+            df.at[idx, "in_model"] = "Outcome (not predictor)"
+        elif variable in feature_set:
+            df.at[idx, "in_model"] = "Yes"
+        elif current_value == "Yes":
+            df.at[idx, "in_model"] = "No (not retained in current model)"
+    return df
+
+
+def get_dictionary_dataframe(
+    language: str = "English",
+    model_feature_columns: Sequence[str] | None = None,
+) -> pd.DataFrame:
     """Return the variable dictionary as a DataFrame."""
     df = pd.DataFrame(VARIABLE_DICTIONARY)
+    df = _align_model_usage(df, model_feature_columns)
     if language != "English":
         df.columns = ["Variável", "Definição clínica", "Origem", "Unidade", "Transformação", "No modelo", "Domínio"]
     else:
@@ -106,8 +129,11 @@ def get_dictionary_dataframe(language: str = "English") -> pd.DataFrame:
     return df
 
 
-def get_dictionary_by_domain(language: str = "English") -> dict:
+def get_dictionary_by_domain(
+    language: str = "English",
+    model_feature_columns: Sequence[str] | None = None,
+) -> dict:
     """Return dictionary grouped by domain."""
-    df = get_dictionary_dataframe(language)
+    df = get_dictionary_dataframe(language, model_feature_columns=model_feature_columns)
     domain_col = "Domínio" if language != "English" else "Domain"
     return {name: group for name, group in df.groupby(domain_col)}

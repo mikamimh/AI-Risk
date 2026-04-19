@@ -54,7 +54,11 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
 
     # ── Begin original tab body (verbatim) ───────────────────────────────
 
-    st.subheader(tr("Batch export with scores", "Exportação da base com escores"))
+    st.subheader(tr("Batch & Export", "Batch & Export"))
+    st.caption(tr(
+        "Research exports for the current cohort and batch prediction for new patient files.",
+        "Exports de pesquisa da coorte atual e predição em lote para arquivos de novos pacientes.",
+    ))
 
     export_df = df.copy()
 
@@ -65,6 +69,23 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
     export_df["classe_ia"] = export_df["ia_risk_oof"].map(class_risk)
     export_df["classe_euro"] = export_df["euroscore_calc"].map(class_risk)
     export_df["classe_sts"] = export_df["sts_score"].map(lambda x: class_risk(x) if pd.notna(x) else np.nan)
+
+    _n_current = len(export_df)
+    _n_ai_current = int(export_df["ia_risk_oof"].notna().sum()) if "ia_risk_oof" in export_df.columns else 0
+    _n_sts_current = int(export_df["sts_score"].notna().sum()) if "sts_score" in export_df.columns else 0
+    _n_euro_current = int(export_df["euroscore_calc"].notna().sum()) if "euroscore_calc" in export_df.columns else 0
+    _top1, _top2, _top3, _top4 = st.columns(4)
+    _top1.metric(tr("Current cohort", "Coorte atual"), f"{_n_current}", border=True)
+    _top2.metric(tr("AI Risk available", "AI Risk disponível"), f"{_n_ai_current}", border=True)
+    _top3.metric(tr("EuroSCORE II available", "EuroSCORE II disponível"), f"{_n_euro_current}", border=True)
+    _top4.metric(tr("STS available", "STS disponível"), f"{_n_sts_current}", border=True)
+
+    st.divider()
+    st.markdown(tr("### Research Export", "### Research Export"))
+    st.caption(tr(
+        "Export the active research cohort with app-calculated AI Risk, EuroSCORE II, STS Score, risk classes, and optional OOF predictions from all AI models.",
+        "Exporte a coorte de pesquisa ativa com AI Risk, EuroSCORE II, STS Score, classes de risco e predições OOF opcionais de todos os modelos de IA.",
+    ))
 
     _all_oof_cols = [f"oof_{m}" for m in sorted(artifacts.oof_predictions.keys())]
     _show_all_oof = st.checkbox(
@@ -89,19 +110,30 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
         "classe_sts",
     ]
     cols_show = [c for c in cols_show if c in export_df.columns]
-    st.dataframe(export_df[cols_show], width="stretch", column_config=general_table_column_config("export"))
+    st.markdown(tr("**Preview**", "**Prévia**"))
+    st.dataframe(
+        export_df[cols_show].head(25),
+        width="stretch",
+        column_config=general_table_column_config("export"),
+    )
+    with st.expander(tr("Show full research export table", "Mostrar tabela completa do export de pesquisa"), expanded=False):
+        st.dataframe(export_df[cols_show], width="stretch", column_config=general_table_column_config("export"))
 
     # Download always includes all models
-    _csv_download_btn(export_df, "ia_risk_resultados.csv", tr("Download results (CSV)", "Baixar resultados (CSV)"))
+    st.markdown(tr("**Downloads**", "**Downloads**"))
+    _rx1, _rx2 = st.columns(2)
+    with _rx1:
+        _csv_download_btn(export_df, "ia_risk_resultados.csv", tr("Download results (CSV)", "Baixar resultados (CSV)"))
     _xlsx_export_buf = BytesIO()
     export_df.to_excel(_xlsx_export_buf, index=False, engine="openpyxl")
-    _bytes_download_btn(
-        _xlsx_export_buf.getvalue(),
-        "ia_risk_resultados.xlsx",
-        tr("Download results (XLSX)", "Baixar resultados (XLSX)"),
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_export_xlsx",
-    )
+    with _rx2:
+        _bytes_download_btn(
+            _xlsx_export_buf.getvalue(),
+            "ia_risk_resultados.xlsx",
+            tr("Download results (XLSX)", "Baixar resultados (XLSX)"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_export_xlsx",
+        )
 
     st.caption(
         tr(
@@ -112,7 +144,7 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
 
     # --- Batch prediction for NEW patients ---
     st.divider()
-    st.subheader(tr("Predict new patients (batch)", "Predição de novos pacientes (lote)"))
+    st.subheader(tr("Batch Prediction for New Patients", "Predição em Lote de Novos Pacientes"))
     st.caption(
         tr(
             "Upload a CSV or Excel file with the same clinical variables used in training. "
@@ -123,20 +155,21 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
             "A coluna de desfecho (morte_30d) NÃO é necessária.",
         )
     )
-    st.info(
-        tr(
-            "**Note:** This tab uses the final model (trained on all data) to predict new patients. "
-            "If you upload patients that were already in the training dataset, the AI Risk values may differ slightly "
-            "from those in the Statistical Analysis tab, which uses out-of-fold (OOF) predictions — where each patient "
-            "is predicted by a model that never saw that patient. For patients in the training dataset, the OOF values "
-            "(Statistical Analysis tab) are the methodologically correct reference. This tab is intended for **new patients**.",
-            "**Nota:** Esta aba usa o modelo final (treinado com todos os dados) para predizer novos pacientes. "
-            "Se você enviar pacientes que já estavam no dataset de treinamento, os valores de AI Risk podem diferir "
-            "ligeiramente dos apresentados na aba de Análise Estatística, que usa predições out-of-fold (OOF) — onde cada "
-            "paciente é predito por um modelo que nunca viu aquele paciente. Para pacientes do dataset de treinamento, os "
-            "valores OOF (aba Análise Estatística) são a referência metodologicamente correta. Esta aba é destinada a **novos pacientes**.",
+    with st.expander(tr("Methodological note", "Nota metodológica"), expanded=False):
+        st.info(
+            tr(
+                "**Note:** This tab uses the final model (trained on all data) to predict new patients. "
+                "If you upload patients that were already in the training dataset, the AI Risk values may differ slightly "
+                "from those in the Statistical Analysis tab, which uses out-of-fold (OOF) predictions — where each patient "
+                "is predicted by a model that never saw that patient. For patients in the training dataset, the OOF values "
+                "(Statistical Analysis tab) are the methodologically correct reference. This tab is intended for **new patients**.",
+                "**Nota:** Esta aba usa o modelo final (treinado com todos os dados) para predizer novos pacientes. "
+                "Se você enviar pacientes que já estavam no dataset de treinamento, os valores de AI Risk podem diferir "
+                "ligeiramente dos apresentados na aba de Análise Estatística, que usa predições out-of-fold (OOF) — onde cada "
+                "paciente é predito por um modelo que nunca viu aquele paciente. Para pacientes do dataset de treinamento, os "
+                "valores OOF (aba Análise Estatística) são a referência metodologicamente correta. Esta aba é destinada a **novos pacientes**.",
+            )
         )
-    )
     batch_file = st.file_uploader(
         tr("Upload patient file", "Upload do arquivo de pacientes"),
         type=["csv", "xlsx", "xls"],
@@ -163,16 +196,26 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
             _derived_features = {"cirurgia_combinada", "peso_procedimento", "thoracic_aorta_flag"}
             matched_cols = [c for c in artifacts.feature_columns if c in new_df.columns or c in _derived_features]
             missing_cols = [c for c in artifacts.feature_columns if c not in new_df.columns and c not in _derived_features]
-            st.info(
+            _compat_cols = st.columns(4)
+            _compat_cols[0].metric(tr("Rows loaded", "Linhas carregadas"), f"{len(new_df)}", border=True)
+            _compat_cols[1].metric(tr("Input columns", "Colunas no arquivo"), f"{len(new_df.columns)}", border=True)
+            _compat_cols[2].metric(
+                tr("Matched features", "Variáveis encontradas"),
+                f"{len(matched_cols)}/{len(artifacts.feature_columns)}",
+                border=True,
+            )
+            _compat_cols[3].metric(tr("Missing features", "Variáveis ausentes"), f"{len(missing_cols)}", border=True)
+            st.caption(
                 tr(
-                    f"Matched {len(matched_cols)}/{len(artifacts.feature_columns)} model features. Missing features will be imputed by the model.",
-                    f"Encontradas {len(matched_cols)}/{len(artifacts.feature_columns)} variáveis do modelo. Variáveis ausentes serão imputadas pelo modelo.",
+                    "Missing model features will be imputed by the model pipeline.",
+                    "Variáveis do modelo ausentes serão imputadas pelo pipeline do modelo.",
                 )
             )
             if missing_cols:
                 with st.expander(tr("Show missing features", "Ver variáveis ausentes")):
                     st.write(", ".join(missing_cols))
 
+            st.markdown(tr("**Prediction options**", "**Opções de predição**"))
             _show_all_models = st.checkbox(
                 tr("Show predictions from all AI models", "Mostrar predições de todos os modelos de IA"),
                 value=False,
@@ -398,7 +441,8 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
                                     f"STS Score resolved for {_n_sts_ok}/{_n_total} patients. Incidents:",
                                     f"STS Score resolvido para {_n_sts_ok}/{_n_total} pacientes. Incidentes:",
                                 ))
-                                st.markdown(_fail_details)
+                                with st.expander(tr("STS incident details", "Detalhes dos incidentes STS"), expanded=False):
+                                    st.markdown(_fail_details)
                             else:
                                 st.warning(tr(
                                     f"STS Score resolved for {_n_sts_ok}/{_n_total} patients.",
@@ -419,6 +463,23 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
                     results[i]["STS (%)"] = round(sp * 100, 2) if pd.notna(sp) else np.nan
 
                 result_df = pd.DataFrame(results)
+                _n_ai_ok = max(_n_total - _n_errors, 0)
+                _n_sts_ok_final = sum(1 for sp in sts_probs if pd.notna(sp))
+                _n_sts_incidents = len(_sts_fail_log) if "_sts_fail_log" in locals() else 0
+                _n_total_incidents = int(_n_errors + _n_sts_incidents)
+                _success_rate = (_n_ai_ok / _n_total) if _n_total else np.nan
+
+                st.markdown(tr("**Processing summary**", "**Resumo do processamento**"))
+                _sum1, _sum2, _sum3, _sum4, _sum5 = st.columns(5)
+                _sum1.metric(tr("Rows processed", "Linhas processadas"), f"{_n_total}", border=True)
+                _sum2.metric(tr("AI Risk OK", "AI Risk OK"), f"{_n_ai_ok}", border=True)
+                _sum3.metric(tr("STS resolved", "STS resolvido"), f"{_n_sts_ok_final}", border=True)
+                _sum4.metric(tr("Incidents", "Incidentes"), f"{_n_total_incidents}", border=True)
+                _sum5.metric(
+                    tr("AI success rate", "Sucesso AI"),
+                    "N/A" if not np.isfinite(_success_rate) else f"{_success_rate*100:.1f}%",
+                    border=True,
+                )
 
                 # Column visibility: hide individual model columns unless checkbox is checked
                 _ia_detail_cols = [f"IA-{_mn} (%)" for _mn in _all_model_names]
@@ -427,7 +488,10 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
                 else:
                     display_df = result_df
 
-                st.dataframe(display_df, width="stretch")
+                st.markdown(tr("**Result preview**", "**Prévia dos resultados**"))
+                st.dataframe(display_df.head(25), width="stretch")
+                with st.expander(tr("Show full batch prediction table", "Mostrar tabela completa da predição em lote"), expanded=False):
+                    st.dataframe(display_df, width="stretch")
 
                 # --- Summary statistics per score ---
                 _ia_col = f"AI Risk - {forced_model} (%)"
@@ -470,6 +534,11 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
                 _batch_md = "\n".join(_batch_md_lines)
 
                 # Downloads: CSV + XLSX + MD + PDF (full data always includes all models)
+                st.markdown(tr("**Downloads**", "**Downloads**"))
+                st.caption(tr(
+                    "Downloads include the full result table; CSV/XLSX always include all AI model prediction columns.",
+                    "Os downloads incluem a tabela completa; CSV/XLSX sempre incluem as colunas de predição de todos os modelos de IA.",
+                ))
                 _dl1, _dl2, _dl3, _dl4 = st.columns(4)
                 with _dl1:
                     _csv_download_btn(result_df, "ia_risk_batch_predictions.csv", tr("CSV", "CSV"))

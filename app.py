@@ -23,6 +23,7 @@ from typing import Dict, List
 import re
 import shutil
 import sqlite3
+import time
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
@@ -2181,7 +2182,7 @@ def _plot_roc(scores: Dict[str, np.ndarray], y: np.ndarray) -> bytes | None:
     return png
 
 
-def _plot_calibration(scores: Dict[str, np.ndarray], y: np.ndarray):
+def _plot_calibration(scores: Dict[str, np.ndarray], y: np.ndarray) -> bytes | None:
     cal_long = []
     for name, p in scores.items():
         xp, yp = calibration_data(y, p)
@@ -2192,17 +2193,18 @@ def _plot_calibration(scores: Dict[str, np.ndarray], y: np.ndarray):
     st.caption(tr("Calibration (X axis: predicted probability, Y axis: observed frequency)", "Calibração (eixo X: probabilidade predita, eixo Y: frequência observada)"))
     png = _make_line_chart_png(chart, "Calibration Curves", "Predicted probability", "Observed frequency", diagonal=True)
     _chart_download_buttons(merged, png, "calibration_curves")
+    return png
 
 
-def _plot_boxplots(df_plot: pd.DataFrame):
+def _plot_boxplots(df_plot: pd.DataFrame) -> bytes | None:
     if df_plot.empty:
         st.info(tr("No data available for boxplots.", "Sem dados disponíveis para boxplots."))
-        return
+        return None
 
     chart_df = df_plot.melt(id_vars=["Outcome"], var_name="Score", value_name="Probability").dropna()
     if chart_df.empty:
         st.info(tr("No data available for boxplots.", "Sem dados disponíveis para boxplots."))
-        return
+        return None
 
     st.vega_lite_chart(
         chart_df,
@@ -2224,9 +2226,10 @@ def _plot_boxplots(df_plot: pd.DataFrame):
     )
     png = _make_boxplot_png(chart_df, "Score", "Probability", "Outcome", tr("Predicted probabilities by outcome", "Probabilidades preditas por desfecho"))
     _chart_download_buttons(chart_df, png, "boxplots_scores")
+    return png
 
 
-def _plot_ia_model_boxplots(y_true: np.ndarray, oof_predictions: Dict[str, np.ndarray]):
+def _plot_ia_model_boxplots(y_true: np.ndarray, oof_predictions: Dict[str, np.ndarray]) -> bytes | None:
     rows = []
     outcome_yes = tr("Death within 30 days", "Óbito em 30 dias")
     outcome_no = tr("No death within 30 days", "Sem óbito em 30 dias")
@@ -2243,7 +2246,7 @@ def _plot_ia_model_boxplots(y_true: np.ndarray, oof_predictions: Dict[str, np.nd
     chart_df = pd.DataFrame(rows)
     if chart_df.empty:
         st.info(tr("No AI model data available for boxplots.", "Sem dados dos modelos de IA para boxplots."))
-        return
+        return None
 
     model_col = tr("Model", "Modelo")
     outcome_col = tr("Outcome", "Desfecho")
@@ -2269,12 +2272,13 @@ def _plot_ia_model_boxplots(y_true: np.ndarray, oof_predictions: Dict[str, np.nd
     )
     png = _make_boxplot_png(chart_df, model_col, prob_col, outcome_col, tr("AI model predictions by outcome", "Predições dos modelos IA por desfecho"))
     _chart_download_buttons(chart_df, png, "boxplots_ia_models")
+    return png
 
 
-def _plot_dca(curve_df: pd.DataFrame):
+def _plot_dca(curve_df: pd.DataFrame) -> bytes | None:
     if curve_df.empty:
         st.info(tr("No data available for decision curve analysis.", "Sem dados disponíveis para decision curve analysis."))
-        return
+        return None
     display_df = curve_df.copy()
     display_df["Strategy"] = display_df["Strategy"].replace(
         {
@@ -2287,6 +2291,7 @@ def _plot_dca(curve_df: pd.DataFrame):
     st.caption(tr("Decision curve analysis: higher net benefit indicates greater clinical utility across thresholds.", "Decision curve analysis: maior benefício líquido indica maior utilidade clínica ao longo dos limiares."))
     png = _make_line_chart_png(chart.set_index("Threshold"), "Decision Curve Analysis", "Decision threshold", "Net benefit")
     _chart_download_buttons(display_df, png, "dca")
+    return png
 
 
 # Phase 4: subgroup assignment helpers extracted to subgroups.py.  Thin
@@ -2818,13 +2823,62 @@ st.session_state.active_tab = _active_tab
 
 if _active_tab == 0:  # Overview
 
+    st.subheader(tr("Overview", "Visão Geral"))
+    st.caption(tr(
+        "Executive summary of the current cohort, active model, performance, operational readiness, and audit trail.",
+        "Resumo executivo da coorte atual, modelo ativo, desempenho, operação e trilha de auditoria.",
+    ))
+
+    _overview_events = int(pd.to_numeric(df["morte_30d"], errors="coerce").fillna(0).sum())
+    _overview_event_rate = float(prepared.info.get("positive_rate", np.nan))
+    _leaderboard_for_overview = artifacts.leaderboard.copy()
+    _active_model_perf = pd.DataFrame()
+    if "Modelo" in _leaderboard_for_overview.columns:
+        _active_model_perf = _leaderboard_for_overview[_leaderboard_for_overview["Modelo"] == forced_model]
+    if _active_model_perf.empty and "Modelo" in _leaderboard_for_overview.columns:
+        _active_model_perf = _leaderboard_for_overview[_leaderboard_for_overview["Modelo"] == best_model_name]
+    if _active_model_perf.empty and "AUC" in _leaderboard_for_overview.columns:
+        _active_model_perf = _leaderboard_for_overview.sort_values("AUC", ascending=False).head(1)
+    _active_auc = (
+        float(_active_model_perf.iloc[0].get("AUC", np.nan))
+        if not _active_model_perf.empty else np.nan
+    )
+    _active_brier = (
+        float(_active_model_perf.iloc[0].get("Brier", np.nan))
+        if not _active_model_perf.empty else np.nan
+    )
+
+    _k1, _k2, _k3, _k4 = st.columns(4)
+    _k1.metric(tr("Patients", "Pacientes"), f"{prepared.info['n_rows']}", border=True)
+    _k2.metric(tr("Events", "Eventos"), f"{_overview_events}", border=True)
+    _k3.metric(
+        tr("Event rate", "Taxa de eventos"),
+        "N/A" if not np.isfinite(_overview_event_rate) else f"{_overview_event_rate*100:.1f}%",
+        border=True,
+    )
+    _k4.metric(tr("Active AI model", "Modelo IA ativo"), forced_model, border=True)
+
+    _k5, _k6, _k7, _k8 = st.columns(4)
+    _k5.metric(tr("Operational threshold", "Limiar operacional"), f"{_default_threshold:.0%}", border=True)
+    _k6.metric(
+        "AUC",
+        "N/A" if not np.isfinite(_active_auc) else f"{_active_auc:.3f}",
+        border=True,
+    )
+    _k7.metric(
+        "Brier",
+        "N/A" if not np.isfinite(_active_brier) else f"{_active_brier:.4f}",
+        border=True,
+    )
+    _k8.metric(tr("Predictors", "Preditores"), f"{prepared.info['n_features']}", border=True)
+
     # ── 1. Cohort Snapshot ──────────────────────────────────────────────
+    st.divider()
     st.subheader(tr("Cohort Snapshot", "Coorte"))
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric(tr("Patients (matched)", "Pacientes (pareados)"), f"{prepared.info['n_rows']}")
-    c2.metric(tr("In-hospital / 30-day mortality", "Mortalidade hospitalar / 30d"), f"{prepared.info['positive_rate']*100:.1f}%")
-    c3.metric(tr("Predictor variables", "Variáveis preditoras"), f"{prepared.info['n_features']}")
-    c4.metric(tr("AI model in use", "Modelo IA em uso"), forced_model)
+    st.caption(tr(
+        "Cohort composition and descriptive surgical profile for the active dataset.",
+        "Composição da coorte e perfil cirúrgico descritivo da base ativa.",
+    ))
 
     # ── Surgery profile (descriptive cohort breakdown) ──
     st.markdown(tr("**Surgery profile**", "**Perfil cirúrgico**"))
@@ -2920,13 +2974,18 @@ if _active_tab == 0:  # Overview
 
     st.divider()
     st.subheader(tr("Model Snapshot", "Modelo"))
+    st.caption(tr(
+        "Active model configuration and bundle metadata for reproducibility.",
+        "Configuração do modelo ativo e metadados do bundle para reprodutibilidade.",
+    ))
     _ms1, _ms2, _ms3, _ms4 = st.columns(4)
-    _ms1.metric(tr("Selected model", "Modelo selecionado"), forced_model)
-    _ms2.metric(tr("Model version", "Versão do modelo"), MODEL_VERSION)
-    _ms3.metric(tr("Decision threshold", "Limiar de decisão"), f"{_default_threshold:.0%}")
+    _ms1.metric(tr("Selected model", "Modelo selecionado"), forced_model, border=True)
+    _ms2.metric(tr("Model version", "Versão do modelo"), MODEL_VERSION, border=True)
+    _ms3.metric(tr("Decision threshold", "Limiar de decisão"), f"{_default_threshold:.0%}", border=True)
     _ms4.metric(
         tr("Calibration method", "Método de calibração"),
         _display_calib_method(getattr(artifacts, "calibration_method", None)),
+        border=True,
     )
     st.caption(tr(
         f"Best training model: {best_model_name} · Last action: {bundle_source}",
@@ -2957,35 +3016,46 @@ if _active_tab == 0:  # Overview
     # ── 3. Performance Snapshot ─────────────────────────────────────────
     st.divider()
     st.subheader(tr("Performance Snapshot", "Desempenho"))
-    st.markdown(tr("**AI model leaderboard (cross-validated, calibrated OOF)**", "**Leaderboard dos modelos de IA (OOF calibrado, validação cruzada)**"))
+    st.caption(tr(
+        "Cross-validated, calibrated out-of-fold performance for candidate AI models.",
+        "Desempenho out-of-fold calibrado por validação cruzada para os modelos candidatos de IA.",
+    ))
+    st.markdown(tr("**AI model leaderboard**", "**Leaderboard dos modelos de IA**"))
     st.caption(
         tr(
-            "Stratified cross-validation grouped by patient (same patient never appears in both train and test folds).",
-            "Validação cruzada estratificada e agrupada por paciente (sem mistura do mesmo paciente entre treino e teste).",
-        )
-    )
-    st.caption(
-        tr(
-            "Leaderboard sensitivity and specificity are shown at each model's own Youden's J threshold (a per-model reference), not at a fixed 0.50 cutoff and not at the 8% clinical default. The operational clinical threshold remains fixed at 8% in the Statistical Comparison and temporal validation tabs.",
-            "A sensibilidade e a especificidade do leaderboard são mostradas no limiar de Youden (J) de cada modelo (referência por modelo), não em um corte fixo de 0,50 e não no padrão clínico de 8%. O limiar clínico operacional permanece fixo em 8% nas abas de Comparação Estatística e de validação temporal.",
-        )
-    )
-    st.caption(
-        tr(
-            "AUC and AUPRC summarize discrimination; Brier summarizes calibration. Models are compared by cross-validated, calibrated OOF performance. The per-model Youden threshold shown here is a complementary reference — it is not the app's default operational threshold.",
-            "AUC e AUPRC resumem a discriminação; Brier resume a calibração. Os modelos são comparados por desempenho OOF calibrado via validação cruzada. O limiar de Youden por modelo mostrado aqui é uma referência complementar — não é o limiar operacional padrão do app.",
+            "AUC/AUPRC summarize discrimination; Brier summarizes calibration. Youden thresholds are complementary references, not the operational 8% default.",
+            "AUC/AUPRC resumem discriminação; Brier resume calibração. Limiares de Youden são referências complementares, não o padrão operacional de 8%.",
         )
     )
     st.dataframe(artifacts.leaderboard, width="stretch", column_config=general_table_column_config("leaderboard"))
 
-    _elig_info = _cached_eligibility_info(xlsx_path)
-    if _elig_info.get("source_type") != "flat" and _elig_info.get("pre_rows_before_criteria", 0) > 0:
-        st.subheader(tr("Eligibility flow", "Fluxo de elegibilidade"))
-        st.dataframe(_eligibility_summary(xlsx_path), width="stretch", column_config=general_table_column_config("eligibility"))
+    with st.expander(tr("How to read the leaderboard", "Como ler o leaderboard"), expanded=False):
+        st.caption(
+            tr(
+                "Stratified cross-validation grouped by patient (same patient never appears in both train and test folds).",
+                "Validação cruzada estratificada e agrupada por paciente (sem mistura do mesmo paciente entre treino e teste).",
+            )
+        )
+        st.caption(
+            tr(
+                "Leaderboard sensitivity and specificity are shown at each model's own Youden's J threshold (a per-model reference), not at a fixed 0.50 cutoff and not at the 8% clinical default. The operational clinical threshold remains fixed at 8% in the Statistical Comparison and temporal validation tabs.",
+                "A sensibilidade e a especificidade do leaderboard são mostradas no limiar de Youden (J) de cada modelo (referência por modelo), não em um corte fixo de 0,50 e não no padrão clínico de 8%. O limiar clínico operacional permanece fixo em 8% nas abas de Comparação Estatística e de validação temporal.",
+            )
+        )
+        st.caption(
+            tr(
+                "Models are compared by cross-validated, calibrated OOF performance. The per-model Youden threshold shown here is a complementary reference — it is not the app's default operational threshold.",
+                "Os modelos são comparados por desempenho OOF calibrado via validação cruzada. O limiar de Youden por modelo mostrado aqui é uma referência complementar — não é o limiar operacional padrão do app.",
+            )
+        )
 
     # ── 4. Operational Snapshot ─────────────────────────────────────────
     st.divider()
     st.subheader(tr("Operational Snapshot", "Operacional"))
+    st.caption(tr(
+        "Availability of app-computed scores and cohort-processing flow for the active dataset.",
+        "Disponibilidade dos escores calculados pelo app e fluxo de processamento da coorte ativa.",
+    ))
     st.markdown(tr("**Score availability**", "**Disponibilidade dos escores**"))
     summary = pd.DataFrame(
         {
@@ -3008,6 +3078,11 @@ if _active_tab == 0:  # Overview
         "Todos os escores exibidos são calculados pelo app — não lidos do arquivo de entrada. Valores derivados da planilha são mantidos apenas como referência opcional no painel de Qualidade da Base.",
     ))
 
+    _elig_info = _cached_eligibility_info(xlsx_path)
+    if _elig_info.get("source_type") != "flat" and _elig_info.get("pre_rows_before_criteria", 0) > 0:
+        st.markdown(tr("**Eligibility flow**", "**Fluxo de elegibilidade**"))
+        st.dataframe(_eligibility_summary(xlsx_path), width="stretch", column_config=general_table_column_config("eligibility"))
+
     # ── 5. Audit Snapshot ───────────────────────────────────────────────
     st.divider()
     st.subheader(tr("Audit Snapshot", "Auditoria"))
@@ -3018,19 +3093,27 @@ if _active_tab == 0:  # Overview
         "Ver Comparação Estatística para detalhes de desempenho.",
     ))
     if _run_report is not None and getattr(_run_report, "steps", None):
-        st.divider()
-        try:
-            import observability as _obs
-            _obs.render_run_report(_run_report, tr=tr)
-        except Exception as _obs_err:
-            st.caption(tr(
-                f"Execution report unavailable: {_obs_err}",
-                f"Relatório de execução indisponível: {_obs_err}",
-            ))
+        with st.expander(tr("Detailed execution report", "Relatório de execução detalhado"), expanded=False):
+            try:
+                import observability as _obs
+                _obs.render_run_report(_run_report, tr=tr)
+            except Exception as _obs_err:
+                st.caption(tr(
+                    f"Execution report unavailable: {_obs_err}",
+                    f"Relatório de execução indisponível: {_obs_err}",
+                ))
 
 elif _active_tab == 1:  # Individual Prediction
-    st.subheader(tr("Individual calculation", "Cálculo individual"))
-    st.caption(tr("Fill in fields in clinical order. The app calculates AI Risk, EuroSCORE II, and STS Score automatically.", "Preencha os campos em ordem clínica. O app calcula AI Risk, EuroSCORE II e STS Score automaticamente."))
+    st.subheader(tr("Prediction", "Predição"))
+    st.caption(tr(
+        "Individual patient prediction with AI Risk, EuroSCORE II, STS Score, case completeness, and local interpretation.",
+        "Predição individual com AI Risk, EuroSCORE II, STS Score, completude do caso e interpretação local.",
+    ))
+    _pred_top1, _pred_top2, _pred_top3, _pred_top4 = st.columns(4)
+    _pred_top1.metric(tr("Primary AI model", "Modelo IA principal"), forced_model, border=True)
+    _pred_top2.metric(tr("Comparators", "Comparadores"), "EuroSCORE II / STS", border=True)
+    _pred_top3.metric(tr("Operational threshold", "Limiar operacional"), f"{_default_threshold:.0%}", border=True)
+    _pred_top4.metric(tr("Model predictors", "Preditores do modelo"), f"{len(artifacts.feature_columns)}", border=True)
 
     def yn_pt_to_en(v: str) -> str:
         return "Yes" if str(v).strip().lower() in {"sim", "yes"} else "No"
@@ -3095,6 +3178,13 @@ elif _active_tab == 1:  # Individual Prediction
         "Outro": "Other",
         "Other": "Other",
     }
+
+    st.divider()
+    st.markdown(tr("### Inputs", "### Entradas"))
+    st.caption(tr(
+        "Fill in the clinical profile below. Detailed echo and lab measurements can remain blank when unavailable; missing model inputs are handled by the trained pipeline and summarized after prediction.",
+        "Preencha o perfil clínico abaixo. Medidas detalhadas de eco e laboratório podem ficar em branco quando indisponíveis; entradas ausentes são tratadas pelo pipeline treinado e resumidas após a predição.",
+    ))
 
     with st.container():
         st.markdown(tr("**General data**", "**Dados gerais**"))
@@ -3401,15 +3491,31 @@ elif _active_tab == 1:  # Individual Prediction
         quality_alerts = data_quality_alerts(form_map, prepared)
         likely_range_text, confidence_text = prediction_uncertainty(patient_pred_df, tr("Probability", "Probabilidade"), imputed_features)
 
-        best_model_prob = float(artifacts.fitted_models[best_model_name].predict_proba(model_input)[:, 1][0])
-        st.success(
-            tr(
-                f"Best recommended model for this patient (based on validation): {best_model_name}. Estimated risk: {best_model_prob*100:.2f}%",
-                f"Melhor modelo recomendado para este paciente (com base na validação da base): {best_model_name}. Risco estimado por ele: {best_model_prob*100:.2f}%",
-            )
-        )
+        # --- Input completeness indicator ---
+        # Use model_input (post clean_features) but restore values that
+        # clean_features wrongly converted to NaN (e.g. categorical "No"→NaN).
+        # A feature is "informed" if the user provided a value in form_map.
+        _derived = {"cirurgia_combinada", "peso_procedimento", "thoracic_aorta_flag"}
+        _completeness_row = model_input.copy()
+        for _fc in artifacts.feature_columns:
+            if _fc in _completeness_row.columns and pd.isna(_completeness_row.at[_completeness_row.index[0], _fc]):
+                # Check if user actually provided a value
+                if _fc in _derived:
+                    _completeness_row.at[_completeness_row.index[0], _fc] = 1  # always informed
+                elif _fc in form_map:
+                    _v = form_map[_fc]
+                    if _v is not None and str(_v).strip() not in ("", "nan"):
+                        _completeness_row.at[_completeness_row.index[0], _fc] = 1  # mark as informed
+        _completeness = assess_input_completeness(artifacts.feature_columns, _completeness_row, language)
+        _comp_icon = {"green": "🟢", "yellow": "🟡", "orange": "🟠", "red": "🔴"}.get(_completeness["color"], "⚪")
+        _comp_border = {"green": "#28a745", "yellow": "#ffc107", "orange": "#fd7e14", "red": "#dc3545"}.get(_completeness["color"], "#6c757d")
+        _pct_informed = round(100 * _completeness["n_informed"] / max(_completeness["n_total"], 1))
 
-        st.markdown(tr("**Risk summary**", "**Resumo do risco**"))
+        best_model_prob = float(artifacts.fitted_models[best_model_name].predict_proba(model_input)[:, 1][0])
+
+        # ── PREDICTED RISK — dominant primary block ───────────────────────────
+        st.divider()
+        st.markdown(tr("### Predicted Risk", "### Risco Predito"))
         st.caption(tr(
             f"Primary prediction generated by: **{forced_model}**",
             f"Predição principal gerada por: **{forced_model}**",
@@ -3418,6 +3524,39 @@ elif _active_tab == 1:  # Individual Prediction
         r1.metric("\U0001f916 AI Risk", f"{ia_prob*100:.2f}%", _risk_badge(ia_prob), delta_color="off")
         r2.metric("\U0001f4ca EuroSCORE II", f"{euro_prob*100:.2f}%", _risk_badge(euro_prob), delta_color="off")
         r3.metric("\U0001f310 STS", "-" if np.isnan(sts_prob) else f"{sts_prob*100:.2f}%", _risk_badge(sts_prob), delta_color="off")
+
+        # ── COMPLETENESS / RELIABILITY — anchored immediately below the result ─
+        st.markdown(
+            f"""
+            <div style="border-left: 4px solid {_comp_border}; padding: 12px 16px; border-radius: 6px;
+                        background: rgba(255,255,255,0.03); margin: 8px 0 12px 0;">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+                    <span style="font-size: 1.4rem;">{_comp_icon}</span>
+                    <span style="font-size: 1.05rem; font-weight: 600;">{_completeness['label']}</span>
+                </div>
+                <div style="background: #23272b; border-radius: 4px; height: 8px; width: 100%; margin-bottom: 8px;">
+                    <div style="background: {_comp_border}; border-radius: 4px; height: 8px; width: {_pct_informed}%;"></div>
+                </div>
+                <div style="display: flex; gap: 24px; font-size: 0.9rem; color: #adb5bd;">
+                    <span>{tr("Informed", "Informadas")}: <b style="color:#e9ecef;">{_completeness['n_informed']}</b> / {_completeness['n_total']}</span>
+                    <span>{tr("Imputed", "Imputadas")}: <b style="color:#e9ecef;">{_completeness['n_imputed']}</b></span>
+                    <span style="margin-left: auto; font-size: 0.85rem;">{_pct_informed}%</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if _completeness["missing_high"]:
+            st.error(tr(
+                f"⚠ High-relevance variables missing: **{', '.join(_completeness['missing_high'])}** — predictions may be unreliable",
+                f"⚠ Variáveis de alta relevância ausentes: **{', '.join(_completeness['missing_high'])}** — predições podem ser pouco confiáveis",
+            ))
+        if _completeness["missing_moderate"]:
+            st.warning(tr(
+                f"Moderate-relevance variables missing: {', '.join(_completeness['missing_moderate'])}",
+                f"Variáveis de relevância moderada ausentes: {', '.join(_completeness['missing_moderate'])}",
+            ))
+
         st.caption(tr(
             "Individual predictions reflect the model's estimate for this specific combination of variables. Population-level performance (AUC, calibration) does not guarantee accuracy for any single patient. This tool is for research purposes and does not replace clinical judgment.",
             "Predições individuais refletem a estimativa do modelo para esta combinação específica de variáveis. O desempenho populacional (AUC, calibração) não garante acurácia para um paciente isolado. Esta ferramenta é para fins de pesquisa e não substitui o julgamento clínico.",
@@ -3428,8 +3567,15 @@ elif _active_tab == 1:  # Individual Prediction
                 "STS Score indisponível — a calculadora web não pôde ser acessada ou não retornou resultado para este paciente. Nenhum fallback do dataset é utilizado.",
             ))
 
-        # STS Score cache transparency (Phase 2): surface status, cache age,
-        # and any fallback/failure reason for the user and the audit trail.
+        # STS Score cache transparency: extract all record fields once so they
+        # are accessible both for inline failure warnings and inside expanders.
+        _st_status = "unknown"
+        _st_age = None
+        _st_stage = ""
+        _st_reason = ""
+        _st_retry = False
+        _st_used_prev = False
+        _age_txt = ""
         if sts_exec_record is not None:
             _st_status = getattr(sts_exec_record, "status", "unknown")
             _st_age = getattr(sts_exec_record, "cache_age_days", None)
@@ -3438,22 +3584,8 @@ elif _active_tab == 1:  # Individual Prediction
             _st_retry = getattr(sts_exec_record, "retry_attempted", False)
             _st_used_prev = getattr(sts_exec_record, "used_previous_cache", False)
             _age_txt = f" (age {_st_age:.1f} d)" if isinstance(_st_age, (int, float)) else ""
-            if _st_status == "cached":
-                st.caption(tr(
-                    f"STS Score: cached result returned{_age_txt}. No network call.",
-                    f"STS Score: resultado em cache{_age_txt}. Sem chamada de rede.",
-                ))
-            elif _st_status == "fresh":
-                st.caption(tr(
-                    "STS Score: fresh calculation from the web calculator (cached for 14 days).",
-                    "STS Score: cálculo novo via calculadora web (armazenado em cache por 14 dias).",
-                ))
-            elif _st_status == "refreshed":
-                st.caption(tr(
-                    "STS Score: cached entry expired and was refreshed from the web calculator.",
-                    "STS Score: entrada em cache expirada e atualizada via calculadora web.",
-                ))
-            elif _st_status == "stale_fallback":
+            # Failure states are shown inline so the user sees them immediately.
+            if _st_status == "stale_fallback":
                 st.warning(tr(
                     f"STS Score: web calculator failed; using a previous cached result{_age_txt}. "
                     f"Stage: {_st_stage}. Reason: {_st_reason}. "
@@ -3480,7 +3612,6 @@ elif _active_tab == 1:  # Individual Prediction
         out[tr("Probability", "Probabilidade")] = out[tr("Probability", "Probabilidade")].map(lambda x: "-" if np.isnan(x) else f"{x*100:.2f}%")
         with st.expander(tr("Detailed score table", "Tabela detalhada dos escores"), expanded=False):
             st.dataframe(out, width="stretch", column_config=general_table_column_config("patient_scores"))
-            # Show all STS sub-scores if available
             if sts_result:
                 st.markdown(tr("**STS Score Sub-scores (web calculator)**", "**Sub-escores STS Score (calculadora web)**"))
                 sts_rows = []
@@ -3491,6 +3622,22 @@ elif _active_tab == 1:  # Individual Prediction
                         tr("Value", "Valor"): f"{val*100:.2f}%" if not (isinstance(val, float) and np.isnan(val)) else "-",
                     })
                 st.dataframe(pd.DataFrame(sts_rows), width="stretch", column_config=general_table_column_config("sts_subscores"))
+            # OK-state STS cache status shown here to avoid cluttering the main result area.
+            if _st_status == "cached":
+                st.caption(tr(
+                    f"STS Score: cached result returned{_age_txt}. No network call.",
+                    f"STS Score: resultado em cache{_age_txt}. Sem chamada de rede.",
+                ))
+            elif _st_status == "fresh":
+                st.caption(tr(
+                    "STS Score: fresh calculation from the web calculator (cached for 14 days).",
+                    "STS Score: cálculo novo via calculadora web (armazenado em cache por 14 dias).",
+                ))
+            elif _st_status == "refreshed":
+                st.caption(tr(
+                    "STS Score: cached entry expired and was refreshed from the web calculator.",
+                    "STS Score: entrada em cache expirada e atualizada via calculadora web.",
+                ))
 
         with st.expander(tr("Prediction by each AI model", "Predição por cada modelo de IA"), expanded=False):
             st.info(tr(
@@ -3499,7 +3646,6 @@ elif _active_tab == 1:  # Individual Prediction
                 f"O resumo de risco usa **{forced_model}**, selecionado como o modelo de melhor desempenho na validação cruzada interna (maior AUC). "
                 "A tabela abaixo mostra as predições de todos os modelos candidatos para comparação. Diferenças são esperadas — cada algoritmo aprende padrões de forma diferente.",
             ))
-            # Highlight the selected model
             _model_col = tr("Model", "Modelo")
             _styled_pred = patient_pred_df.copy()
             st.dataframe(
@@ -3514,76 +3660,20 @@ elif _active_tab == 1:  # Individual Prediction
                 column_config=general_table_column_config("patient_scores"),
             )
 
-        # --- Input completeness indicator ---
-        # Use model_input (post clean_features) but restore values that
-        # clean_features wrongly converted to NaN (e.g. categorical "No"→NaN).
-        # A feature is "informed" if the user provided a value in form_map.
-        _derived = {"cirurgia_combinada", "peso_procedimento", "thoracic_aorta_flag"}
-        _completeness_row = model_input.copy()
-        for _fc in artifacts.feature_columns:
-            if _fc in _completeness_row.columns and pd.isna(_completeness_row.at[_completeness_row.index[0], _fc]):
-                # Check if user actually provided a value
-                if _fc in _derived:
-                    _completeness_row.at[_completeness_row.index[0], _fc] = 1  # always informed
-                elif _fc in form_map:
-                    _v = form_map[_fc]
-                    if _v is not None and str(_v).strip() not in ("", "nan"):
-                        _completeness_row.at[_completeness_row.index[0], _fc] = 1  # mark as informed
-        _completeness = assess_input_completeness(artifacts.feature_columns, _completeness_row, language)
-        _comp_icon = {"green": "🟢", "yellow": "🟡", "orange": "🟠", "red": "🔴"}.get(_completeness["color"], "⚪")
-        _comp_border = {"green": "#28a745", "yellow": "#ffc107", "orange": "#fd7e14", "red": "#dc3545"}.get(_completeness["color"], "#6c757d")
-
-        _pct_informed = round(100 * _completeness["n_informed"] / max(_completeness["n_total"], 1))
-        st.markdown(
-            f"""
-            <div style="border-left: 4px solid {_comp_border}; padding: 12px 16px; border-radius: 6px;
-                        background: rgba(255,255,255,0.03); margin: 8px 0 12px 0;">
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
-                    <span style="font-size: 1.4rem;">{_comp_icon}</span>
-                    <span style="font-size: 1.05rem; font-weight: 600;">{_completeness['label']}</span>
-                </div>
-                <div style="background: #23272b; border-radius: 4px; height: 8px; width: 100%; margin-bottom: 8px;">
-                    <div style="background: {_comp_border}; border-radius: 4px; height: 8px; width: {_pct_informed}%;"></div>
-                </div>
-                <div style="display: flex; gap: 24px; font-size: 0.9rem; color: #adb5bd;">
-                    <span>{tr("Informed", "Informadas")}: <b style="color:#e9ecef;">{_completeness['n_informed']}</b> / {_completeness['n_total']}</span>
-                    <span>{tr("Imputed", "Imputadas")}: <b style="color:#e9ecef;">{_completeness['n_imputed']}</b></span>
-                    <span style="margin-left: auto; font-size: 0.85rem;">{_pct_informed}%</span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        if _completeness["missing_high"]:
-            st.error(tr(
-                f"⚠ High-relevance variables missing: **{', '.join(_completeness['missing_high'])}** — predictions may be unreliable",
-                f"⚠ Variáveis de alta relevância ausentes: **{', '.join(_completeness['missing_high'])}** — predições podem ser pouco confiáveis",
-            ))
-        if _completeness["missing_moderate"]:
-            st.warning(tr(
-                f"Moderate-relevance variables missing: {', '.join(_completeness['missing_moderate'])}",
-                f"Variáveis de relevância moderada ausentes: {', '.join(_completeness['missing_moderate'])}",
-            ))
-        with st.expander(tr("Imputation detail per variable", "Detalhe de imputação por variável"), expanded=False):
-            _imp_detail = format_imputation_detail(artifacts.feature_columns, model_input, language)
-            st.dataframe(_imp_detail, width="stretch", hide_index=True)
-
-        st.markdown(tr("**Prediction quality**", "**Qualidade da predição**"))
-        q1, q2 = st.columns(2)
-        with q1:
-            st.info(
-                tr(
+        # ── INPUT QUALITY — consolidated into one expander ────────────────────
+        with st.expander(tr("Input quality & imputation detail", "Qualidade do input e detalhe de imputação"), expanded=False):
+            q1, q2 = st.columns(2)
+            with q1:
+                st.info(tr(
                     f"Model input: {informed_features} features informed, {imputed_features} imputed (detailed echo/lab values not available in the form use training median).",
                     f"Entrada do modelo: {informed_features} variáveis informadas, {imputed_features} imputadas (valores detalhados de eco/lab não disponíveis no formulário usam a mediana do treino).",
-                )
-            )
-        with q2:
-            st.info(tr(f"{likely_range_text} {confidence_text}.", f"{likely_range_text} {confidence_text}."))
-        with st.expander(tr("What does prediction quality mean?", "O que significa qualidade da predição?"), expanded=False):
-            st.markdown(
-                tr(
-                    """
+                ))
+            with q2:
+                st.info(tr(f"{likely_range_text} {confidence_text}.", f"{likely_range_text} {confidence_text}."))
+            _imp_detail = format_imputation_detail(artifacts.feature_columns, model_input, language)
+            st.dataframe(_imp_detail, width="stretch", hide_index=True)
+            st.markdown(tr(
+                """
 **Informed vs. imputed variables:** The model uses 61 predictor variables. In the individual form, some variables (detailed echocardiographic measurements, specific lab values) are not available as input fields — for these, the model uses the training dataset median. More imputed variables means less personalized prediction, but the core clinical variables (age, surgery type, renal function, LVEF) are always informed.
 
 **Interquartile risk range (IQR):** Shows the range between the 25th and 75th percentile of predictions across the available AI Risk candidate models. A narrow IQR means models agree; a wide IQR means disagreement.
@@ -3596,7 +3686,7 @@ elif _active_tab == 1:  # Individual Prediction
 
 **Why do models disagree?** Tree-based models (RandomForest, CatBoost, XGBoost, LightGBM) capture non-linear interactions and may predict differently from linear models (Logistic Regression) or from the StackingEnsemble meta-learner. For atypical patients, disagreement is more likely.
 """,
-                    """
+                """
 **Variáveis informadas vs. imputadas:** O modelo usa 61 variáveis preditoras. No formulário individual, algumas variáveis (medidas ecocardiográficas detalhadas, exames laboratoriais específicos) não estão disponíveis como campos — para estas, o modelo usa a mediana do dataset de treinamento. Mais variáveis imputadas significa predição menos personalizada, mas as variáveis clínicas centrais (idade, tipo de cirurgia, função renal, FEVE) são sempre informadas.
 
 **Faixa interquartil de risco (IQR):** Mostra o intervalo entre o percentil 25 e o percentil 75 das predições dos modelos candidatos do AI Risk disponíveis. IQR estreito significa que os modelos concordam; IQR largo significa discordância.
@@ -3609,18 +3699,15 @@ elif _active_tab == 1:  # Individual Prediction
 
 **Por que os modelos discordam?** Modelos baseados em árvore (RandomForest, CatBoost, XGBoost, LightGBM) capturam interações não-lineares e podem predizer diferente de modelos lineares (Regressão Logística) ou do meta-aprendiz StackingEnsemble. Para pacientes atípicos, a discordância é mais provável.
 """,
-                )
-            )
+            ))
 
-        st.caption(
-            tr(
-                "Note: EuroSCORE II and STS Score are calculated automatically. For EuroSCORE II, variables not available in the spreadsheet (e.g., poor mobility, critical preoperative state) are entered manually in this form. STS Score is obtained via automated interaction with the STS web calculator.",
-                "Observação: EuroSCORE II e STS Score são calculados automaticamente. No EuroSCORE II, variáveis não presentes na planilha (ex.: mobilidade, estado crítico) são informadas manualmente neste formulário. O STS Score é obtido via interação automatizada com a calculadora web do STS.",
-            )
-        )
+        st.caption(tr(
+            "Note: EuroSCORE II and STS Score are calculated automatically. For EuroSCORE II, variables not available in the spreadsheet (e.g., poor mobility, critical preoperative state) are entered manually in this form. STS Score is obtained via automated interaction with the STS web calculator.",
+            "Observação: EuroSCORE II e STS Score são calculados automaticamente. No EuroSCORE II, variáveis não presentes na planilha (ex.: mobilidade, estado crítico) são informadas manualmente neste formulário. O STS Score é obtido via interação automatizada com a calculadora web do STS.",
+        ))
 
         if quality_alerts:
-            with st.expander(tr("Data quality alerts", "Alertas de qualidade do dado"), expanded=True):
+            with st.expander(tr("Data quality alerts", "Alertas de qualidade do dado"), expanded=False):
                 for level, message in quality_alerts:
                     if level == tr("Critical", "Crítico"):
                         st.error(f"{level}: {message}")
@@ -3628,14 +3715,15 @@ elif _active_tab == 1:  # Individual Prediction
                         st.warning(f"{level}: {message}")
                     else:
                         st.info(f"{level}: {message}")
+
+        # ── CLINICAL INTERPRETATION ───────────────────────────────────────────
+        st.divider()
+        st.markdown(tr("### Clinical Interpretation", "### Interpretação Clínica"))
         pos_factors, neg_factors = explain_patient_risk(artifacts, model_input, form_map, top_n=5)
-        st.markdown(tr("**Clinical explanation for this patient**", "**Explicação clínica para este paciente**"))
-        st.caption(
-            tr(
-                "This explanation uses the logistic regression reference model as an interpretable layer. It reflects estimated associations with risk, not causal relationships.",
-                "Esta explicação usa o modelo de regressão logística como camada interpretável de referência. Ela reflete associações estimadas com o risco, e não relações causais.",
-            )
-        )
+        st.caption(tr(
+            "This explanation uses the logistic regression reference model as an interpretable layer. It reflects estimated associations with risk, not causal relationships.",
+            "Esta explicação usa o modelo de regressão logística como camada interpretável de referência. Ela reflete associações estimadas com o risco, e não relações causais.",
+        ))
         c_pos, c_neg = st.columns(2)
         with c_pos:
             st.markdown(tr("**Factors associated with higher risk**", "**Fatores associados ao aumento do risco**"))
@@ -3650,13 +3738,14 @@ elif _active_tab == 1:  # Individual Prediction
             else:
                 st.dataframe(neg_factors, width="stretch", column_config=explain_table_column_config())
 
+        _clinical_text = generate_clinical_explanation(pos_factors, neg_factors, ia_prob, language)
+        st.info(_clinical_text)
+
         with st.expander(tr("Why this prediction? (SHAP — actual model)", "Por que essa predição? (SHAP — modelo real)"), expanded=False):
-            st.caption(
-                tr(
-                    "Unlike the interpretable layer above (logistic regression proxy), this explanation uses SHAP values computed directly from the selected model. Each row shows how that variable pushed the predicted probability up or down for this specific patient.",
-                    "Ao contrário da camada interpretável acima (proxy de regressão logística), esta explicação usa valores SHAP calculados diretamente do modelo selecionado. Cada linha mostra quanto aquela variável empurrou a probabilidade prevista para cima ou para baixo neste paciente específico.",
-                )
-            )
+            st.caption(tr(
+                "Unlike the interpretable layer above (logistic regression proxy), this explanation uses SHAP values computed directly from the selected model. Each row shows how that variable pushed the predicted probability up or down for this specific patient.",
+                "Ao contrário da camada interpretável acima (proxy de regressão logística), esta explicação usa valores SHAP calculados diretamente do modelo selecionado. Cada linha mostra quanto aquela variável empurrou a probabilidade prevista para cima ou para baixo neste paciente específico.",
+            ))
             shap_mode = st.radio(
                 tr("Computation mode", "Modo de cálculo"),
                 [tr("Automatic", "Automático"), tr("Manual", "Manual")],
@@ -3711,14 +3800,13 @@ elif _active_tab == 1:  # Individual Prediction
                     except Exception as _shap_err:
                         st.warning(tr(f"SHAP explanation unavailable: {_shap_err}", f"Explicação SHAP indisponível: {_shap_err}"))
 
-        # --- Clinical explanation text ---
-        st.markdown(tr("**Clinical summary (auto-generated)**", "**Resumo clínico (gerado automaticamente)**"))
-        _clinical_text = generate_clinical_explanation(pos_factors, neg_factors, ia_prob, language)
-        st.info(_clinical_text)
-
-        # --- Individual report export ---
+        # ── EXPORT ────────────────────────────────────────────────────────────
         st.divider()
-        st.markdown(tr("**Export individual report**", "**Exportar relatório individual**"))
+        st.markdown(tr("### Export individual report", "### Exportar relatório individual"))
+        st.caption(tr(
+            "Generate and download the complete individual report: MD (full text), PDF (formatted), XLSX (structured tables), CSV (flat data).",
+            "Gere e baixe o relatório individual completo: MD (texto completo), PDF (formatado), XLSX (tabelas estruturadas), CSV (dados planos).",
+        ))
         _patient_id = st.text_input(
             tr("Patient identifier (for report)", "Identificador do paciente (para relatório)"),
             value=tr("Patient_001", "Paciente_001"),
@@ -3776,7 +3864,7 @@ elif _active_tab == 1:  # Individual Prediction
                     key="dl_report_csv",
                 )
 
-        # --- Audit trail logging ---
+        # ── AUDIT TRAIL ───────────────────────────────────────────────────────
         log_analysis(
             analysis_type="individual_prediction",
             source_file="manual_form",
@@ -4159,26 +4247,38 @@ elif _active_tab == 5:  # Model Guide
     st.dataframe(euro_coef_df, width="stretch", column_config=model_table_column_config("euroscore"))
 
 elif _active_tab == 6:  # Subgroups
-    st.subheader(tr("Subgroup analysis", "Análise por subgrupos"))
-    st.caption(
-        tr(
-            "This panel evaluates whether model performance changes across clinically relevant groups. Results in small groups should be interpreted with caution.",
-            "Este painel avalia se o desempenho do modelo muda em grupos clinicamente relevantes. Resultados em grupos pequenos devem ser interpretados com cautela.",
+    st.subheader(tr("Subgroup Analysis", "Análise por Subgrupos"))
+    st.caption(tr(
+        "Model performance across clinically relevant strata. Small subgroups (n < 50 or < 10 events) are flagged — treat those results as exploratory.",
+        "Desempenho do modelo em estratos clinicamente relevantes. Subgrupos pequenos (n < 50 ou < 10 eventos) são sinalizados — trate esses resultados como exploratórios.",
+    ))
+
+    # ── CONTROLS ─────────────────────────────────────────────────────────────
+    _ctrl1, _ctrl2 = st.columns([1, 1])
+    with _ctrl1:
+        subgroup_choice = st.selectbox(
+            tr("Subgroup panel", "Painel de subgrupos"),
+            [
+                tr("Surgery type", "Tipo de cirurgia"),
+                tr("Age", "Idade"),
+                tr("LVEF", "FEVE"),
+                tr("Renal function", "Função renal"),
+                tr("Sex", "Sexo"),
+            ],
         )
-    )
-    subgroup_threshold = st.slider(
-        tr("Subgroup decision threshold", "Limiar de decisão dos subgrupos"),
-        min_value=0.01,
-        max_value=0.99,
-        value=_default_threshold,
-        step=0.01,
-    )
-    st.caption(
-        tr(
-            f"Default: {_default_threshold:.0%} (dataset prevalence). Sensitivity, specificity, PPV, and NPV change with this threshold; AUC, AUPRC, and Brier do not.",
-            f"Padrão: {_default_threshold:.0%} (prevalência do dataset). Sensibilidade, especificidade, PPV e NPV mudam com este limiar; AUC, AUPRC e Brier não.",
+    with _ctrl2:
+        subgroup_threshold = st.slider(
+            tr("Decision threshold", "Limiar de decisão"),
+            min_value=0.01,
+            max_value=0.99,
+            value=_default_threshold,
+            step=0.01,
+            help=tr(
+                f"Default: {_default_threshold:.0%} (dataset prevalence). Sensitivity, specificity, PPV, and NPV change with this threshold; AUC, AUPRC, and Brier do not.",
+                f"Padrão: {_default_threshold:.0%} (prevalência do dataset). Sensibilidade, especificidade, PPV e NPV mudam com este limiar; AUC, AUPRC e Brier não.",
+            ),
         )
-    )
+
     subgroup_df = df.copy()
     subgroup_df["Surgery type"] = subgroup_df["Surgery"].map(_surgery_type_group)
     subgroup_df["Sex group"] = subgroup_df["Sex"].fillna(tr("Unknown", "Desconhecido"))
@@ -4201,17 +4301,6 @@ elif _active_tab == 6:  # Subgroups
             subgroup_df["Sex"] if "Sex" in subgroup_df.columns else _nan_o,
         )
     ]
-
-    subgroup_choice = st.selectbox(
-        tr("Subgroup panel", "Painel de subgrupos"),
-        [
-            tr("Surgery type", "Tipo de cirurgia"),
-            tr("Age", "Idade"),
-            tr("LVEF", "FEVE"),
-            tr("Renal function", "Função renal"),
-            tr("Sex", "Sexo"),
-        ],
-    )
     subgroup_map = {
         tr("Surgery type", "Tipo de cirurgia"): "Surgery type",
         tr("Age", "Idade"): "Age group",
@@ -4226,38 +4315,16 @@ elif _active_tab == 6:  # Subgroups
         ["ia_risk_oof", "euroscore_calc", "sts_score"],
         subgroup_threshold,
     )
+
+    # ── RESULTS ───────────────────────────────────────────────────────────────
+    st.divider()
     if subgroup_metrics.empty:
         st.info(tr("No subgroup results are available for the current selection.", "Não há resultados de subgrupos disponíveis para a seleção atual."))
     else:
         subgroup_metrics["Score"] = subgroup_metrics["Score"].replace(
             {"ia_risk_oof": "AI Risk", "euroscore_calc": "EuroSCORE II", "sts_score": "STS"}
         )
-        small_n = subgroup_metrics[subgroup_metrics["n"] < 50][["Group", "Score", "n"]]
-        low_events = subgroup_metrics[subgroup_metrics["Deaths"] < 10][["Group", "Score", "Deaths"]]
-        if not small_n.empty or not low_events.empty:
-            warn_parts = []
-            if not small_n.empty:
-                groups_small_n = ", ".join(sorted(set(small_n["Group"].astype(str).tolist())))
-                warn_parts.append(
-                    tr(
-                        f"small sample size in: {groups_small_n}",
-                        f"tamanho amostral pequeno em: {groups_small_n}",
-                    )
-                )
-            if not low_events.empty:
-                groups_low_events = ", ".join(sorted(set(low_events["Group"].astype(str).tolist())))
-                warn_parts.append(
-                    tr(
-                        f"low event count in: {groups_low_events}",
-                        f"baixo número de eventos em: {groups_low_events}",
-                    )
-                )
-            st.warning(
-                tr(
-                    f"Subgroup results should be interpreted with caution due to {'; '.join(warn_parts)}.",
-                    f"Os resultados por subgrupos devem ser interpretados com cautela devido a {'; '.join(warn_parts)}.",
-                )
-            )
+
         # Reorder columns: identifiers first, then metrics, then CIs
         _sub_col_order = [
             "Score", "Subgroup", "Group", "Deaths", "n",
@@ -4268,88 +4335,62 @@ elif _active_tab == 6:  # Subgroups
         ]
         _sub_col_order = [c for c in _sub_col_order if c in subgroup_metrics.columns]
         subgroup_metrics = subgroup_metrics[_sub_col_order]
-        st.dataframe(_format_ppv_npv(subgroup_metrics), width="stretch", column_config=stats_table_column_config("subgroup"))
-        _csv_download_btn(subgroup_metrics, "subgroup_results.csv", tr("Download subgroup results (CSV)", "Baixar resultados dos subgrupos (CSV)"))
+
+        # Best performer insight — shown first so the key result is immediately visible.
         best_sub = subgroup_metrics.sort_values("AUC", ascending=False).iloc[0]
         _ci_lo = best_sub.get("AUC_IC95_inf", np.nan)
         _ci_hi = best_sub.get("AUC_IC95_sup", np.nan)
         _ci_str = f" (95% CI: {_ci_lo:.3f}–{_ci_hi:.3f})" if pd.notna(_ci_lo) and pd.notna(_ci_hi) else ""
-        st.info(
-            tr(
-                f"In the selected subgroup panel, the best discriminative performance was observed for {best_sub['Score']} in group {best_sub['Group']} (AUC={best_sub['AUC']:.3f}{_ci_str}).",
-                f"No painel de subgrupos selecionado, a melhor discriminação foi observada em {best_sub['Score']} no grupo {best_sub['Group']} (AUC={best_sub['AUC']:.3f}{_ci_str}).",
-            )
+        st.info(tr(
+            f"Best discriminative performance: **{best_sub['Score']}** in group **{best_sub['Group']}** — AUC = {best_sub['AUC']:.3f}{_ci_str}.",
+            f"Melhor discriminação: **{best_sub['Score']}** no grupo **{best_sub['Group']}** — AUC = {best_sub['AUC']:.3f}{_ci_str}.",
+        ))
+
+        # Underpowered subgroup warnings.
+        small_n = subgroup_metrics[subgroup_metrics["n"] < 50][["Group", "Score", "n"]]
+        low_events = subgroup_metrics[subgroup_metrics["Deaths"] < 10][["Group", "Score", "Deaths"]]
+        if not small_n.empty or not low_events.empty:
+            warn_parts = []
+            if not small_n.empty:
+                groups_small_n = ", ".join(sorted(set(small_n["Group"].astype(str).tolist())))
+                warn_parts.append(tr(
+                    f"small sample size in: {groups_small_n}",
+                    f"tamanho amostral pequeno em: {groups_small_n}",
+                ))
+            if not low_events.empty:
+                groups_low_events = ", ".join(sorted(set(low_events["Group"].astype(str).tolist())))
+                warn_parts.append(tr(
+                    f"low event count in: {groups_low_events}",
+                    f"baixo número de eventos em: {groups_low_events}",
+                ))
+            st.warning(tr(
+                f"Interpret with caution — {'; '.join(warn_parts)}.",
+                f"Interprete com cautela — {'; '.join(warn_parts)}.",
+            ))
+
+        # Compact summary: Group, Score, n, Deaths, AUC with CI — primary reading surface.
+        _compact_cols = [c for c in ["Group", "Score", "n", "Deaths", "AUC", "AUC_IC95_inf", "AUC_IC95_sup"] if c in subgroup_metrics.columns]
+        st.dataframe(
+            subgroup_metrics[_compact_cols],
+            width="stretch",
+            column_config=stats_table_column_config("subgroup"),
+            hide_index=True,
         )
 
+        # Full metrics table (all CI columns, Sensitivity, Specificity, PPV, NPV) in expander.
+        with st.expander(tr("Full metrics table (all columns)", "Tabela completa de métricas (todas as colunas)"), expanded=False):
+            st.dataframe(_format_ppv_npv(subgroup_metrics), width="stretch", column_config=stats_table_column_config("subgroup"))
+
+        _csv_download_btn(subgroup_metrics, "subgroup_results.csv", tr("Download subgroup results (CSV)", "Baixar resultados dos subgrupos (CSV)"))
+
 elif _active_tab == 7:  # Data Quality
-    st.subheader(tr("Data Quality Panel", "Painel de Qualidade da Base"))
+    st.subheader(tr("Data Quality", "Qualidade da Base"))
     st.caption(tr(
-        "Overview of dataset completeness, score availability, and surgical case-mix.",
-        "Visão geral de completude do dataset, disponibilidade de escores e case-mix cirúrgico.",
+        "Completeness, imputation exposure, score availability, and validation readiness for the current dataset.",
+        "Completude, exposição à imputação, disponibilidade de escores e prontidão para validação do dataset atual.",
     ))
 
     _dq = compute_data_quality_summary(df, prepared.feature_columns, language)
-
-    # Key metrics
-    dq1, dq2, dq3, dq4 = st.columns(4)
-    dq1.metric(tr("Eligible surgeries", "Cirurgias elegíveis"), _dq["n_total"])
-    dq2.metric(tr("Deaths (primary outcome)", "Óbitos (desfecho primário)"), _dq["n_events"])
-    dq3.metric(tr("Event rate", "Taxa de eventos"), f"{_dq['event_rate']:.1%}")
-    dq4.metric(tr("Triple cohort", "Coorte tripla"), _dq["n_triple"])
-
-    # Score availability — app-calculated scores (primary)
-    st.markdown(tr("**App-calculated scores (primary)**", "**Escores calculados pelo app (primários)**"))
-    _score_primary = pd.DataFrame([
-        {tr("Score", "Escore"): "AI Risk (OOF)", tr("Patients", "Pacientes"): int(df["ia_risk_oof"].notna().sum()) if "ia_risk_oof" in df.columns else 0},
-        {tr("Score", "Escore"): tr("EuroSCORE II (app-calculated)", "EuroSCORE II (calculado pelo app)"), tr("Patients", "Pacientes"): _dq["n_euro_calc"]},
-        {tr("Score", "Escore"): tr("STS (app-calculated)", "STS (calculado pelo app)"), tr("Patients", "Pacientes"): _dq["n_sts"]},
-        {tr("Score", "Escore"): tr("Triple cohort (all 3 scores)", "Coorte tripla (3 escores)"), tr("Patients", "Pacientes"): _dq["n_triple"]},
-    ])
-    st.dataframe(_score_primary, width="stretch")
-
-    # Sheet-derived scores (reference only)
-    with st.expander(tr("Sheet-derived scores (reference only)", "Escores derivados da planilha (apenas referência)")):
-        st.caption(tr(
-            "These values were read from the original input file and are shown for comparison/validation purposes only. They are NOT used in the primary analysis.",
-            "Estes valores foram lidos do arquivo de entrada original e são mostrados apenas para fins de comparação/validação. NÃO são usados na análise principal.",
-        ))
-        _score_ref = pd.DataFrame([
-            {tr("Score", "Escore"): "EuroSCORE II (sheet)", tr("Patients", "Pacientes"): _dq["n_euro_sheet"]},
-            {tr("Score", "Escore"): "EuroSCORE II Auto (sheet)", tr("Patients", "Pacientes"): _dq["n_euro_auto"]},
-            {tr("Score", "Escore"): "STS (sheet)", tr("Patients", "Pacientes"): _dq["n_sts_sheet"]},
-        ])
-        st.dataframe(_score_ref, width="stretch")
-
-    # Missing rates per variable
-    st.markdown(tr("**Missing rate per variable**", "**Taxa de missing por variável**"))
-    st.caption(tr(
-        "Proportion of missing values in the analytical dataset for each predictor variable.",
-        "Proporção de valores ausentes no dataset analítico para cada variável preditora.",
-    ))
-    _miss_df = pd.DataFrame([
-        {tr("Variable", "Variável"): var, tr("Missing rate", "Taxa de missing"): rate, tr("Missing %", "Missing %"): f"{rate*100:.1f}%"}
-        for var, rate in sorted(_dq["missing_rates"].items(), key=lambda x: x[1], reverse=True)
-    ])
-    if not _miss_df.empty:
-        _miss_high = _miss_df[_miss_df[tr("Missing rate", "Taxa de missing")] > 0.3]
-        if not _miss_high.empty:
-            st.warning(tr(
-                f"{len(_miss_high)} variables have >30% missing data. This may affect prediction reliability.",
-                f"{len(_miss_high)} variáveis têm >30% de dados faltantes. Isso pode afetar a confiabilidade das predições.",
-            ))
-        st.dataframe(_miss_df, width="stretch")
-
-    # Surgery type distribution
-    if _dq["surgery_dist"]:
-        st.markdown(tr("**Surgical procedure distribution**", "**Distribuição de procedimentos cirúrgicos**"))
-        _surg_df = pd.DataFrame([
-            {tr("Procedure", "Procedimento"): proc, tr("Count", "Contagem"): count}
-            for proc, count in _dq["surgery_dist"].items()
-        ])
-        st.dataframe(_surg_df, width="stretch")
-
-    # Validation readiness
-    st.markdown(tr("**Validation readiness**", "**Prontidão para validação**"))
     _model_meta_dq = build_model_metadata(
         prepared.info, artifacts.leaderboard, best_model_name,
         artifacts.feature_columns, xlsx_path, sts_available=HAS_STS,
@@ -4359,23 +4400,116 @@ elif _active_tab == 7:  # Data Quality
         training_data=prepared.data,
     )
     _val_checks = check_validation_readiness(_model_meta_dq, language)
-    for vc in _val_checks:
-        st.markdown(f"- **{vc['check']}**: {vc['status']} — {vc['note']}")
 
-    # Audit trail
+    # Pre-compute missing rate table once — reused in Issues block and expander.
+    _miss_rate_col = tr("Missing rate", "Taxa de missing")
+    _miss_var_col = tr("Variable", "Variável")
+    _miss_pct_col = tr("Missing %", "Missing %")
+    _miss_df = pd.DataFrame([
+        {_miss_var_col: var, _miss_rate_col: rate, _miss_pct_col: f"{rate*100:.1f}%"}
+        for var, rate in sorted(_dq["missing_rates"].items(), key=lambda x: x[1], reverse=True)
+    ])
+    _miss_high = (
+        _miss_df[_miss_df[_miss_rate_col] > 0.3] if not _miss_df.empty else pd.DataFrame()
+    )
+    _warn_tokens = {"needs more", "precisa de"}
+
+    # ── COVERAGE OVERVIEW ─────────────────────────────────────────────────────
+    dq1, dq2, dq3, dq4 = st.columns(4)
+    dq1.metric(tr("Eligible surgeries", "Cirurgias elegíveis"), _dq["n_total"])
+    dq2.metric(tr("Deaths (primary outcome)", "Óbitos (desfecho primário)"), _dq["n_events"])
+    dq3.metric(tr("Event rate", "Taxa de eventos"), f"{_dq['event_rate']:.1%}")
+    dq4.metric(tr("Triple cohort", "Coorte tripla"), _dq["n_triple"])
+
+    # ── ISSUES ────────────────────────────────────────────────────────────────
+    _val_warn_checks = [vc for vc in _val_checks if any(t in str(vc.get("status", "")).lower() for t in _warn_tokens)]
+    _has_issues = not _miss_high.empty or bool(_val_warn_checks)
     st.divider()
-    st.markdown(tr("**Analysis audit trail**", "**Trilha de auditoria**"))
-    st.caption(tr(
-        "Recent analysis events logged by the application.",
-        "Eventos de análise recentes registrados pelo aplicativo.",
-    ))
-    _audit_entries = read_audit_log(20)
-    if _audit_entries:
-        _audit_df = pd.DataFrame(_audit_entries)
-        _audit_cols = [c for c in ["timestamp", "analysis_type", "source_file", "model_version", "n_patients", "n_imputed", "completeness_level", "sts_method"] if c in _audit_df.columns]
-        st.dataframe(_audit_df[_audit_cols], width="stretch")
+    if _has_issues:
+        st.markdown(tr("### Issues", "### Problemas"))
+        if not _miss_high.empty:
+            st.error(tr(
+                f"**{len(_miss_high)} variable(s) with >30% missing data** — may reduce prediction reliability.",
+                f"**{len(_miss_high)} variável(is) com >30% de dados faltantes** — pode reduzir a confiabilidade das predições.",
+            ))
+            with st.expander(tr(f"Variables with >30% missing ({len(_miss_high)})", f"Variáveis com >30% missing ({len(_miss_high)})"), expanded=True):
+                st.dataframe(_miss_high[[_miss_var_col, _miss_pct_col]], width="stretch", hide_index=True)
+        for vc in _val_warn_checks:
+            st.warning(f"**{vc['check']}**: {vc['status']} — {vc['note']}")
     else:
-        st.info(tr("No audit entries yet. They will appear as you use the app.", "Nenhum registro de auditoria ainda. Eles aparecerão conforme você usar o app."))
+        st.success(tr(
+            "No critical data quality issues detected.",
+            "Nenhum problema crítico de qualidade detectado.",
+        ))
+
+    # ── SCORE AVAILABILITY ────────────────────────────────────────────────────
+    st.divider()
+    st.markdown(tr("### Score Availability", "### Disponibilidade de Escores"))
+    _score_primary = pd.DataFrame([
+        {tr("Score", "Escore"): "AI Risk (OOF)", tr("Patients", "Pacientes"): int(df["ia_risk_oof"].notna().sum()) if "ia_risk_oof" in df.columns else 0},
+        {tr("Score", "Escore"): tr("EuroSCORE II (app-calculated)", "EuroSCORE II (calculado pelo app)"), tr("Patients", "Pacientes"): _dq["n_euro_calc"]},
+        {tr("Score", "Escore"): tr("STS (app-calculated)", "STS (calculado pelo app)"), tr("Patients", "Pacientes"): _dq["n_sts"]},
+        {tr("Score", "Escore"): tr("Triple cohort (all 3 scores)", "Coorte tripla (3 escores)"), tr("Patients", "Pacientes"): _dq["n_triple"]},
+    ])
+    st.dataframe(_score_primary, width="stretch", hide_index=True)
+
+    with st.expander(tr("Sheet-derived scores (reference only)", "Escores derivados da planilha (apenas referência)"), expanded=False):
+        st.caption(tr(
+            "These values were read from the original input file and are shown for comparison/validation purposes only. They are NOT used in the primary analysis.",
+            "Estes valores foram lidos do arquivo de entrada original e são mostrados apenas para fins de comparação/validação. NÃO são usados na análise principal.",
+        ))
+        _score_ref = pd.DataFrame([
+            {tr("Score", "Escore"): "EuroSCORE II (sheet)", tr("Patients", "Pacientes"): _dq["n_euro_sheet"]},
+            {tr("Score", "Escore"): "EuroSCORE II Auto (sheet)", tr("Patients", "Pacientes"): _dq["n_euro_auto"]},
+            {tr("Score", "Escore"): "STS (sheet)", tr("Patients", "Pacientes"): _dq["n_sts_sheet"]},
+        ])
+        st.dataframe(_score_ref, width="stretch", hide_index=True)
+
+    # ── VALIDATION READINESS ──────────────────────────────────────────────────
+    st.divider()
+    st.markdown(tr("### Validation Readiness", "### Prontidão para Validação"))
+    for vc in _val_checks:
+        _vc_status = str(vc.get("status", ""))
+        _vc_is_warn = any(t in _vc_status.lower() for t in _warn_tokens)
+        if _vc_is_warn:
+            st.warning(f"**{vc['check']}**: {_vc_status} — {vc['note']}")
+        else:
+            st.success(f"**{vc['check']}**: {_vc_status} — {vc['note']}")
+
+    # ── DETAILED TABLES ───────────────────────────────────────────────────────
+    st.divider()
+    st.markdown(tr("### Detailed Data", "### Dados Detalhados"))
+
+    with st.expander(tr("Missing rate per variable (all predictors)", "Taxa de missing por variável (todos os preditores)"), expanded=False):
+        st.caption(tr(
+            "Proportion of missing values in the analytical dataset for each predictor variable, sorted by missing rate descending.",
+            "Proporção de valores ausentes no dataset analítico para cada variável preditora, ordenada por taxa de missing decrescente.",
+        ))
+        if not _miss_df.empty:
+            st.dataframe(_miss_df, width="stretch", hide_index=True)
+        else:
+            st.info(tr("No missing data in the analytical dataset.", "Nenhum dado faltante no dataset analítico."))
+
+    if _dq["surgery_dist"]:
+        with st.expander(tr("Surgical procedure distribution", "Distribuição de procedimentos cirúrgicos"), expanded=False):
+            _surg_df = pd.DataFrame([
+                {tr("Procedure", "Procedimento"): proc, tr("Count", "Contagem"): count}
+                for proc, count in _dq["surgery_dist"].items()
+            ])
+            st.dataframe(_surg_df, width="stretch", hide_index=True)
+
+    with st.expander(tr("Analysis audit trail", "Trilha de auditoria"), expanded=False):
+        st.caption(tr(
+            "Recent analysis events logged by the application.",
+            "Eventos de análise recentes registrados pelo aplicativo.",
+        ))
+        _audit_entries = read_audit_log(20)
+        if _audit_entries:
+            _audit_df = pd.DataFrame(_audit_entries)
+            _audit_cols = [c for c in ["timestamp", "analysis_type", "source_file", "model_version", "n_patients", "n_imputed", "completeness_level", "sts_method"] if c in _audit_df.columns]
+            st.dataframe(_audit_df[_audit_cols], width="stretch", hide_index=True)
+        else:
+            st.info(tr("No audit entries yet. They will appear as you use the app.", "Nenhum registro de auditoria ainda. Eles aparecerão conforme você usar o app."))
 
 elif _active_tab == 8:  # Variable Dictionary
     st.subheader(tr("Variable Dictionary", "Dicionário de Variáveis"))
@@ -4384,7 +4518,10 @@ elif _active_tab == 8:  # Variable Dictionary
         "Tabela de referência formal com definições clínicas, origens, unidades e uso no modelo para todas as variáveis.",
     ))
 
-    _dict_df = get_dictionary_dataframe(language)
+    _dict_df = get_dictionary_dataframe(
+        language,
+        model_feature_columns=getattr(artifacts, "feature_columns", None),
+    )
     _domain_col = "Domínio" if language != "English" else "Domain"
 
     _dict_filter = st.multiselect(

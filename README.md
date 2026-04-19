@@ -208,6 +208,19 @@ All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converg
 
 - **Numeric normalization** — Brazilian and English numeric conventions are both accepted. Strings like `"1,24%"`, `"1.24%"`, `"1,24"`, and `"1.24"` are normalised to the same float; trailing percent signs are stripped and the value is rescaled when appropriate.
 - **Valve severity** — valve variables accept the ordered set `None < Trivial < Mild < Moderate < Severe`. The literal value **"None" means *no disease*, not missing data** — it is treated as the lowest level of the ordinal scale, not as an NA.
+- **Binary history columns — implicit negative rule** — a narrow set of binary yes/no history flags follows the cardiac surgery registry convention that *if the condition was present, it was documented; if blank, the condition is absent*. After all standard missing-token normalization (empty string, `"-"`, `"nan"`, etc. → NaN), remaining NaN values in these columns are filled with `"No"` — not by a global rule, but by an explicit named constant (`BLANK_MEANS_NO_COLUMNS`) applied only to the listed variables:
+
+  | Variable | Rationale |
+  |:--|:--|
+  | `Previous surgery` | Prior cardiac surgery is always charted when present. |
+  | `HF` | Heart failure is assessed in every pre-op evaluation; blank = no HF. |
+  | `Arrhythmia Remote` | Past arrhythmia is documented when present; blank = no known remote arrhythmia. |
+  | `Arrhythmia Recent` | Same convention as Remote; active arrhythmia is never silently blank. |
+  | `Family Hx of CAD` | Family history of CAD is documented when positive; blank = negative. |
+  | `Anticoagulation/ Antiaggregation` | Critical for surgical planning — always documented if in use; blank = not on treatment. |
+
+  **Explicitly excluded from this rule:** `Suspension of Anticoagulation (day)` — this is a numeric conditional field (applicable only when `Anticoagulation=Yes`); blank means N/A or not documented, not zero days.
+
 - **Column exclusion** — columns with **>95% missing** are dropped before modelling so that degenerate columns never reach the preprocessor or the leaderboard.
 - **Patient matching** — patient name and procedure date are used exclusively for cross-sheet matching and are never passed to the model as predictors.
 
