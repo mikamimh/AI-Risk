@@ -258,11 +258,69 @@ def _sts_score_patient_ids(rows) -> list:
     return [_sts_score_patient_id(r) for r in rows]
 
 
+def _format_training_sts_phase(label: object, phase_num: object = None, phase_total: object = None) -> str:
+    """Translate STS Score operational phase labels without changing worker logic."""
+    raw = str(label or "").strip().lower()
+    labels = {
+        "checking cache": tr("checking cache", "verificando cache"),
+        "identifying cache misses": tr("identifying cache misses", "identificando itens fora do cache"),
+        "querying web calculator": tr("querying web calculator", "consultando a calculadora web"),
+        "validating and consolidating": tr("validating and consolidating", "validando e consolidando resultados"),
+        "STS Score processing": tr("STS Score processing", "processamento do STS Score"),
+    }
+    text = labels.get(raw, str(label or tr("STS Score processing", "processamento do STS Score")))
+    if phase_num and phase_total:
+        return f"{tr('Phase', 'Fase')} {phase_num}/{phase_total}: {text}"
+    return text
+
+
+def _format_training_sts_detail(detail: object) -> str:
+    """Make known STS Score progress details readable in the selected language."""
+    raw = str(detail or "").strip()
+    if not raw or language == "English":
+        return raw
+    m = re.match(r"^(\d+)/(\d+) checked$", raw)
+    if m:
+        return f"{m.group(1)}/{m.group(2)} verificados"
+    m = re.match(r"^(\d+) cache hits?, (\d+) misses$", raw)
+    if m:
+        return f"{m.group(1)} em cache, {m.group(2)} fora do cache"
+    m = re.match(r"^(\d+) patients? to fetch$", raw)
+    if m:
+        return f"{m.group(1)} pacientes para consultar"
+    return raw
+
+
+def _format_training_sts_status(status: object) -> str:
+    raw = str(status or "").strip()
+    if language == "English":
+        return raw
+    return {
+        "cached": "em cache",
+        "fresh": "novo",
+        "refreshed": "cache atualizado",
+        "stale_fallback": "fallback de cache",
+        "failed": "falha",
+        "unknown": "desconhecido",
+    }.get(raw, raw)
+
+
+def _format_training_sts_error(message: object) -> str:
+    raw = str(message or "").strip()
+    if language == "English" or not raw:
+        return raw
+    prefix = "STS Score query returned no usable result for "
+    if raw.startswith(prefix):
+        patient = raw[len(prefix):].strip()
+        return f"A consulta do STS Score não retornou resultado utilizável para {patient}"
+    return raw
+
+
 def _update_phase(slot, phase_num: int, phase_total: int, label: str) -> None:
     """Update a st.empty() phase-label slot. No-op if slot is None or on error."""
     try:
         if slot is not None:
-            slot.caption(f"Phase {phase_num}/{phase_total}: {label}")
+            slot.caption(f"{tr('Phase', 'Fase')} {phase_num}/{phase_total}: {label}")
     except Exception:
         pass
 
@@ -280,6 +338,14 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
     import observability as _obs
     importlib.reload(_obs)
     run_report = _obs.RunReport()
+
+    def _emit_progress(phase: str, current: int = 0, total: int = 1, detail=None) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(phase, current, total, detail or "")
+        except Exception:
+            pass
 
     if progress_callback is not None:
         try:
@@ -336,14 +402,86 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
     # patient-keyed stale fallback, structured execution log).
     sts_ws_results = []
     if HAS_STS:
-        if progress_callback is not None:
-            try:
-                progress_callback("sts_score_calc", 0, 1, "")
-            except Exception:
-                pass
         rows_as_dicts = df.to_dict(orient="records")
         _sts_pids = _sts_score_patient_ids(rows_as_dicts)
-        sts_ws_results = calculate_sts_batch(rows_as_dicts, patient_ids=_sts_pids)
+        _sts_total = len(rows_as_dicts)
+        _sts_state = {
+            "total": _sts_total,
+            "processed": 0,
+            "net_success": 0,
+            "net_failed": 0,
+            "pending": _sts_total,
+            "current_patient": "",
+            "current_batch_size": 0,
+            "current_position": 0,
+            "last_completed": "",
+            "last_error": "",
+            "phase_label": "",
+            "phase_detail": "",
+        }
+        _sts_chunk_size = 5
+
+        _emit_progress("sts_score_calc", 0, _sts_total, dict(_sts_state))
+
+        def _sts_progress_cb(done, total):
+            _sts_state["processed"] = int(done or 0)
+            _sts_state["total"] = int(total or _sts_total or 0)
+            _sts_state["pending"] = max(int(total or 0) - int(done or 0), 0)
+            _emit_progress("sts_score_progress", int(done or 0), int(total or 0), dict(_sts_state))
+
+        def _sts_phase_cb(phase_num, phase_total, label, detail=""):
+            _sts_state["phase_label"] = label or ""
+            _sts_state["phase_num"] = int(phase_num or 0)
+            _sts_state["phase_total"] = int(phase_total or 0)
+            _sts_state["phase_detail"] = detail or ""
+            _emit_progress("sts_score_phase", int(phase_num or 0), int(phase_total or 0), dict(_sts_state))
+
+        def _sts_chunk_start_cb(patient_idx, total_pending, patient_id=None):
+            _idx = int(patient_idx or 0)
+            _total_pending = int(total_pending or 0)
+            _sts_state["current_position"] = _idx + 1
+            _sts_state["current_patient"] = patient_id or ""
+            _sts_state["current_batch_size"] = max(min(_sts_chunk_size, _total_pending - _idx), 0)
+            _sts_state["pending_network"] = _total_pending
+            _emit_progress("sts_score_patient", _idx, _total_pending, dict(_sts_state))
+
+        def _sts_chunk_done_cb(patient_idx, total_pending, success):
+            patient_label = _sts_state.get("current_patient") or f"row_{int(patient_idx or 0) + 1}"
+            _sts_state["last_completed"] = patient_label
+            if success:
+                _sts_state["net_success"] = int(_sts_state.get("net_success", 0)) + 1
+            else:
+                _sts_state["net_failed"] = int(_sts_state.get("net_failed", 0)) + 1
+                _sts_state["last_error"] = f"STS Score query returned no usable result for {patient_label}"
+            _emit_progress("sts_score_patient_done", int(patient_idx or 0) + 1, int(total_pending or 0), dict(_sts_state))
+
+        sts_ws_results = calculate_sts_batch(
+            rows_as_dicts,
+            patient_ids=_sts_pids,
+            progress_callback=_sts_progress_cb,
+            phase_callback=_sts_phase_cb,
+            chunk_start_callback=_sts_chunk_start_cb,
+            chunk_done_callback=_sts_chunk_done_cb,
+            chunk_size=_sts_chunk_size,
+        )
+
+        _exec_log = list(getattr(calculate_sts_batch, "last_execution_log", []) or [])
+        _fail_log = list(getattr(calculate_sts_batch, "failure_log", []) or [])
+        _status_counts = {}
+        for _rec in _exec_log:
+            _status = getattr(_rec, "status", None) or "unknown"
+            _status_counts[_status] = _status_counts.get(_status, 0) + 1
+        _last_fail = _fail_log[-1] if _fail_log else {}
+        _sts_done_detail = dict(_sts_state)
+        _sts_done_detail.update({
+            "processed": _sts_total,
+            "pending": 0,
+            "failures": len(_fail_log),
+            "status_counts": _status_counts,
+            "last_error": (_last_fail.get("reason") or _sts_state.get("last_error") or ""),
+            "last_error_patient": (_last_fail.get("patient_id") or _last_fail.get("name") or ""),
+        })
+        _emit_progress("sts_score_done", _sts_total, _sts_total, _sts_done_detail)
 
     if sts_ws_results:
         df["sts_score"] = [r.get("predmort", np.nan) for r in sts_ws_results]
@@ -2339,6 +2477,226 @@ from report_text import (
 from subgroups import evaluate_subgroup
 
 
+def _subgroup_add_caution_flags(metrics: pd.DataFrame) -> pd.DataFrame:
+    """Attach the same exploratory caution semantics shown in the Subgroups UI."""
+    out = metrics.copy()
+    if out.empty:
+        return out
+    out["small_n_flag"] = pd.to_numeric(out.get("n"), errors="coerce") < 50
+    out["low_events_flag"] = pd.to_numeric(out.get("Deaths"), errors="coerce") < 10
+    out["caution_flag"] = out["small_n_flag"] | out["low_events_flag"]
+
+    def _reason(row) -> str:
+        reasons = []
+        if bool(row.get("small_n_flag", False)):
+            reasons.append("n < 50")
+        if bool(row.get("low_events_flag", False)):
+            reasons.append("deaths < 10")
+        return "; ".join(reasons)
+
+    out["caution_reason"] = out.apply(_reason, axis=1)
+    return out
+
+
+def _subgroup_compact_table(metrics: pd.DataFrame) -> pd.DataFrame:
+    if metrics.empty:
+        return metrics.copy()
+    out = metrics.copy()
+    if {"AUC_IC95_inf", "AUC_IC95_sup"}.issubset(out.columns):
+        out["AUC CI"] = out.apply(
+            lambda r: (
+                f"{r['AUC_IC95_inf']:.3f}-{r['AUC_IC95_sup']:.3f}"
+                if pd.notna(r["AUC_IC95_inf"]) and pd.notna(r["AUC_IC95_sup"])
+                else ""
+            ),
+            axis=1,
+        )
+    cols = [
+        "Subgroup panel", "Subgroup", "Group", "Score", "n", "Deaths",
+        "AUC", "AUC CI", "caution_flag", "caution_reason",
+    ]
+    return out[[c for c in cols if c in out.columns]]
+
+
+@st.cache_data(show_spinner=False)
+def _build_all_subgroup_metrics_cached(
+    subgroup_df: pd.DataFrame,
+    subgroup_panels: tuple,
+    score_cols: tuple,
+    threshold: float,
+) -> pd.DataFrame:
+    """Build all subgroup panels with the same evaluator used by the UI."""
+    frames = []
+    score_labels = {
+        "ia_risk_oof": "AI Risk",
+        "euroscore_calc": "EuroSCORE II",
+        "sts_score": "STS Score",
+    }
+    for panel_label, subgroup_col in subgroup_panels:
+        metrics = evaluate_subgroup(
+            subgroup_df,
+            subgroup_col,
+            list(score_cols),
+            float(threshold),
+        )
+        if metrics.empty:
+            continue
+        metrics = metrics.copy()
+        metrics["Subgroup panel"] = panel_label
+        metrics["Score"] = metrics["Score"].replace(score_labels)
+        frames.append(metrics)
+    if not frames:
+        return pd.DataFrame()
+    all_metrics = pd.concat(frames, ignore_index=True)
+    all_metrics = _subgroup_add_caution_flags(all_metrics)
+    preferred = [
+        "Subgroup panel", "Score", "Subgroup", "Group", "Deaths", "n",
+        "AUC", "AUC_IC95_inf", "AUC_IC95_sup",
+        "AUPRC", "AUPRC_IC95_inf", "AUPRC_IC95_sup",
+        "Brier", "Brier_IC95_inf", "Brier_IC95_sup",
+        "Sensitivity", "Specificity", "PPV", "NPV",
+        "small_n_flag", "low_events_flag", "caution_flag", "caution_reason",
+    ]
+    ordered = [c for c in preferred if c in all_metrics.columns]
+    ordered += [c for c in all_metrics.columns if c not in ordered]
+    return all_metrics[ordered]
+
+
+def _build_subgroup_summary_table(all_metrics: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    if all_metrics.empty:
+        return pd.DataFrame()
+    rows = []
+    for panel, panel_df in all_metrics.groupby("Subgroup panel", dropna=False):
+        best = panel_df.sort_values("AUC", ascending=False).iloc[0]
+        rows.append({
+            "Subgroup panel": panel,
+            "Rows in export": int(len(panel_df)),
+            "Groups evaluated": int(panel_df["Group"].nunique()) if "Group" in panel_df.columns else np.nan,
+            "Scores evaluated": int(panel_df["Score"].nunique()) if "Score" in panel_df.columns else np.nan,
+            "Caution-flagged rows": int(panel_df.get("caution_flag", pd.Series(False, index=panel_df.index)).sum()),
+            "Best score": best.get("Score", ""),
+            "Best group": best.get("Group", ""),
+            "Best AUC": best.get("AUC", np.nan),
+            "Best AUC CI lower": best.get("AUC_IC95_inf", np.nan),
+            "Best AUC CI upper": best.get("AUC_IC95_sup", np.nan),
+            "Decision threshold": float(threshold),
+        })
+    return pd.DataFrame(rows)
+
+
+def _build_subgroup_caution_table(all_metrics: pd.DataFrame) -> pd.DataFrame:
+    if all_metrics.empty or "caution_flag" not in all_metrics.columns:
+        return pd.DataFrame()
+    cols = [
+        "Subgroup panel", "Subgroup", "Group", "Score", "n", "Deaths",
+        "small_n_flag", "low_events_flag", "caution_reason",
+    ]
+    return all_metrics.loc[all_metrics["caution_flag"], [c for c in cols if c in all_metrics.columns]].copy()
+
+
+def _build_subgroup_xlsx_bytes(all_metrics: pd.DataFrame, threshold: float, language: str) -> bytes:
+    readme = pd.DataFrame(
+        [
+            {
+                "Field": "Purpose",
+                "Value": (
+                    "Consolidated subgroup export across all panels and available scores/models."
+                    if language == "English"
+                    else "Export consolidado de subgrupos em todos os painéis e escores/modelos disponíveis."
+                ),
+            },
+            {"Field": "Decision threshold", "Value": float(threshold)},
+            {
+                "Field": "Method",
+                "Value": (
+                    "Uses the same evaluate_subgroup() routine and metrics shown in the Subgroups tab."
+                    if language == "English"
+                    else "Usa a mesma rotina evaluate_subgroup() e as mesmas métricas exibidas na aba Subgroups."
+                ),
+            },
+            {
+                "Field": "Caution flags",
+                "Value": "n < 50 and/or deaths < 10",
+            },
+        ]
+    )
+    summary = _build_subgroup_summary_table(all_metrics, threshold)
+    compact = _subgroup_compact_table(all_metrics)
+    cautions = _build_subgroup_caution_table(all_metrics)
+
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        readme.to_excel(writer, sheet_name="00_README", index=False)
+        summary.to_excel(writer, sheet_name="01_SUMMARY", index=False)
+        compact.to_excel(writer, sheet_name="02_SUBGROUP_COMPACT", index=False)
+        all_metrics.to_excel(writer, sheet_name="03_SUBGROUP_FULL", index=False)
+        cautions.to_excel(writer, sheet_name="04_CAUTION_FLAGS", index=False)
+    return buf.getvalue()
+
+
+def _markdown_table(df: pd.DataFrame, cols: list[str], max_rows: int = 12) -> str:
+    view = df[[c for c in cols if c in df.columns]].head(max_rows).copy()
+    if view.empty:
+        return ""
+    for col in view.select_dtypes(include=[np.number]).columns:
+        view[col] = view[col].map(lambda v: "" if pd.isna(v) else f"{v:.3f}")
+    headers = list(view.columns)
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for _, row in view.iterrows():
+        lines.append("| " + " | ".join(str(row.get(c, "")) for c in headers) + " |")
+    return "\n".join(lines)
+
+
+def _build_subgroup_summary_pdf_bytes(
+    subgroup_metrics: pd.DataFrame,
+    subgroup_choice: str,
+    threshold: float,
+    language: str,
+) -> bytes:
+    if subgroup_metrics.empty:
+        return b""
+    metrics = _subgroup_add_caution_flags(subgroup_metrics)
+    best = metrics.sort_values("AUC", ascending=False).iloc[0]
+    compact = _subgroup_compact_table(metrics)
+    caution_count = int(metrics.get("caution_flag", pd.Series(False, index=metrics.index)).sum())
+    title = "Subgroup Analysis Summary" if language == "English" else "Resumo da Analise por Subgrupos"
+    caution_note = (
+        f"{caution_count} row(s) flagged for n < 50 and/or deaths < 10."
+        if language == "English"
+        else f"{caution_count} linha(s) sinalizadas por n < 50 e/ou mortes < 10."
+    )
+    method_note = (
+        "Metrics use the same subgroup evaluator shown in the app. AUC, AUPRC and Brier are threshold-independent; sensitivity, specificity, PPV and NPV use the selected decision threshold."
+        if language == "English"
+        else "As metricas usam o mesmo avaliador de subgrupos exibido no app. AUC, AUPRC e Brier independem do limiar; sensibilidade, especificidade, PPV e NPV usam o limiar selecionado."
+    )
+    md = f"""# {title}
+
+**Panel:** {subgroup_choice}  
+**Decision threshold:** {threshold:.1%}
+
+## Best Subgroup
+
+Best discriminative performance: **{best.get('Score', '')}** in **{best.get('Group', '')}** with AUC = **{best.get('AUC', np.nan):.3f}**.
+
+## Compact Table
+
+{_markdown_table(compact, ['Group', 'Score', 'n', 'Deaths', 'AUC', 'AUC CI', 'caution_reason'])}
+
+## Caution
+
+{caution_note}
+
+## Method Note
+
+{method_note}
+"""
+    return statistical_summary_to_pdf(md)
+
+
 def build_methods_text(mode: str) -> str:
     return _build_methods_text_impl(mode, language, tr)
 
@@ -2441,11 +2799,11 @@ else:  # Google Sheets
                 v_ok, v_msg = _validate_source(str(GSHEETS_CACHE_FILE))
                 if v_ok:
                     st.session_state["last_gsheet_url"] = g_clean
-                    st.sidebar.success(tr("Loaded and validated", "Carregado e validado"))
+                    st.sidebar.success(tr("Loaded and validated", "Arquivo carregado e validado"))
                 else:
                     st.sidebar.error(tr(f"Invalid data: {v_msg}", f"Dados inválidos: {v_msg}"))
             else:
-                st.sidebar.error(tr(f"Load failed: {msg}", f"Falha: {msg}"))
+                st.sidebar.error(tr(f"Load failed: {msg}", f"Falha ao carregar: {msg}"))
         except Exception as e:
             st.sidebar.error(tr(f"Invalid URL: {e}", f"URL inválida: {e}"))
 
@@ -2453,24 +2811,24 @@ else:  # Google Sheets
         xlsx_path = str(GSHEETS_CACHE_FILE)
         st.sidebar.caption(tr(
             "Using cached Google Sheets file. Clear temp files to reset.",
-            "Usando cache do Google Sheets. Limpe temporários para resetar.",
+            "Usando arquivo do Google Sheets em cache. Limpe os temporários para redefinir.",
         ))
 
 st.sidebar.divider()
 
 # ── Model section ──
 force_retrain = st.sidebar.button(
-    tr("Train / Retrain models", "Treinar / Retreinar modelos"),
+    tr("Train / Retrain models", "Treinar / retreinar modelos"),
     width="stretch",
     type="primary",
 )
 
 with st.sidebar.expander(tr("Advanced", "Avançado")):
-    clear_temp = st.button(tr("Clear temporary files", "Limpar arquivos temporários"), width="stretch")
+    clear_temp = st.button(tr("Clear temporary files", "Limpar temporários"), width="stretch")
     if clear_temp:
         ok, msg = _clear_temp_data_dir()
         if ok:
-            st.success(tr("Cleaned", "Limpo"))
+            st.success(tr("Cleaned", "Arquivos temporários limpos"))
             if "last_gsheet_url" in st.session_state:
                 del st.session_state["last_gsheet_url"]
         else:
@@ -2498,19 +2856,159 @@ if force_retrain:
         _train_progress = st.progress(0, text=tr(
             "Preparing data…", "Preparando dados…",
         ))
+        _train_ops_slot = st.empty()
         _train_last_phase: list = [""]  # [label] — updated at each phase transition
+        _train_t0 = time.monotonic()
+        _train_sts_ops = {
+            "total": 0,
+            "processed": 0,
+            "net_success": 0,
+            "net_failed": 0,
+            "pending": 0,
+            "current_patient": "",
+            "last_completed": "",
+            "last_error": "",
+            "last_error_patient": "",
+            "phase_label": "",
+            "phase_detail": "",
+            "status_counts": {},
+            "failures": 0,
+        }
+
+        def _train_elapsed_label() -> str:
+            _seconds = max(int(time.monotonic() - _train_t0), 0)
+            _minutes, _secs = divmod(_seconds, 60)
+            if _minutes:
+                return tr(f"{_minutes}m {_secs}s", f"{_minutes}min {_secs}s")
+            return tr(f"{_secs}s", f"{_secs}s")
+
+        def _merge_train_sts_ops(detail) -> None:
+            if not isinstance(detail, dict):
+                return
+            for _k, _v in detail.items():
+                if _v is not None:
+                    _train_sts_ops[_k] = _v
+
+        def _sts_success_count() -> int:
+            _counts = _train_sts_ops.get("status_counts") or {}
+            if _counts:
+                return int(sum(_counts.get(_k, 0) for _k in ("cached", "fresh", "refreshed", "stale_fallback")))
+            return int(_train_sts_ops.get("net_success", 0) or 0)
+
+        def _sts_error_count() -> int:
+            _failures = int(_train_sts_ops.get("failures", 0) or 0)
+            if _failures:
+                return _failures
+            _counts = _train_sts_ops.get("status_counts") or {}
+            if _counts:
+                return int(_counts.get("failed", 0) or 0)
+            return int(_train_sts_ops.get("net_failed", 0) or 0)
+
+        def _render_train_sts_ops(final: bool = False) -> None:
+            _total = int(_train_sts_ops.get("total", 0) or 0)
+            if _total <= 0:
+                return
+            _processed = min(int(_train_sts_ops.get("processed", 0) or 0), _total)
+            _pending = max(_total - _processed, 0)
+            _pct = _processed / max(_total, 1)
+            _current = str(_train_sts_ops.get("current_patient") or tr("not available", "não informado"))
+            _current_batch_size = int(_train_sts_ops.get("current_batch_size", 0) or 0)
+            _batch_suffix = ""
+            if _current_batch_size > 1:
+                _batch_suffix = tr(
+                    f" (+{_current_batch_size - 1} in the same request)",
+                    f" (+{_current_batch_size - 1} no mesmo lote)",
+                )
+            _phase = _format_training_sts_phase(
+                _train_sts_ops.get("phase_label") or "STS Score processing",
+                _train_sts_ops.get("phase_num"),
+                _train_sts_ops.get("phase_total"),
+            )
+            _detail = _format_training_sts_detail(_train_sts_ops.get("phase_detail") or "")
+            _last_done = str(_train_sts_ops.get("last_completed") or tr("none yet", "nenhum até agora"))
+            _last_err_patient = str(_train_sts_ops.get("last_error_patient") or "")
+            _last_err = str(_train_sts_ops.get("last_error") or "")
+            _success = _sts_success_count()
+            _errors = _sts_error_count()
+            _counts = _train_sts_ops.get("status_counts") or {}
+            _cache_line = ""
+            if _counts:
+                _cache_bits = []
+                for _k in ("cached", "fresh", "refreshed", "stale_fallback", "failed"):
+                    if _counts.get(_k, 0):
+                        _cache_bits.append(f"{_format_training_sts_status(_k)}: {_counts[_k]}")
+                _cache_line = " · ".join(_cache_bits)
+            with _train_ops_slot.container():
+                st.markdown(tr("**Operational processing status**", "**Status operacional do treino**"))
+                st.progress(
+                    _pct,
+                    text=tr(
+                        f"{_processed}/{_total} patients processed ({_pct:.0%})",
+                        f"{_processed}/{_total} pacientes processados ({_pct:.0%})",
+                    ),
+                )
+                st.caption(tr(
+                    f"Current patient/request: {_current}{_batch_suffix} · elapsed: {_train_elapsed_label()} · phase: {_phase}",
+                    f"Paciente/consulta atual: {_current}{_batch_suffix} · tempo decorrido: {_train_elapsed_label()} · etapa: {_phase}",
+                ))
+                if _detail:
+                    st.caption(_detail)
+                _m1, _m2, _m3, _m4 = st.columns(4)
+                _m1.metric(tr("Success", "Concluídos"), _success)
+                _m2.metric(tr("Errors", "Erros"), _errors)
+                _m3.metric(tr("Pending", "Pendentes"), _pending)
+                _m4.metric(tr("Skipped/incompatible", "Ignorados/incompatíveis"), tr("n/a", "não aplicável"))
+                _op_bits = [
+                    tr(f"Last completed: {_last_done}", f"Último concluído: {_last_done}"),
+                ]
+                if _last_err:
+                    _err_prefix = (
+                        f"{_last_err_patient}: " if _last_err_patient else ""
+                    )
+                    _op_bits.append(tr(
+                        f"Last relevant error: {_err_prefix}{_last_err}",
+                        f"Último erro relevante: {_err_prefix}{_format_training_sts_error(_last_err)}",
+                    ))
+                if _cache_line:
+                    _op_bits.append(tr(
+                        f"STS Score/cache/fallback: {_cache_line}",
+                        f"STS Score, cache e fallback: {_cache_line}",
+                    ))
+                if final:
+                    _op_bits.append(tr("Final operational summary.", "Resumo operacional final."))
+                st.caption(" · ".join(_op_bits))
+
+        def _render_train_sts_summary() -> None:
+            _total = int(_train_sts_ops.get("total", 0) or 0)
+            if _total <= 0:
+                return
+            _success = _sts_success_count()
+            _errors = _sts_error_count()
+            _success_rate = _success / max(_total, 1)
+            _s1, _s2, _s3, _s4 = st.columns(4)
+            _s1.metric(tr("Processed", "Processados"), _total)
+            _s2.metric(tr("Success", "Concluídos"), _success)
+            _s3.metric(tr("Errors", "Erros"), _errors)
+            _s4.metric(tr("Success rate", "Taxa de sucesso"), f"{_success_rate:.1%}")
+            _counts = _train_sts_ops.get("status_counts") or {}
+            if _counts:
+                st.caption(
+                    tr("STS Score status counts: ", "Contagens de status do STS Score: ")
+                    + " · ".join(f"{_format_training_sts_status(_k)}: {_v}" for _k, _v in _counts.items() if _v)
+                )
+
         def _train_progress_cb(phase, current, total, model_name):
             if phase == "loading_data":
-                _train_last_phase[0] = tr("loading and preparing dataset", "carregando e preparando dados")
+                _train_last_phase[0] = tr("loading and preparing dataset", "carregando e preparando a base")
                 _update_phase(_train_phase_slot, 1, 5, tr(
                     "loading and preparing dataset",
-                    "carregando e preparando dados",
+                    "carregando e preparando a base",
                 ))
             elif phase == "eligibility_done":
-                _train_last_phase[0] = tr("cohort eligibility", "elegibilidade da coorte")
+                _train_last_phase[0] = tr("cohort eligibility", "verificando elegibilidade da coorte")
                 _update_phase(_train_phase_slot, 2, 5, tr(
                     "cohort eligibility",
-                    "elegibilidade da coorte",
+                    "verificando elegibilidade da coorte",
                 ))
             elif phase == "cross_validation":
                 _train_last_phase[0] = tr("training candidate models", "treinando modelos candidatos")
@@ -2535,13 +3033,13 @@ if force_retrain:
                     f"Treino final: {model_name} ({current + 1}/{total})",
                 ))
             elif phase == "selecting_best":
-                _train_last_phase[0] = tr("selecting best model", "selecionando melhor modelo")
+                _train_last_phase[0] = tr("selecting best model", "selecionando o melhor modelo")
                 _update_phase(_train_phase_slot, 3, 5, tr(
                     "selecting best model",
-                    "selecionando melhor modelo",
+                    "selecionando o melhor modelo",
                 ))
                 _train_progress.progress(0.95, text=tr(
-                    "Selecting best model…", "Selecionando melhor modelo…",
+                    "Selecting best model…", "Selecionando o melhor modelo…",
                 ))
             elif phase == "euroscore_calc":
                 _train_last_phase[0] = tr("computing scores", "calculando escores")
@@ -2553,19 +3051,46 @@ if force_retrain:
                     "Computing EuroSCORE II…", "Calculando EuroSCORE II…",
                 ))
             elif phase == "sts_score_calc":
-                _train_last_phase[0] = tr("querying STS Score web calculator", "consultando calculadora web STS Score")
+                _train_last_phase[0] = tr("querying STS Score web calculator", "consultando a calculadora web do STS Score")
                 _update_phase(_train_phase_slot, 4, 5, tr(
                     "querying STS Score web calculator",
-                    "consultando calculadora web STS Score",
+                    "consultando a calculadora web do STS Score",
                 ))
                 _train_progress.progress(0.97, text=tr(
-                    "Querying STS Score…", "Consultando STS Score…",
+                    "Querying STS Score…", "Consultando o STS Score…",
                 ))
+                _merge_train_sts_ops(model_name)
+                _render_train_sts_ops()
+            elif phase in {"sts_score_phase", "sts_score_progress", "sts_score_patient", "sts_score_patient_done"}:
+                _train_last_phase[0] = tr("querying STS Score web calculator", "consultando a calculadora web do STS Score")
+                _update_phase(_train_phase_slot, 4, 5, tr(
+                    "querying STS Score web calculator",
+                    "consultando a calculadora web do STS Score",
+                ))
+                _merge_train_sts_ops(model_name)
+                _processed = int(_train_sts_ops.get("processed", 0) or 0)
+                _total = int(_train_sts_ops.get("total", total or 0) or 0)
+                _sts_frac = _processed / max(_total, 1) if _total else 0
+                _train_progress.progress(
+                    min(0.97 + 0.02 * _sts_frac, 0.99),
+                    text=tr(
+                        f"STS Score: {_processed}/{_total}",
+                        f"STS Score: {_processed}/{_total}",
+                    ),
+                )
+                _render_train_sts_ops()
+            elif phase == "sts_score_done":
+                _train_last_phase[0] = tr("querying STS Score web calculator", "consultando a calculadora web do STS Score")
+                _merge_train_sts_ops(model_name)
+                _train_progress.progress(0.99, text=tr(
+                    "STS Score complete.", "STS Score concluído.",
+                ))
+                _render_train_sts_ops(final=True)
             elif phase == "building_reports":
-                _train_last_phase[0] = tr("building reports and bundle", "gerando relatórios e bundle")
+                _train_last_phase[0] = tr("building reports and bundle", "gerando relatórios e pacote")
                 _update_phase(_train_phase_slot, 5, 5, tr(
                     "building reports and bundle",
-                    "gerando relatórios e bundle",
+                    "gerando relatórios e pacote",
                 ))
                 _train_progress.progress(0.99, text=tr(
                     "Building reports…", "Gerando relatórios…",
@@ -2578,11 +3103,13 @@ if force_retrain:
         _train_progress.progress(1.0, text=tr(
             "Training complete!", "Treinamento concluído!",
         ))
+        _train_ops_slot.empty()
         with st.expander(tr("View training execution details", "Ver detalhes de execução do treinamento"), expanded=False):
             st.caption(tr(
                 f"Last phase: {_train_last_phase[0]} | Source: {_retrained_info.get('training_source', '?')}",
-                f"Última fase: {_train_last_phase[0]} | Fonte: {_retrained_info.get('training_source', '?')}",
+                f"Última etapa: {_train_last_phase[0]} | Arquivo de origem: {_retrained_info.get('training_source', '?')}",
             ))
+            _render_train_sts_summary()
     except Exception as e:
         # Phase 3: if ingestion halted on a required-column error, the
         # exception carries a RunReport — render it so the user sees
@@ -2593,14 +3120,14 @@ if force_retrain:
             st.error(
                 tr(
                     f"Training halted while processing '{_err_source}': {e}",
-                    f"Treino interrompido ao processar '{_err_source}': {e}",
+                    f"Treinamento interrompido ao processar '{_err_source}': {e}",
                 )
             )
         else:
             st.error(
                 tr(
                     f"Training failed: {e}",
-                    f"Falha no treino: {e}",
+                    f"Falha no treinamento: {e}",
                 )
             )
         if _err_report is not None:
@@ -2635,7 +3162,7 @@ if bundle is None:
     st.warning(
         tr(
             "No trained model found for this file. Click 'Train/Retrain models' in the sidebar.",
-            "Não há modelo treinado para este arquivo. Clique em 'Treinar/Retreinar modelos' na barra lateral.",
+            "Não há modelo treinado para este arquivo. Clique em 'Treinar / retreinar modelos' na barra lateral.",
         )
     )
     st.info(
@@ -4308,11 +4835,13 @@ elif _active_tab == 6:  # Subgroups
         tr("Renal function", "Função renal"): "Renal function group",
         tr("Sex", "Sexo"): "Sex group",
     }
+    subgroup_panel_specs = tuple((str(label), str(col)) for label, col in subgroup_map.items())
+    subgroup_score_cols = tuple(c for c in ["ia_risk_oof", "euroscore_calc", "sts_score"] if c in subgroup_df.columns)
     subgroup_col = subgroup_map[subgroup_choice]
     subgroup_metrics = evaluate_subgroup(
         subgroup_df,
         subgroup_col,
-        ["ia_risk_oof", "euroscore_calc", "sts_score"],
+        list(subgroup_score_cols),
         subgroup_threshold,
     )
 
@@ -4322,16 +4851,19 @@ elif _active_tab == 6:  # Subgroups
         st.info(tr("No subgroup results are available for the current selection.", "Não há resultados de subgrupos disponíveis para a seleção atual."))
     else:
         subgroup_metrics["Score"] = subgroup_metrics["Score"].replace(
-            {"ia_risk_oof": "AI Risk", "euroscore_calc": "EuroSCORE II", "sts_score": "STS"}
+            {"ia_risk_oof": "AI Risk", "euroscore_calc": "EuroSCORE II", "sts_score": "STS Score"}
         )
+        subgroup_metrics["Subgroup panel"] = str(subgroup_choice)
+        subgroup_metrics = _subgroup_add_caution_flags(subgroup_metrics)
 
         # Reorder columns: identifiers first, then metrics, then CIs
         _sub_col_order = [
-            "Score", "Subgroup", "Group", "Deaths", "n",
+            "Subgroup panel", "Score", "Subgroup", "Group", "Deaths", "n",
             "AUC", "AUC_IC95_inf", "AUC_IC95_sup",
             "AUPRC", "AUPRC_IC95_inf", "AUPRC_IC95_sup",
             "Brier", "Brier_IC95_inf", "Brier_IC95_sup",
             "Sensitivity", "Specificity", "PPV", "NPV",
+            "small_n_flag", "low_events_flag", "caution_flag", "caution_reason",
         ]
         _sub_col_order = [c for c in _sub_col_order if c in subgroup_metrics.columns]
         subgroup_metrics = subgroup_metrics[_sub_col_order]
@@ -4381,7 +4913,65 @@ elif _active_tab == 6:  # Subgroups
         with st.expander(tr("Full metrics table (all columns)", "Tabela completa de métricas (todas as colunas)"), expanded=False):
             st.dataframe(_format_ppv_npv(subgroup_metrics), width="stretch", column_config=stats_table_column_config("subgroup"))
 
-        _csv_download_btn(subgroup_metrics, "subgroup_results.csv", tr("Download subgroup results (CSV)", "Baixar resultados dos subgrupos (CSV)"))
+        st.markdown(tr("**Exports**", "**Exports**"))
+        _sub_dl1, _sub_dl2, _sub_dl3 = st.columns(3)
+        with _sub_dl1:
+            _csv_download_btn(
+                subgroup_metrics,
+                "subgroup_results.csv",
+                tr("Download current CSV", "Baixar CSV atual"),
+            )
+        with _sub_dl2:
+            _sub_pdf_bytes = _build_subgroup_summary_pdf_bytes(
+                subgroup_metrics,
+                str(subgroup_choice),
+                subgroup_threshold,
+                language,
+            )
+            if _sub_pdf_bytes:
+                _bytes_download_btn(
+                    _sub_pdf_bytes,
+                    "subgroup_summary.pdf",
+                    tr("Download summary PDF", "Baixar PDF resumido"),
+                    "application/pdf",
+                    key="subgroup_summary_pdf",
+                )
+            else:
+                st.caption(tr("Summary PDF unavailable.", "PDF resumido indisponível."))
+        with _sub_dl3:
+            _sub_sig = json.dumps(_bundle_signature(xlsx_path), sort_keys=True)
+            _sub_export_key = f"_subgroup_full_xlsx_{abs(hash((_sub_sig, round(float(subgroup_threshold), 6), language)))}"
+            if st.button(
+                tr("Prepare full XLSX", "Preparar XLSX completo"),
+                key=f"{_sub_export_key}_prepare",
+                width="stretch",
+            ):
+                with st.spinner(tr("Building consolidated subgroup export...", "Gerando export consolidado de subgrupos...")):
+                    _all_subgroups = _build_all_subgroup_metrics_cached(
+                        subgroup_df,
+                        subgroup_panel_specs,
+                        subgroup_score_cols,
+                        float(subgroup_threshold),
+                    )
+                    st.session_state[_sub_export_key] = {
+                        "xlsx": _build_subgroup_xlsx_bytes(_all_subgroups, float(subgroup_threshold), language),
+                        "n_rows": int(len(_all_subgroups)),
+                    }
+            _sub_export_payload = st.session_state.get(_sub_export_key)
+            if _sub_export_payload:
+                if int(_sub_export_payload.get("n_rows", 0) or 0) == 0:
+                    st.warning(tr(
+                        "No consolidated subgroup rows were available.",
+                        "Nenhuma linha consolidada de subgrupo ficou disponível.",
+                    ))
+                else:
+                    _bytes_download_btn(
+                        _sub_export_payload["xlsx"],
+                        "subgroup_all_panels.xlsx",
+                        tr("Download full XLSX", "Baixar XLSX completo"),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="subgroup_full_xlsx",
+                    )
 
 elif _active_tab == 7:  # Data Quality
     st.subheader(tr("Data Quality", "Qualidade da Base"))
