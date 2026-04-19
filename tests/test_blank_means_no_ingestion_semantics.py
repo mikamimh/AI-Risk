@@ -70,7 +70,9 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
                 "Anticoagulation/ Antiaggregation": "",
                 "Suspension of Anticoagulation (day)": "",
                 "Creatinine (mg/dL)": "",
+                "Coronary Symptom": "",
                 "Aortic Stenosis": "",
+                "Aortic Regurgitation": "",
             },
             {
                 "Name": "P2",
@@ -84,7 +86,25 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
                 "Anticoagulation/ Antiaggregation": "Yes",
                 "Suspension of Anticoagulation (day)": "7",
                 "Creatinine (mg/dL)": "1.2",
+                "Coronary Symptom": "Stable Angina",
                 "Aortic Stenosis": "None",
+                "Aortic Regurgitation": "Mild",
+            },
+            {
+                "Name": "P3",
+                "Surgery": "AVR",
+                "Death": "No",
+                "Previous surgery": "No",
+                "HF": "No",
+                "Arrhythmia Remote": "No",
+                "Arrhythmia Recent": "No",
+                "Family Hx of CAD": "No",
+                "Anticoagulation/ Antiaggregation": "No",
+                "Suspension of Anticoagulation (day)": "",
+                "Creatinine (mg/dL)": "1.0",
+                "Coronary Symptom": "Unknown",
+                "Aortic Stenosis": "Unknown",
+                "Aortic Regurgitation": "",
             },
         ]
     )
@@ -97,4 +117,8 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
         assert data.at["P1", col] == "No"
     assert pd.isna(data.at["P1", "Suspension of Anticoagulation (day)"])
     assert pd.isna(data.at["P1", "Creatinine (mg/dL)"])
-    assert data.at["P1", "Aortic Stenosis"] != "No"
+    assert pd.isna(data.at["P1", "Coronary Symptom"])
+    assert data.at["P1", "Aortic Stenosis"] == "None"
+    assert pd.isna(data.at["P1", "Aortic Regurgitation"])
+    assert pd.isna(data.at["P3", "Coronary Symptom"])
+    assert pd.isna(data.at["P3", "Aortic Stenosis"])

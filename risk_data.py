@@ -73,6 +73,11 @@ BLANK_MEANS_NO_COLUMNS: frozenset = frozenset({
 })
 
 
+BLANK_MEANS_NONE_COLUMNS: frozenset = frozenset({
+    "Aortic Stenosis",
+})
+
+
 def _impute_blank_as_no(df: pd.DataFrame) -> pd.DataFrame:
     """Fill NaN with 'No' for BLANK_MEANS_NO_COLUMNS after missing-token normalisation.
 
@@ -95,6 +100,23 @@ def _impute_blank_as_no(df: pd.DataFrame) -> pd.DataFrame:
         n_filled = int(out[col].isna().sum())
         if n_filled > 0:
             out[col] = out[col].fillna("No")
+    return out
+
+
+def _impute_blank_as_none(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill source blanks with 'None' only for explicitly listed severity fields.
+
+    This runs BEFORE normalize_dataframe() so that true blank cells become the
+    valid clinical category "None", while textual unknown tokens (e.g.
+    "Unknown", "N/A", "-") still flow through the usual missing-token path.
+    """
+    out = df.copy()
+    for col in BLANK_MEANS_NONE_COLUMNS:
+        if col not in out.columns:
+            continue
+        blank_mask = out[col].isna() | out[col].astype(str).str.strip().eq("")
+        if bool(blank_mask.any()):
+            out.loc[blank_mask, col] = "None"
     return out
 
 
@@ -2253,6 +2275,7 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
             data["_patient_key"] = pd.Series(range(len(data))).astype(str)
 
     # ── Unified normalization ──
+    data = _impute_blank_as_none(data)
     data, ingestion_report = normalize_dataframe(data, source_label="flat")
     # Interpret blank as implicit "No" for binary history columns where the
     # source data convention is: present → documented; absent → left blank.
@@ -2399,6 +2422,7 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
     pre_post["sts_score_sheet"] = pre_post["_patient_key"].map(sts_series)
 
     # ── Unified normalization ──
+    pre_post = _impute_blank_as_none(pre_post)
     pre_post, ingestion_report = normalize_dataframe(pre_post, source_label="master")
     # Interpret blank as implicit "No" for binary history columns where the
     # source data convention is: present → documented; absent → left blank.
