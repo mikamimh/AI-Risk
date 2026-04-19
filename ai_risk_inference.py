@@ -26,6 +26,7 @@ from risk_data import (
     BLANK_MEANS_NO_COLUMNS,
     MISSING_TOKENS,
     is_combined_surgery,
+    normalize_coronary_symptom_value,
     procedure_weight,
     thoracic_aorta_surgery,
 )
@@ -84,6 +85,8 @@ def _build_input_row(feature_columns, form: Dict[str, object]) -> pd.DataFrame:
                 if fc_stripped != k_stripped and (k_stripped.startswith(fc_stripped) or fc_stripped.startswith(k_stripped)):
                     row[fc] = v
                     break
+    if "Coronary Symptom" in row:
+        row["Coronary Symptom"] = normalize_coronary_symptom_value(row["Coronary Symptom"])
     surg = form.get("Surgery", "")
     row["cirurgia_combinada"] = is_combined_surgery(surg)
     row["peso_procedimento"] = procedure_weight(surg)

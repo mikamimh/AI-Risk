@@ -3,7 +3,11 @@ import pytest
 
 from ai_risk_inference import _build_input_row
 import risk_data
-from risk_data import BLANK_MEANS_NO_COLUMNS, prepare_flat_dataset
+from risk_data import (
+    BLANK_MEANS_NO_COLUMNS,
+    normalize_coronary_symptom_value,
+    prepare_flat_dataset,
+)
 
 
 def test_row_inference_applies_blank_means_no_only_to_explicit_history_columns():
@@ -25,6 +29,27 @@ def test_row_inference_treats_absent_explicit_history_columns_as_no():
 
     for col in BLANK_MEANS_NO_COLUMNS:
         assert row.at[0, col] == "No"
+
+
+def test_row_inference_canonicalizes_literal_none_coronary_symptom():
+    row = _build_input_row(["Coronary Symptom"], {"Coronary Symptom": "None"})
+
+    assert row.at[0, "Coronary Symptom"] == "No coronary symptoms"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("None", "No coronary symptoms"),
+        ("No Symptoms", "No coronary symptoms"),
+        ("NSTEMI", "Non-STEMI"),
+        ("Stable angina", "Stable Angina"),
+        ("", ""),
+        ("Unknown", "Unknown"),
+    ],
+)
+def test_coronary_symptom_canonicalizer_is_narrow(raw, expected):
+    assert normalize_coronary_symptom_value(raw) == expected
 
 
 @pytest.mark.parametrize("missing_token", ["", "-", "nan", "N/A", "not informed"])
@@ -106,6 +131,22 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
                 "Aortic Stenosis": "Unknown",
                 "Aortic Regurgitation": "",
             },
+            {
+                "Name": "P4",
+                "Surgery": "CABG",
+                "Death": "No",
+                "Previous surgery": "No",
+                "HF": "No",
+                "Arrhythmia Remote": "No",
+                "Arrhythmia Recent": "No",
+                "Family Hx of CAD": "No",
+                "Anticoagulation/ Antiaggregation": "No",
+                "Suspension of Anticoagulation (day)": "",
+                "Creatinine (mg/dL)": "1.0",
+                "Coronary Symptom": "None",
+                "Aortic Stenosis": "None",
+                "Aortic Regurgitation": "",
+            },
         ]
     )
     monkeypatch.setattr(risk_data, "_read_csv_auto", lambda _path: source_df.copy())
@@ -122,3 +163,4 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
     assert pd.isna(data.at["P1", "Aortic Regurgitation"])
     assert pd.isna(data.at["P3", "Coronary Symptom"])
     assert pd.isna(data.at["P3", "Aortic Stenosis"])
+    assert data.at["P4", "Coronary Symptom"] == "No coronary symptoms"

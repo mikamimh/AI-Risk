@@ -77,6 +77,54 @@ BLANK_MEANS_NONE_COLUMNS: frozenset = frozenset({
     "Aortic Stenosis",
 })
 
+CORONARY_SYMPTOM_CANONICAL_VALUES: Dict[str, str] = {
+    "none": "No coronary symptoms",
+    "no symptoms": "No coronary symptoms",
+    "no coronary symptoms": "No coronary symptoms",
+    "sem sintomas coronarianos": "No coronary symptoms",
+    "stable angina": "Stable Angina",
+    "angina estavel": "Stable Angina",
+    "angina estável": "Stable Angina",
+    "unstable angina": "Unstable Angina",
+    "angina instavel": "Unstable Angina",
+    "angina instável": "Unstable Angina",
+    "nstemi": "Non-STEMI",
+    "non-stemi": "Non-STEMI",
+    "iam sem supra de st": "Non-STEMI",
+    "stemi": "STEMI",
+    "iam com supra de st": "STEMI",
+    "angina equivalent": "Angina Equivalent",
+    "equivalente anginoso": "Angina Equivalent",
+    "other": "Other",
+    "outro": "Other",
+}
+
+
+def normalize_coronary_symptom_value(value: object) -> object:
+    """Return the canonical Coronary Symptom category for known exact labels.
+
+    The literal string ``"None"`` is a valid coronary-presentation category
+    meaning no coronary symptoms. It must be canonicalized before generic
+    missing-token handling, where ``"none"`` otherwise means missing for most
+    columns. True blanks and textual unknown tokens are intentionally left for
+    the regular missing-value pipeline.
+    """
+    if pd.isna(value):
+        return value
+    text = str(value).strip()
+    if text == "":
+        return value
+    return CORONARY_SYMPTOM_CANONICAL_VALUES.get(text.lower(), value)
+
+
+def _normalize_coronary_symptom_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Canonicalize only the Coronary Symptom field before missing normalization."""
+    if "Coronary Symptom" not in df.columns:
+        return df
+    out = df.copy()
+    out["Coronary Symptom"] = out["Coronary Symptom"].map(normalize_coronary_symptom_value)
+    return out
+
 
 def _impute_blank_as_no(df: pd.DataFrame) -> pd.DataFrame:
     """Fill NaN with 'No' for BLANK_MEANS_NO_COLUMNS after missing-token normalisation.
@@ -2275,6 +2323,7 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
             data["_patient_key"] = pd.Series(range(len(data))).astype(str)
 
     # ── Unified normalization ──
+    data = _normalize_coronary_symptom_column(data)
     data = _impute_blank_as_none(data)
     data, ingestion_report = normalize_dataframe(data, source_label="flat")
     # Interpret blank as implicit "No" for binary history columns where the
@@ -2422,6 +2471,7 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
     pre_post["sts_score_sheet"] = pre_post["_patient_key"].map(sts_series)
 
     # ── Unified normalization ──
+    pre_post = _normalize_coronary_symptom_column(pre_post)
     pre_post = _impute_blank_as_none(pre_post)
     pre_post, ingestion_report = normalize_dataframe(pre_post, source_label="master")
     # Interpret blank as implicit "No" for binary history columns where the
