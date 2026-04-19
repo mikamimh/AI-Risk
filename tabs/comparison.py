@@ -14,9 +14,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import streamlit as st
+from sklearn.metrics import roc_curve
 
 from stats_compare import (
     bootstrap_auc_diff,
+    calibration_bins_detail,
     calibration_intercept_slope,
     classification_metrics_at_threshold,
     compute_idi,
@@ -27,8 +29,13 @@ from stats_compare import (
     evaluate_scores_with_ci,
     evaluate_scores_with_threshold,
     hosmer_lemeshow_test,
+    threshold_analysis_table,
 )
 from export_helpers import (
+    build_comparison_full_package,
+    build_comparison_full_pdf,
+    build_comparison_summary_pdf,
+    build_comparison_xlsx,
     build_statistical_summary,
     statistical_summary_to_csv,
     statistical_summary_to_pdf,
@@ -37,6 +44,372 @@ from export_helpers import (
 
 if TYPE_CHECKING:
     from tabs import TabContext
+
+
+# Canonical display labels for the three scores.
+# Any alias that ever appears in triple_ci["Score"] is mapped here so the
+# Brier merge never silently returns NaN due to a naming variation.
+_CANONICAL_SCORE_LABEL: dict[str, str] = {
+    "AI Risk": "AI Risk",
+    "EuroSCORE II": "EuroSCORE II",
+    "STS": "STS",
+    "STS Score": "STS",    # alias used in some display contexts
+    "STS_Score": "STS",    # underscore variant
+}
+
+
+def _canon(name: str) -> str:
+    """Return the canonical display label for a score name."""
+    return _CANONICAL_SCORE_LABEL.get(str(name).strip(), str(name).strip())
+
+
+def _build_threshold_comparison_export_df(
+    df: pd.DataFrame,
+    artifacts,
+    forced_model: str,
+) -> pd.DataFrame:
+    """Build a supplementary AI Risk threshold comparison table for exports."""
+    cols = [
+        "Threshold label",
+        "Threshold",
+        "Sensitivity",
+        "Specificity",
+        "PPV",
+        "NPV",
+        "Accuracy",
+        "TP",
+        "FP",
+        "TN",
+        "FN",
+        "High risk (%)",
+        "High risk (n)",
+        "n",
+    ]
+    if "ia_risk_oof" not in df.columns or "morte_30d" not in df.columns:
+        return pd.DataFrame(columns=cols)
+
+    _mask = df["ia_risk_oof"].notna() & df["morte_30d"].notna()
+    _p = df.loc[_mask, "ia_risk_oof"].astype(float).values
+    _y = df.loc[_mask, "morte_30d"].astype(int).values
+    if len(_p) < 2 or len(np.unique(_y)) < 2:
+        return pd.DataFrame(columns=cols)
+
+    _youden_map = getattr(artifacts, "youden_thresholds", None) or {}
+    _youden_thr = _youden_map.get(forced_model, getattr(artifacts, "best_youden_threshold", np.nan))
+    _youden_thr = float(_youden_thr) if _youden_thr is not None else float("nan")
+
+    candidates: list[tuple[str, float]] = [
+        ("5%", 0.05),
+        ("8% (Operational main)", 0.08),
+        ("10%", 0.10),
+        ("15%", 0.15),
+        ("Youden", _youden_thr),
+    ]
+    valid_thresholds = [float(t) for _, t in candidates if np.isfinite(t)]
+    analysis = threshold_analysis_table(_y, _p, valid_thresholds) if valid_thresholds else pd.DataFrame()
+
+    rows: list[dict[str, float | int | str]] = []
+    valid_idx = 0
+    n_total = int(len(_y))
+    for label, thr in candidates:
+        if not np.isfinite(thr):
+            rows.append({
+                "Threshold label": label,
+                "Threshold": np.nan,
+                "Sensitivity": np.nan,
+                "Specificity": np.nan,
+                "PPV": np.nan,
+                "NPV": np.nan,
+                "Accuracy": np.nan,
+                "TP": np.nan,
+                "FP": np.nan,
+                "TN": np.nan,
+                "FN": np.nan,
+                "High risk (%)": np.nan,
+                "High risk (n)": np.nan,
+                "n": n_total,
+            })
+            continue
+
+        _row = analysis.iloc[valid_idx]
+        valid_idx += 1
+        tp = int(_row.get("TP", 0))
+        tn = int(_row.get("TN", 0))
+        fp = int(_row.get("FP", 0))
+        fn = int(_row.get("FN", 0))
+        acc = ((tp + tn) / n_total) if n_total else np.nan
+        rows.append({
+            "Threshold label": label,
+            "Threshold": float(thr),
+            "Sensitivity": _row.get("Sensitivity", np.nan),
+            "Specificity": _row.get("Specificity", np.nan),
+            "PPV": _row.get("PPV", np.nan),
+            "NPV": _row.get("NPV", np.nan),
+            "Accuracy": acc,
+            "TP": tp,
+            "FP": fp,
+            "TN": tn,
+            "FN": fn,
+            "High risk (%)": _row.get("Flag_Rate_pct", np.nan),
+            "High risk (n)": int(_row.get("N_Flagged", 0)),
+            "n": n_total,
+        })
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _build_figure_export_data(triple: pd.DataFrame, dca_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build figure source-data tables for the Comparison full package."""
+    score_cols = {
+        "AI Risk": "ia_risk_oof",
+        "EuroSCORE II": "euroscore_calc",
+        "STS": "sts_score",
+    }
+    roc_rows = []
+    cal_frames = []
+    if len(triple) >= 2 and triple["morte_30d"].nunique() > 1:
+        y = triple["morte_30d"].astype(int).values
+        for score, col in score_cols.items():
+            fpr, tpr, thresholds = roc_curve(y, triple[col].values)
+            roc_rows.extend(
+                {
+                    "score": score,
+                    "fpr": float(_fpr),
+                    "tpr": float(_tpr),
+                    "threshold": float(_thr),
+                    "cohort": "triple",
+                }
+                for _fpr, _tpr, _thr in zip(fpr, tpr, thresholds)
+            )
+            cal = calibration_bins_detail(y, triple[col].values).rename(
+                columns={
+                    "Bin": "bin",
+                    "Mean_Predicted": "mean_predicted_risk",
+                    "Obs_Frequency": "observed_event_rate",
+                    "N": "n_in_bin",
+                }
+            )
+            if not cal.empty:
+                cal.insert(0, "score", score)
+                cal["cohort"] = "triple"
+                cal_frames.append(
+                    cal[["score", "bin", "mean_predicted_risk", "observed_event_rate", "n_in_bin", "cohort"]]
+                )
+
+    roc_df = pd.DataFrame(roc_rows, columns=["score", "fpr", "tpr", "threshold", "cohort"])
+    cal_df = (
+        pd.concat(cal_frames, ignore_index=True)
+        if cal_frames
+        else pd.DataFrame(columns=["score", "bin", "mean_predicted_risk", "observed_event_rate", "n_in_bin", "cohort"])
+    )
+    dca_plot_df = pd.DataFrame(columns=["score", "threshold", "net_benefit", "strategy", "cohort"])
+    if dca_df is not None and not dca_df.empty:
+        dca_plot_df = dca_df.rename(
+            columns={
+                "Strategy": "strategy",
+                "Threshold": "threshold",
+                "Net Benefit": "net_benefit",
+            }
+        ).copy()
+        dca_plot_df["score"] = dca_plot_df["strategy"]
+        dca_plot_df["cohort"] = "triple"
+        dca_plot_df = dca_plot_df[["score", "threshold", "net_benefit", "strategy", "cohort"]]
+    return roc_df, cal_df, dca_plot_df
+
+
+@st.cache_data(show_spinner=False)
+def _cached_evaluate_scores_with_ci(
+    df: pd.DataFrame,
+    y_col: str,
+    score_cols: tuple[str, ...],
+    n_boot: int,
+    seed: int,
+) -> pd.DataFrame:
+    return evaluate_scores_with_ci(
+        df,
+        y_col=y_col,
+        score_cols=list(score_cols),
+        n_boot=n_boot,
+        seed=seed,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_bootstrap_auc_diff(
+    y: np.ndarray,
+    p1: np.ndarray,
+    p2: np.ndarray,
+    n_boot: int = 2000,
+    seed: int = 42,
+) -> dict:
+    return bootstrap_auc_diff(y, p1, p2, n_boot=n_boot, seed=seed)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_delong_roc_test(y: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> dict:
+    return delong_roc_test(y, p1, p2)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_decision_curve(
+    y: np.ndarray,
+    ai_risk: np.ndarray,
+    euroscore: np.ndarray,
+    sts_score: np.ndarray,
+    thresholds: np.ndarray,
+) -> pd.DataFrame:
+    return decision_curve(
+        y,
+        {
+            "AI Risk": ai_risk,
+            "EuroSCORE II": euroscore,
+            "STS": sts_score,
+        },
+        thresholds,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_statistical_summary(
+    triple_ci: pd.DataFrame,
+    calib_df: pd.DataFrame,
+    formal_df: pd.DataFrame,
+    delong_df: pd.DataFrame,
+    reclass_df: pd.DataFrame,
+    threshold: float,
+    threshold_metrics: pd.DataFrame,
+    n_triple: int,
+    model_version: str,
+    language: str,
+) -> str:
+    return build_statistical_summary(
+        triple_ci=triple_ci,
+        calib_df=calib_df,
+        formal_df=formal_df,
+        delong_df=delong_df,
+        reclass_df=reclass_df,
+        threshold=threshold,
+        threshold_metrics=threshold_metrics,
+        n_triple=n_triple,
+        model_version=model_version,
+        language=language,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_summary_pdf(
+    triple_ci: pd.DataFrame,
+    calib_df: pd.DataFrame,
+    formal_df: pd.DataFrame,
+    delong_df: pd.DataFrame,
+    threshold_metrics: pd.DataFrame,
+    threshold: float,
+    n_triple: int,
+    model_version: str,
+    language: str,
+) -> bytes:
+    return build_comparison_summary_pdf(
+        triple_ci=triple_ci,
+        calib_df=calib_df,
+        formal_df=formal_df,
+        delong_df=delong_df,
+        threshold_metrics=threshold_metrics,
+        threshold=threshold,
+        n_triple=n_triple,
+        model_version=model_version,
+        language=language,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_full_package(
+    triple_ci: pd.DataFrame,
+    calib_df: pd.DataFrame,
+    formal_df: pd.DataFrame,
+    delong_df: pd.DataFrame,
+    reclass_df: pd.DataFrame,
+    threshold_metrics: pd.DataFrame,
+    threshold: float,
+    n_triple: int,
+    model_version: str,
+    language: str,
+    dca_df: pd.DataFrame,
+    metrics_all: pd.DataFrame,
+    pair_df: pd.DataFrame,
+    threshold_comparison_df: pd.DataFrame,
+    roc_plot_df: pd.DataFrame,
+    calibration_plot_df: pd.DataFrame,
+    dca_plot_df: pd.DataFrame,
+) -> bytes:
+    return build_comparison_full_package(
+        triple_ci=triple_ci,
+        calib_df=calib_df,
+        formal_df=formal_df,
+        delong_df=delong_df,
+        reclass_df=reclass_df,
+        threshold_metrics=threshold_metrics,
+        threshold=threshold,
+        n_triple=n_triple,
+        model_version=model_version,
+        language=language,
+        dca_df=dca_df,
+        metrics_all=metrics_all,
+        pair_df=pair_df,
+        threshold_comparison_df=threshold_comparison_df,
+        roc_plot_df=roc_plot_df,
+        calibration_plot_df=calibration_plot_df,
+        dca_plot_df=dca_plot_df,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_structured_xlsx(
+    triple_ci: pd.DataFrame,
+    calib_df: pd.DataFrame,
+    formal_df: pd.DataFrame,
+    delong_df: pd.DataFrame,
+    reclass_df: pd.DataFrame,
+    threshold_metrics: pd.DataFrame,
+    threshold: float,
+    n_triple: int,
+    model_version: str,
+    language: str,
+    dca_df: pd.DataFrame,
+    metrics_all: pd.DataFrame,
+    pair_df: pd.DataFrame,
+    threshold_comparison_df: pd.DataFrame,
+    roc_plot_df: pd.DataFrame,
+    calibration_plot_df: pd.DataFrame,
+    dca_plot_df: pd.DataFrame,
+) -> bytes:
+    return build_comparison_xlsx(
+        triple_ci=triple_ci,
+        calib_df=calib_df,
+        formal_df=formal_df,
+        delong_df=delong_df,
+        reclass_df=reclass_df,
+        threshold_metrics=threshold_metrics,
+        threshold=threshold,
+        n_triple=n_triple,
+        model_version=model_version,
+        language=language,
+        dca_df=dca_df,
+        metrics_all=metrics_all,
+        pair_df=pair_df,
+        threshold_comparison_df=threshold_comparison_df,
+        roc_plot_df=roc_plot_df,
+        calibration_plot_df=calibration_plot_df,
+        dca_plot_df=dca_plot_df,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_pdf_from_markdown(md_text: str) -> bytes:
+    return statistical_summary_to_pdf(md_text)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_csv_from_markdown(md_text: str) -> bytes:
+    return statistical_summary_to_csv(md_text).encode("utf-8")
 
 
 def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, complexity preserved
@@ -62,10 +435,15 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
     build_methods_text = ctx.build_methods_text
     build_results_text = ctx.build_results_text
 
-    # ── Begin original tab body (verbatim) ───────────────────────────────
+    # ── Begin tab body ───────────────────────────────────────────────────
 
     st.subheader(tr("Statistical performance comparison", "Comparação estatística de desempenho"))
-    st.caption(tr("Report with 95% CI by bootstrap (2,000 resamples) and formal model comparison.", "Relatório com IC95% por bootstrap (2.000 reamostras) e comparação formal entre modelos."))
+    st.caption(tr(
+        "Primary analysis: triple cohort (same patients for all three scores). "
+        "Pairwise and reclassification analyses are complementary.",
+        "Análise principal: coorte tripla (mesmos pacientes para os três escores). "
+        "Análises pareadas e de reclassificação são complementares.",
+    ))
 
     # ── Threshold mode selector ──
     _best_youden = getattr(artifacts, "best_youden_threshold", None)
@@ -141,7 +519,14 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
             )
         )
 
-    st.markdown(tr("#### Overall performance", "#### Desempenho geral"))
+    st.divider()
+    st.markdown(tr("### Main Result — Triple Cohort", "### Resultado Principal — Coorte Tripla"))
+    st.caption(tr(
+        "AI Risk, EuroSCORE II, and STS Score evaluated in exactly the same patients (matched cohort). "
+        "This is the primary comparative analysis.",
+        "AI Risk, EuroSCORE II e STS Score avaliados exatamente nos mesmos pacientes (coorte pareada). "
+        "Esta é a análise comparativa principal.",
+    ))
 
     metrics_all = evaluate_scores(
         df,
@@ -162,13 +547,7 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
 
     triple = df[["morte_30d", "ia_risk_oof", "euroscore_calc", "sts_score"]].dropna()
     st.markdown(tr("**Three-way head-to-head (matched cohort)**", "**Comparação tripla (coorte pareada)**"))
-    st.write(f"n = {len(triple)}")
-    st.caption(
-        tr(
-            "This is the main comparison because AI Risk, EuroSCORE II, and STS are evaluated in exactly the same patients.",
-            "Esta é a comparação principal porque AI Risk, EuroSCORE II e STS são avaliados exatamente nos mesmos pacientes.",
-        )
-    )
+    st.caption(f"n = {len(triple)}")
     triple_ci = pd.DataFrame()
     threshold_metrics = pd.DataFrame()
     if len(triple) >= 30 and triple["morte_30d"].nunique() > 1:
@@ -200,10 +579,10 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
             st.dataframe(_format_ppv_npv(threshold_metrics), width="stretch", column_config=stats_table_column_config("overall"))
 
         st.markdown(tr("**95% CI report (triple comparison, same sample)**", "**Relatório com IC95% (comparação tripla, mesma amostra)**"))
-        triple_ci = evaluate_scores_with_ci(
+        triple_ci = _cached_evaluate_scores_with_ci(
             triple,
             y_col="morte_30d",
-            score_cols=["ia_risk_oof", "euroscore_calc", "sts_score"],
+            score_cols=("ia_risk_oof", "euroscore_calc", "sts_score"),
             n_boot=2000,
             seed=42,
         )
@@ -216,19 +595,45 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
             triple_ci["Score"] = triple_ci["Score"].map(score_label_ci)
             st.dataframe(triple_ci, width="stretch", column_config=stats_table_column_config("overall"))
 
+        # Normalise triple_ci["Score"] to canonical labels once before any merge.
+        # This guards against minor naming variations (e.g. "STS Score" vs "STS")
+        # that would otherwise produce a silent NaN in the Brier column.
+        _triple_ci_canon = triple_ci.copy()
+        if not _triple_ci_canon.empty:
+            _triple_ci_canon["Score"] = _triple_ci_canon["Score"].map(_canon)
+
         calib_rows = []
         for label, col in [("AI Risk", "ia_risk_oof"), ("EuroSCORE II", "euroscore_calc"), ("STS", "sts_score")]:
             ci_vals = calibration_intercept_slope(triple["morte_30d"].values, triple[col].values)
             hl_vals = hosmer_lemeshow_test(triple["morte_30d"].values, triple[col].values)
-            calib_rows.append({"Score": label, **ci_vals, **hl_vals})
+            brier_val = np.nan
+            if not _triple_ci_canon.empty:
+                _br = _triple_ci_canon[_triple_ci_canon["Score"] == _canon(label)]
+                if not _br.empty:
+                    brier_val = float(_br.iloc[0].get("Brier", np.nan))
+            calib_rows.append({"Score": label, **ci_vals, **hl_vals, "Brier": brier_val})
         calib_df = pd.DataFrame(calib_rows)
-        st.markdown(tr("**Advanced calibration metrics**", "**Métricas avançadas de calibração**"))
-        st.caption(
-            tr(
-                "Brier measures probabilistic accuracy. Calibration-in-the-large (intercept) close to 0 and slope close to 1 are desirable. Hosmer-Lemeshow should be interpreted as complementary, not in isolation.",
-                "O Brier mede a acurácia probabilística. Calibration-in-the-large (intercepto) próximo de 0 e slope próximo de 1 são desejáveis. O teste de Hosmer-Lemeshow deve ser interpretado como complementar, e não isoladamente.",
-            )
-        )
+
+        # ── Calibration at a Glance ──────────────────────────────────────
+        st.divider()
+        st.markdown(tr("### Calibration at a Glance", "### Calibração em Resumo"))
+        st.caption(tr(
+            "Intercept near 0 and slope near 1 indicate good calibration. "
+            "Brier measures probabilistic accuracy (lower is better). "
+            "HL p-value is complementary only — do not interpret in isolation.",
+            "Intercepto próximo de 0 e slope próximo de 1 indicam boa calibração. "
+            "Brier mede acurácia probabilística (menor é melhor). "
+            "p-valor de HL é apenas complementar — não interpretar isoladamente.",
+        ))
+        _calib_glance_cols = ["Score", "Calibration intercept", "Calibration slope", "Brier", "HL p-value"]
+        _calib_glance_df = calib_df[[c for c in _calib_glance_cols if c in calib_df.columns]].copy()
+        st.dataframe(_calib_glance_df, width="stretch", column_config=stats_table_column_config("calibration"), hide_index=True)
+
+        st.markdown(tr("**Full calibration table**", "**Tabela de calibração completa**"))
+        st.caption(tr(
+            "Brier measures probabilistic accuracy. Calibration-in-the-large (intercept) close to 0 and slope close to 1 are desirable. Hosmer-Lemeshow should be interpreted as complementary, not in isolation.",
+            "O Brier mede a acurácia probabilística. Calibration-in-the-large (intercepto) próximo de 0 e slope próximo de 1 são desejáveis. O teste de Hosmer-Lemeshow deve ser interpretado como complementar, e não isoladamente.",
+        ))
         st.dataframe(calib_df, width="stretch", column_config=stats_table_column_config("calibration"))
 
         scores_plot = {
@@ -504,7 +909,14 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
                     f"Pacote de diagnósticos indisponível: {_diag_dl_err}",
                 ))
 
-    st.markdown(tr("#### Pairwise comparisons", "#### Comparações pareadas"))
+    st.divider()
+    st.markdown(tr("### Pairwise Comparisons", "### Comparações Pareadas"))
+    st.caption(tr(
+        "Formal ROC comparison between pairs of scores. "
+        "Bootstrap and DeLong results are complementary — interpret together.",
+        "Comparação formal entre pares de escores. "
+        "Bootstrap e DeLong são complementares — interpretar em conjunto.",
+    ))
 
     st.markdown(tr("**All-pairs comparison (full cohort)**", "**Comparação por pares (coorte completa)**"))
     st.caption(
@@ -523,7 +935,7 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
         sub = df[["morte_30d", a, b]].dropna()
         if len(sub) < 30 or sub["morte_30d"].nunique() < 2:
             continue
-        boot = bootstrap_auc_diff(sub["morte_30d"].values, sub[a].values, sub[b].values)
+        boot = _cached_bootstrap_auc_diff(sub["morte_30d"].values, sub[a].values, sub[b].values)
         pair_rows.append(
             {
                 tr("Comparison", "Comparação"): f"{score_label[a]} vs {score_label[b]}",
@@ -551,7 +963,7 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
             ("euroscore_calc", "sts_score"),
         ]
         for a, b in pairs:
-            boot = bootstrap_auc_diff(
+            boot = _cached_bootstrap_auc_diff(
                 triple["morte_30d"].values,
                 triple[a].values,
                 triple[b].values,
@@ -582,7 +994,7 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     delong_rows = []
     if len(triple) >= 30 and triple["morte_30d"].nunique() > 1:
         for a, b in [("ia_risk_oof", "euroscore_calc"), ("ia_risk_oof", "sts_score"), ("euroscore_calc", "sts_score")]:
-            dtest = delong_roc_test(triple["morte_30d"].values, triple[a].values, triple[b].values)
+            dtest = _cached_delong_roc_test(triple["morte_30d"].values, triple[a].values, triple[b].values)
             delong_rows.append(
                 {
                     tr("Comparison", "Comparação"): f"{score_label[a]} vs {score_label[b]}",
@@ -596,7 +1008,8 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     delong_df = pd.DataFrame(delong_rows)
     st.dataframe(delong_df, width="stretch", column_config=stats_table_column_config("comparison"))
 
-    st.markdown(tr("#### Clinical utility", "#### Utilidade clínica"))
+    st.divider()
+    st.markdown(tr("### Clinical Utility", "### Utilidade Clínica"))
 
     st.markdown(tr("**Decision curve analysis (DCA)**", "**Decision curve analysis (DCA)**"))
     st.caption(
@@ -609,13 +1022,11 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     dca_label = tr("N/A", "N/D")
     if len(triple) >= 30 and triple["morte_30d"].nunique() > 1:
         thresholds = np.linspace(0.05, 0.20, 16)
-        dca_df = decision_curve(
+        dca_df = _cached_decision_curve(
             triple["morte_30d"].values,
-            {
-                "AI Risk": triple["ia_risk_oof"].values,
-                "EuroSCORE II": triple["euroscore_calc"].values,
-                "STS": triple["sts_score"].values,
-            },
+            triple["ia_risk_oof"].values,
+            triple["euroscore_calc"].values,
+            triple["sts_score"].values,
             thresholds,
         )
         _plot_dca(dca_df)
@@ -680,7 +1091,8 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     else:
         st.info(tr("NRI/IDI are unavailable because the triple comparison sample is insufficient.", "NRI/IDI não estão disponíveis porque a amostra da comparação tripla é insuficiente."))
 
-    st.markdown(tr("#### Interpretation & export", "#### Interpretação e exportação"))
+    st.divider()
+    st.markdown(tr("### Interpretation & Export", "### Interpretação e Exportação"))
 
     with st.expander(tr("Clinical interpretation", "Interpretação clínica"), expanded=False):
         if len(triple) >= 30 and triple["morte_30d"].nunique() > 1:
@@ -809,60 +1221,217 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
             st.info(tr("Triple sample size was insufficient to generate automatic results text with 95% CI.", "A amostra tripla foi insuficiente para gerar texto automático de resultados com IC95%."))
 
     # ── Statistical summary export ──
-    st.markdown(tr("**Download full statistical summary**", "**Baixar resumo estatístico completo**"))
-    st.caption(tr(
-        "Single Markdown document with all statistical tables (discrimination, calibration, DeLong, NRI/IDI).",
-        "Documento Markdown único com todas as tabelas estatísticas (discriminação, calibração, DeLong, NRI/IDI).",
-    ))
-    _stat_summary = build_statistical_summary(
-        triple_ci=triple_ci,
-        calib_df=calib_df if 'calib_df' in locals() else pd.DataFrame(),
-        formal_df=formal_df if 'formal_df' in locals() else pd.DataFrame(),
-        delong_df=delong_df if 'delong_df' in locals() else pd.DataFrame(),
-        reclass_df=reclass_df if 'reclass_df' in locals() else pd.DataFrame(),
-        threshold=decision_threshold,
-        threshold_metrics=threshold_metrics,
-        n_triple=len(triple) if 'triple' in locals() else 0,
-        model_version=MODEL_VERSION,
-        language=language,
-    )
-    with st.expander(tr("Preview summary", "Pré-visualizar resumo"), expanded=False):
-        st.markdown(_stat_summary)
+    import datetime as _dt
+    _export_date_tag = _dt.datetime.now().strftime("%Y%m%d")
+    _export_base = f"ai_risk_comparison_{MODEL_VERSION}_{_export_date_tag}"
 
-    _exp_col1, _exp_col2, _exp_col3, _exp_col4 = st.columns(4)
-    with _exp_col1:
-        _pdf_bytes = statistical_summary_to_pdf(_stat_summary)
-        if _pdf_bytes:
-            _bytes_download_btn(
-                _pdf_bytes,
-                "statistical_summary.pdf",
-                "📄 PDF",
-                "application/pdf",
-                key="dl_stat_pdf",
+    _calib_df_for_export = calib_df if 'calib_df' in locals() else pd.DataFrame()
+    _formal_df_for_export = formal_df if 'formal_df' in locals() else pd.DataFrame()
+    _delong_df_for_export = delong_df if 'delong_df' in locals() else pd.DataFrame()
+    _reclass_df_for_export = reclass_df if 'reclass_df' in locals() else pd.DataFrame()
+    _n_triple_export = len(triple) if 'triple' in locals() else 0
+    _dca_df_for_export = dca_df if 'dca_df' in locals() else pd.DataFrame()
+    _metrics_all_for_export = metrics_all if 'metrics_all' in locals() else pd.DataFrame()
+    _pair_df_for_export = pd.DataFrame(pair_rows) if 'pair_rows' in locals() else pd.DataFrame()
+    _threshold_comparison_for_export = _build_threshold_comparison_export_df(
+        df=df,
+        artifacts=artifacts,
+        forced_model=forced_model,
+    )
+    _roc_plot_for_export, _calibration_plot_for_export, _dca_plot_for_export = _build_figure_export_data(
+        triple=triple if 'triple' in locals() else pd.DataFrame(),
+        dca_df=_dca_df_for_export,
+    )
+
+    def _build_stat_summary_export() -> str:
+        return _cached_statistical_summary(
+            triple_ci=triple_ci,
+            calib_df=_calib_df_for_export,
+            formal_df=_formal_df_for_export,
+            delong_df=_delong_df_for_export,
+            reclass_df=_reclass_df_for_export,
+            threshold=decision_threshold,
+            threshold_metrics=threshold_metrics,
+            n_triple=_n_triple_export,
+            model_version=MODEL_VERSION,
+            language=language,
+        )
+
+    _comparison_export_sig = (
+        MODEL_VERSION,
+        language,
+        forced_model,
+        _default_threshold,
+        decision_threshold,
+        ctx.xlsx_path,
+        ctx.bundle_info.get("saved_at") if isinstance(ctx.bundle_info, dict) else None,
+        id(df),
+        len(df),
+        len(triple_ci),
+        len(_calib_df_for_export),
+        len(_formal_df_for_export),
+        len(_delong_df_for_export),
+        len(_reclass_df_for_export),
+        len(_dca_df_for_export),
+        len(_threshold_comparison_for_export),
+    )
+
+    def _lazy_export_button(label: str, filename: str, mime: str, key: str, build_fn):
+        _exports = st.session_state.get("_comparison_exports", {})
+        if _exports.get("sig") != _comparison_export_sig:
+            _exports = {"sig": _comparison_export_sig}
+            st.session_state["_comparison_exports"] = _exports
+
+        _slot = st.empty()
+        _data = _exports.get(key)
+        if _data:
+            _slot.download_button(
+                label,
+                data=_data,
+                file_name=filename,
+                mime=mime,
+                key=f"{key}_download",
+                on_click="ignore",
             )
-        else:
-            st.caption(tr("PDF unavailable (install fpdf2)", "PDF indisponível (instale fpdf2)"))
-    with _exp_col2:
-        _bytes_download_btn(
-            statistical_summary_to_xlsx(_stat_summary),
-            "statistical_summary.xlsx",
-            "📊 XLSX",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_stat_xlsx",
+            return
+
+        if _slot.button(label, key=f"{key}_prepare"):
+            with st.spinner(tr("Preparing export...", "Preparando export...")):
+                _data = build_fn()
+            if _data:
+                _exports[key] = _data
+                st.session_state["_comparison_exports"] = _exports
+                _slot.download_button(
+                    label,
+                    data=_data,
+                    file_name=filename,
+                    mime=mime,
+                    key=f"{key}_download",
+                    on_click="ignore",
+                )
+                st.caption(tr(
+                    "File ready. Click the same button to download.",
+                    "Arquivo pronto. Clique no mesmo botão para baixar.",
+                ))
+            else:
+                st.caption(tr("Export unavailable for this environment.", "Export indisponível neste ambiente."))
+
+    # Primary downloads: two consolidated buttons
+    _dl_col1, _dl_col2 = st.columns(2)
+    with _dl_col1:
+        _lazy_export_button(
+            tr("Download Summary Report (PDF)", "Baixar Relatório Sumário (PDF)"),
+            f"{_export_base}_summary.pdf",
+            "application/pdf",
+            "dl_summary_pdf",
+            lambda: _cached_summary_pdf(
+                triple_ci=triple_ci,
+                calib_df=_calib_df_for_export,
+                formal_df=_formal_df_for_export,
+                delong_df=_delong_df_for_export,
+                threshold_metrics=threshold_metrics,
+                threshold=decision_threshold,
+                n_triple=_n_triple_export,
+                model_version=MODEL_VERSION,
+                language=language,
+            ),
         )
-    with _exp_col3:
-        _bytes_download_btn(
-            statistical_summary_to_csv(_stat_summary).encode("utf-8"),
-            "statistical_summary.csv",
-            "📋 CSV",
-            "text/csv",
-            key="dl_stat_csv",
+        st.caption(tr(
+            "Curated editorial PDF — main performance, calibration, pairwise comparisons.",
+            "PDF editorial curado — desempenho principal, calibração, comparações pareadas.",
+        ))
+    with _dl_col2:
+        _lazy_export_button(
+            tr("Download Full Package (ZIP)", "Baixar Pacote Completo (ZIP)"),
+            f"{_export_base}_full.zip",
+            "application/zip",
+            "dl_full_zip",
+            lambda: _cached_full_package(
+                triple_ci=triple_ci,
+                calib_df=_calib_df_for_export,
+                formal_df=_formal_df_for_export,
+                delong_df=_delong_df_for_export,
+                reclass_df=_reclass_df_for_export,
+                threshold_metrics=threshold_metrics,
+                threshold=decision_threshold,
+                n_triple=_n_triple_export,
+                model_version=MODEL_VERSION,
+                language=language,
+                dca_df=_dca_df_for_export,
+                metrics_all=_metrics_all_for_export,
+                pair_df=_pair_df_for_export,
+                threshold_comparison_df=_threshold_comparison_for_export,
+                roc_plot_df=_roc_plot_for_export,
+                calibration_plot_df=_calibration_plot_for_export,
+                dca_plot_df=_dca_plot_for_export,
+            ),
         )
-    with _exp_col4:
-        _bytes_download_btn(
-            _stat_summary.encode("utf-8"),
-            "statistical_summary.md",
-            "📝 Markdown",
-            "text/markdown",
-            key="dl_stat_md",
+        st.caption(tr(
+            "ZIP: Summary PDF + Full Report PDF (all sections) + Markdown + structured XLSX + CSV.",
+            "ZIP: PDF sumário + PDF completo (todas as seções) + Markdown + XLSX estruturado + CSV.",
+        ))
+
+    # Advanced / Raw exports — individual format downloads
+    with st.expander(tr("Advanced / Raw exports", "Exportações avançadas / brutas"), expanded=False):
+        st.caption(tr(
+            "Individual format downloads for custom analysis or archiving.",
+            "Downloads individuais por formato para análise personalizada ou arquivamento.",
+        ))
+        st.text_area(
+            tr("Markdown preview", "Pré-visualização Markdown"),
+            value=tr("Generated on demand with the Markdown export.", "Gerado sob demanda com a exportação Markdown."),
+            height=180,
+            disabled=True,
+            key="md_preview_area",
         )
+        _exp_col1, _exp_col2, _exp_col3, _exp_col4 = st.columns(4)
+        with _exp_col1:
+            _lazy_export_button(
+                tr("PDF report", "Relatório PDF"),
+                f"{_export_base}.pdf",
+                "application/pdf",
+                "dl_stat_pdf",
+                lambda: _cached_pdf_from_markdown(_build_stat_summary_export()),
+            )
+        with _exp_col2:
+            _lazy_export_button(
+                tr("XLSX (structured)", "XLSX (estruturado)"),
+                f"{_export_base}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "dl_stat_xlsx",
+                lambda: _cached_structured_xlsx(
+                    triple_ci=triple_ci,
+                    calib_df=_calib_df_for_export,
+                    formal_df=_formal_df_for_export,
+                    delong_df=_delong_df_for_export,
+                    reclass_df=_reclass_df_for_export,
+                    threshold_metrics=threshold_metrics,
+                    threshold=decision_threshold,
+                    n_triple=_n_triple_export,
+                    model_version=MODEL_VERSION,
+                    language=language,
+                    dca_df=_dca_df_for_export,
+                    metrics_all=_metrics_all_for_export,
+                    pair_df=_pair_df_for_export,
+                    threshold_comparison_df=_threshold_comparison_for_export,
+                    roc_plot_df=_roc_plot_for_export,
+                    calibration_plot_df=_calibration_plot_for_export,
+                    dca_plot_df=_dca_plot_for_export,
+                ),
+            )
+        with _exp_col3:
+            _lazy_export_button(
+                tr("CSV (flat)", "CSV (plano)"),
+                f"{_export_base}.csv",
+                "text/csv",
+                "dl_stat_csv",
+                lambda: _cached_csv_from_markdown(_build_stat_summary_export()),
+            )
+        with _exp_col4:
+            _lazy_export_button(
+                tr("Markdown", "Markdown"),
+                f"{_export_base}.md",
+                "text/markdown",
+                "dl_stat_md",
+                lambda: _build_stat_summary_export().encode("utf-8"),
+            )

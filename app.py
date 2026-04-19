@@ -201,6 +201,7 @@ def _csv_download_btn(df: pd.DataFrame, filename: str, label: str) -> None:
 
 
 @st.fragment
+@st.fragment
 def _txt_download_btn(text: str, filename: str, label: str) -> None:
     """Text download button isolated in a fragment."""
     st.download_button(label, data=text.encode("utf-8"), file_name=filename, mime="text/plain")
@@ -2166,7 +2167,7 @@ def _make_boxplot_png(chart_df: pd.DataFrame, x_col: str, y_col: str, group_col:
     return png
 
 
-def _plot_roc(scores: Dict[str, np.ndarray], y: np.ndarray):
+def _plot_roc(scores: Dict[str, np.ndarray], y: np.ndarray) -> bytes | None:
     roc_long = []
     for name, p in scores.items():
         fpr, tpr = roc_data(y, p)
@@ -2177,6 +2178,7 @@ def _plot_roc(scores: Dict[str, np.ndarray], y: np.ndarray):
     st.caption(tr("ROC curves (X axis: 1-specificity, Y axis: sensitivity)", "Curvas ROC (eixo X: 1-especificidade, eixo Y: sensibilidade)"))
     png = _make_line_chart_png(chart, "ROC Curves", "1 - Specificity (FPR)", "Sensitivity (TPR)", diagonal=True)
     _chart_download_buttons(merged, png, "roc_curves")
+    return png
 
 
 def _plot_calibration(scores: Dict[str, np.ndarray], y: np.ndarray):
@@ -2815,17 +2817,17 @@ _active_tab = _tab_labels.index(_selected_tab_label) if _selected_tab_label else
 st.session_state.active_tab = _active_tab
 
 if _active_tab == 0:  # Overview
+
+    # ── 1. Cohort Snapshot ──────────────────────────────────────────────
+    st.subheader(tr("Cohort Snapshot", "Coorte"))
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(tr("Patients (matched)", "Pacientes (pareados)"), f"{prepared.info['n_rows']}")
-    c2.metric(tr("In-hospital / 30-day outcome", "Desfecho hospitalar / 30d"), f"{prepared.info['positive_rate']*100:.1f}%")
+    c2.metric(tr("In-hospital / 30-day mortality", "Mortalidade hospitalar / 30d"), f"{prepared.info['positive_rate']*100:.1f}%")
     c3.metric(tr("Predictor variables", "Variáveis preditoras"), f"{prepared.info['n_features']}")
     c4.metric(tr("AI model in use", "Modelo IA em uso"), forced_model)
-    st.caption(tr(f"Best training model: {best_model_name}", f"Melhor modelo automático no treino: {best_model_name}"))
-    st.caption(tr(f"Last action: {bundle_source}", f"Última ação: {bundle_source}"))
-    st.caption(tr(f"Model version: {MODEL_VERSION}", f"Versão do modelo: {MODEL_VERSION}"))
 
     # ── Surgery profile (descriptive cohort breakdown) ──
-    st.subheader(tr("Surgery profile", "Perfil cirúrgico"))
+    st.markdown(tr("**Surgery profile**", "**Perfil cirúrgico**"))
     _surg_group_col_label = tr("Surgery group", "Grupo cirúrgico")
     _n_col_label = tr("N", "N")
     _deaths_col_label = tr("Deaths", "Óbitos")
@@ -2908,6 +2910,29 @@ if _active_tab == 0:  # Overview
             column_config=general_table_column_config("surgery_profile_raw"),
         )
 
+    # ── 2. Model Snapshot ───────────────────────────────────────────────
+
+    def _display_calib_method(raw) -> str:
+        """Safe display for calibration_method — handles None and legacy bundles."""
+        if raw is None or str(raw).strip().lower() in ("", "none"):
+            return tr("Legacy bundle", "Bundle legado")
+        return str(raw)
+
+    st.divider()
+    st.subheader(tr("Model Snapshot", "Modelo"))
+    _ms1, _ms2, _ms3, _ms4 = st.columns(4)
+    _ms1.metric(tr("Selected model", "Modelo selecionado"), forced_model)
+    _ms2.metric(tr("Model version", "Versão do modelo"), MODEL_VERSION)
+    _ms3.metric(tr("Decision threshold", "Limiar de decisão"), f"{_default_threshold:.0%}")
+    _ms4.metric(
+        tr("Calibration method", "Método de calibração"),
+        _display_calib_method(getattr(artifacts, "calibration_method", None)),
+    )
+    st.caption(tr(
+        f"Best training model: {best_model_name} · Last action: {bundle_source}",
+        f"Melhor modelo no treino: {best_model_name} · Última ação: {bundle_source}",
+    ))
+
     # Model metadata panel
     _model_meta = build_model_metadata(
         prepared.info, artifacts.leaderboard, best_model_name,
@@ -2929,7 +2954,10 @@ if _active_tab == 0:  # Overview
                 "Exporte os metadados para rastreamento de versões, comparação de bundles e validação externa.",
             ))
 
-    st.subheader(tr("AI Model Performance", "Desempenho dos modelos de IA"))
+    # ── 3. Performance Snapshot ─────────────────────────────────────────
+    st.divider()
+    st.subheader(tr("Performance Snapshot", "Desempenho"))
+    st.markdown(tr("**AI model leaderboard (cross-validated, calibrated OOF)**", "**Leaderboard dos modelos de IA (OOF calibrado, validação cruzada)**"))
     st.caption(
         tr(
             "Stratified cross-validation grouped by patient (same patient never appears in both train and test folds).",
@@ -2955,7 +2983,10 @@ if _active_tab == 0:  # Overview
         st.subheader(tr("Eligibility flow", "Fluxo de elegibilidade"))
         st.dataframe(_eligibility_summary(xlsx_path), width="stretch", column_config=general_table_column_config("eligibility"))
 
-    st.subheader(tr("Available scores summary", "Resumo dos escores disponíveis"))
+    # ── 4. Operational Snapshot ─────────────────────────────────────────
+    st.divider()
+    st.subheader(tr("Operational Snapshot", "Operacional"))
+    st.markdown(tr("**Score availability**", "**Disponibilidade dos escores**"))
     summary = pd.DataFrame(
         {
             tr("Score", "Escore"): ["AI Risk", "EuroSCORE II (app-calculated)", "STS Score (app-calculated)"],
@@ -2977,11 +3008,15 @@ if _active_tab == 0:  # Overview
         "Todos os escores exibidos são calculados pelo app — não lidos do arquivo de entrada. Valores derivados da planilha são mantidos apenas como referência opcional no painel de Qualidade da Base.",
     ))
 
-    # Phase 3 — full execution report at the bottom of the page.
-    # The compact status at the top of the page shows the per-phase
-    # badge row; this is where the user can drill into counters,
-    # incidents, and the normalization audit table.  Legacy bundles
-    # without a run_report are skipped silently.
+    # ── 5. Audit Snapshot ───────────────────────────────────────────────
+    st.divider()
+    st.subheader(tr("Audit Snapshot", "Auditoria"))
+    st.caption(tr(
+        "Execution log, eligibility flow, and pipeline incidents. "
+        "See Statistical Comparison for performance details.",
+        "Log de execução, fluxo de elegibilidade e incidentes do pipeline. "
+        "Ver Comparação Estatística para detalhes de desempenho.",
+    ))
     if _run_report is not None and getattr(_run_report, "steps", None):
         st.divider()
         try:

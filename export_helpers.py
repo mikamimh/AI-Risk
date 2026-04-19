@@ -7,9 +7,13 @@ formatted output (Markdown, DataFrames, bytes).  They carry no project-level
 state and import nothing from the AI Risk project modules.
 
 Provides:
-- build_statistical_summary  — Markdown statistical report
+- build_statistical_summary       — Markdown statistical report (with Calibration at a Glance)
+- build_comparison_xlsx           — structured XLSX with numbered/named sheets + README
+- build_comparison_summary_pdf    — curated editorial PDF (main metrics, calibration, pairwise)
+- build_comparison_full_pdf       — comprehensive PDF (all sections: exec summary, DCA, NRI/IDI, appendix)
+- build_comparison_full_package   — ZIP bytes (summary PDF + full PDF + full MD + XLSX + CSV)
 - statistical_summary_to_dataframes — Markdown → dict of DataFrames
-- statistical_summary_to_xlsx       — Markdown → XLSX bytes
+- statistical_summary_to_xlsx       — Markdown → XLSX bytes (legacy, flat layout)
 - statistical_summary_to_csv        — Markdown → CSV string
 - statistical_summary_to_pdf        — Markdown → PDF bytes (requires fpdf2)
 """
@@ -57,7 +61,7 @@ def build_statistical_summary(
 
     # Discrimination with CI
     if not triple_ci.empty:
-        lines.append(f"## {_tr('Discrimination (95% CI)', 'Discriminação (IC 95%)')}")
+        lines.append(f"## {_tr('Main Performance (95% CI, triple cohort)', 'Desempenho Principal (IC 95%, coorte tripla)')}")
         lines.append("")
         lines.append(f"| {_tr('Score', 'Escore')} | n | AUC (95% CI) | AUPRC (95% CI) | Brier (95% CI) |")
         lines.append("|:--|:--|:--|:--|:--|")
@@ -67,6 +71,21 @@ def build_statistical_summary(
             brier_ci = f"{row['Brier']:.4f} ({row.get('Brier_IC95_inf', np.nan):.4f}-{row.get('Brier_IC95_sup', np.nan):.4f})"
             lines.append(f"| {row['Score']} | {row.get('n', '')} | {auc_ci} | {auprc_ci} | {brier_ci} |")
         lines.append("")
+
+        # Narrative: brief primary result synthesis
+        try:
+            best_auc_row = triple_ci.sort_values("AUC", ascending=False).iloc[0]
+            best_brier_row = triple_ci.sort_values("Brier", ascending=True).iloc[0]
+            lines.append(
+                f"> {_tr('Primary result', 'Resultado principal')}: "
+                f"{_tr('best discrimination', 'melhor discriminação')} — {best_auc_row['Score']} "
+                f"(AUC {best_auc_row['AUC']:.3f}); "
+                f"{_tr('best calibration', 'melhor calibração')} — {best_brier_row['Score']} "
+                f"(Brier {best_brier_row['Brier']:.4f})."
+            )
+            lines.append("")
+        except Exception:
+            pass
 
     # Threshold metrics
     if not threshold_metrics.empty:
@@ -80,9 +99,36 @@ def build_statistical_summary(
             lines.append(f"| {row['Score']} | {row.get('Sensitivity', np.nan):.3f} | {row.get('Specificity', np.nan):.3f} | {ppv} | {npv} |")
         lines.append("")
 
-    # Calibration
+    # Calibration at a Glance — compact summary before full calibration table
     if not calib_df.empty:
-        lines.append(f"## {_tr('Calibration', 'Calibração')}")
+        lines.append(f"## {_tr('Calibration at a Glance', 'Calibração em Resumo')}")
+        lines.append("")
+        lines.append(
+            _tr(
+                "Intercept near 0 and slope near 1 indicate good calibration. "
+                "Brier score measures probabilistic accuracy (lower is better). "
+                "Hosmer-Lemeshow p-value is complementary only.",
+                "Intercepto próximo de 0 e slope próximo de 1 indicam boa calibração. "
+                "Brier score mede acurácia probabilística (menor é melhor). "
+                "p-valor de Hosmer-Lemeshow é apenas complementar.",
+            )
+        )
+        lines.append("")
+        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | Brier | HL p |")
+        lines.append("|:--|:--|:--|:--|:--|")
+        for _, row in calib_df.iterrows():
+            brier_val = f"{row['Brier']:.4f}" if pd.notna(row.get('Brier')) else "-"
+            lines.append(
+                f"| {row['Score']} | {row.get('Calibration intercept', np.nan):.4f} "
+                f"| {row.get('Calibration slope', np.nan):.4f} "
+                f"| {brier_val} "
+                f"| {row.get('HL p-value', np.nan):.4f} |"
+            )
+        lines.append("")
+
+    # Full calibration table
+    if not calib_df.empty:
+        lines.append(f"## {_tr('Calibration (full)', 'Calibração (completa)')}")
         lines.append("")
         lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | HL chi² | HL p |")
         lines.append("|:--|:--|:--|:--|:--|")
@@ -165,6 +211,32 @@ def _parse_md_tables(md_text: str) -> List[dict]:
     return tables
 
 
+def _df_to_md_table(df: pd.DataFrame, float_fmt: str = ".4f") -> List[str]:
+    """Render a DataFrame as Markdown table lines (header + separator + data rows)."""
+    if df.empty:
+        return []
+    headers = [str(c) for c in df.columns]
+    lines: List[str] = [
+        "| " + " | ".join(headers) + " |",
+        "|" + "|".join([":--"] * len(headers)) + "|",
+    ]
+    for _, row in df.iterrows():
+        cells = []
+        for val in row:
+            try:
+                na = pd.isna(val)
+            except (TypeError, ValueError):
+                na = False
+            if na:
+                cells.append("-")
+            elif isinstance(val, float):
+                cells.append(f"{val:{float_fmt}}")
+            else:
+                cells.append(str(val))
+        lines.append("| " + " | ".join(cells) + " |")
+    return lines
+
+
 def statistical_summary_to_dataframes(md_text: str) -> Dict[str, pd.DataFrame]:
     """Convert the Markdown statistical summary into a dict of DataFrames (one per table)."""
     tables = _parse_md_tables(md_text)
@@ -195,6 +267,287 @@ def statistical_summary_to_csv(md_text: str) -> str:
         parts.append(f"# {name}")
         parts.append(df.to_csv(index=False))
     return "\n".join(parts)
+
+
+def _line_plot_png(
+    plot_df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    group_col: str,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    diagonal: bool = False,
+) -> bytes:
+    """Render a deterministic line plot PNG for full-package figure exports."""
+    if plot_df is None or plot_df.empty:
+        return b""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return b""
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for name, grp in plot_df.groupby(group_col, observed=True):
+        grp = grp.sort_values(x_col)
+        ax.plot(grp[x_col], grp[y_col], label=str(name))
+    if diagonal:
+        ax.plot([0, 1], [0, 1], "k--", alpha=0.3)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def _comparison_figure_pngs(
+    roc_plot_df: pd.DataFrame = None,
+    calibration_plot_df: pd.DataFrame = None,
+    dca_plot_df: pd.DataFrame = None,
+) -> Dict[str, bytes]:
+    """Build PNG bytes for Comparison figure exports from source-data tables."""
+    pngs: Dict[str, bytes] = {}
+    if roc_plot_df is not None and not roc_plot_df.empty:
+        png = _line_plot_png(
+            roc_plot_df,
+            x_col="fpr",
+            y_col="tpr",
+            group_col="score",
+            title="ROC Curves",
+            xlabel="1 - Specificity (FPR)",
+            ylabel="Sensitivity (TPR)",
+            diagonal=True,
+        )
+        if png:
+            pngs["figures/roc.png"] = png
+    if calibration_plot_df is not None and not calibration_plot_df.empty:
+        png = _line_plot_png(
+            calibration_plot_df,
+            x_col="mean_predicted_risk",
+            y_col="observed_event_rate",
+            group_col="score",
+            title="Calibration Curves",
+            xlabel="Predicted probability",
+            ylabel="Observed frequency",
+            diagonal=True,
+        )
+        if png:
+            pngs["figures/calibration.png"] = png
+    if dca_plot_df is not None and not dca_plot_df.empty:
+        png = _line_plot_png(
+            dca_plot_df,
+            x_col="threshold",
+            y_col="net_benefit",
+            group_col="strategy",
+            title="Decision Curve Analysis",
+            xlabel="Decision threshold",
+            ylabel="Net benefit",
+            diagonal=False,
+        )
+        if png:
+            pngs["figures/dca.png"] = png
+    return pngs
+
+
+def build_comparison_xlsx(
+    triple_ci: pd.DataFrame,
+    calib_df: pd.DataFrame,
+    formal_df: pd.DataFrame,
+    delong_df: pd.DataFrame,
+    reclass_df: pd.DataFrame,
+    threshold_metrics: pd.DataFrame,
+    threshold: float,
+    n_triple: int,
+    model_version: str,
+    language: str = "English",
+    source_file: str = "",
+    endpoint: str = "30-day / in-hospital mortality",
+    cohort_note: str = "",
+    extra_sheets: Dict[str, pd.DataFrame] = None,
+    dca_df: pd.DataFrame = None,
+    metrics_all: pd.DataFrame = None,
+    pair_df: pd.DataFrame = None,
+    threshold_comparison_df: pd.DataFrame = None,
+    roc_plot_df: pd.DataFrame = None,
+    calibration_plot_df: pd.DataFrame = None,
+    dca_plot_df: pd.DataFrame = None,
+) -> bytes:
+    """Build a structured XLSX export with numbered, named sheets.
+
+    Sheet layout:
+      00_README            — artifact description, generation metadata
+      01_EXECUTIVE_SUMMARY — headline metrics derived from triple cohort
+      02_MAIN_METRICS      — discrimination with 95% CI
+      03_THRESHOLD_PERF    — classification metrics at fixed threshold
+      04_CALIBRATION       — intercept, slope, HL, Brier
+      05_PAIRWISE          — DeLong + bootstrap comparisons (triple cohort)
+      06_RECLASSIFICATION  — NRI / IDI (exploratory)
+      07_CLINICAL_UTILITY  — DCA net benefit table (all thresholds)
+      08_OVERALL_COMPARE   — each score with all available patients (non-matched)
+      09_ALLPAIRS_FULL     — bootstrap pairwise (full cohort, before triple matching)
+      10_THRESHOLD_COMPARISON — AI Risk threshold comparison (5/8/10/15/Youden)
+      11_FIG_ROC_DATA      — source data for ROC figure
+      12_FIG_CALIBRATION_DATA — source data for calibration figure
+      13_FIG_DCA_DATA      — source data for DCA figure
+      14_APPENDIX          — any extra_sheets passed by the caller
+
+    Extra sheets from ``extra_sheets`` dict are appended as-is with their
+    key used as the sheet name (truncated to 31 chars).
+    """
+    def _tr(en, pt):
+        return en if language == "English" else pt
+
+    now = datetime.now()
+    now_str = now.strftime("%Y-%m-%d %H:%M")
+    date_tag = now.strftime("%Y%m%d")
+    buf = io.BytesIO()
+    _threshold_comp = threshold_comparison_df if threshold_comparison_df is not None else pd.DataFrame()
+    _roc_plot = roc_plot_df if roc_plot_df is not None else pd.DataFrame()
+    _cal_plot = calibration_plot_df if calibration_plot_df is not None else pd.DataFrame()
+    _dca_plot = dca_plot_df if dca_plot_df is not None else pd.DataFrame()
+
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+
+        # ── 00_README ──────────────────────────────────────────────────────
+        readme_rows = [
+            (_tr("Artifact", "Artefato"), "AI Risk — Statistical Comparison Export"),
+            (_tr("Generated", "Gerado em"), now_str),
+            (_tr("Model version", "Versão do modelo"), model_version),
+            (_tr("Source file", "Arquivo fonte"), source_file or _tr("(not specified)", "(não informado)")),
+            (_tr("Endpoint", "Desfecho"), endpoint),
+            (_tr("Decision threshold", "Limiar de decisão"), f"{threshold:.0%}"),
+            (_tr("Triple cohort n", "n coorte tripla"), str(n_triple)),
+            (_tr("Cohort note", "Nota de coorte"), cohort_note or _tr("Triple cohort: patients with simultaneous AI Risk, EuroSCORE II, and STS Score.", "Coorte tripla: pacientes com AI Risk, EuroSCORE II e STS Score simultâneos.")),
+            ("", ""),
+            (_tr("Sheet guide", "Guia das abas"), ""),
+            ("00_README", _tr("This sheet — artifact metadata and legend", "Esta aba — metadados do artefato e legenda")),
+            ("01_EXECUTIVE_SUMMARY", _tr("Headline metrics (best AUC, best Brier, n)", "Métricas-síntese (melhor AUC, melhor Brier, n)")),
+            ("02_MAIN_METRICS", _tr("Discrimination with 95% CI — AUC, AUPRC, Brier", "Discriminação com IC 95% — AUC, AUPRC, Brier")),
+            ("03_THRESHOLD_PERF", _tr("Classification at fixed threshold — Sens/Spec/PPV/NPV", "Classificação no limiar fixo — Sens/Espec/VPP/VPN")),
+            ("04_CALIBRATION", _tr("Calibration — intercept, slope, HL chi², Brier", "Calibração — intercepto, slope, HL chi², Brier")),
+            ("05_PAIRWISE", _tr("Pairwise comparisons — DeLong test + bootstrap delta AUC", "Comparações pareadas — teste de DeLong + delta AUC por bootstrap")),
+            ("06_RECLASSIFICATION", _tr("Reclassification (exploratory) — NRI / IDI", "Reclassificação (exploratória) — NRI / IDI")),
+            ("07_CLINICAL_UTILITY", _tr("Decision curve analysis — net benefit at all thresholds", "Decision curve analysis — benefício líquido em todos os limiares")),
+            ("08_OVERALL_COMPARE", _tr("Each score with all available patients (non-matched cohort)", "Cada escore com todos os pacientes disponíveis (coorte não pareada)")),
+            ("09_ALLPAIRS_FULL", _tr("Bootstrap pairwise — full cohort (before triple matching)", "Bootstrap por pares — coorte completa (antes do pareamento triplo)")),
+            ("10_THRESHOLD_COMPARISON", _tr("AI Risk threshold comparison — 5%, 8%, 10%, 15%, and Youden", "Comparação de limiares do AI Risk — 5%, 8%, 10%, 15% e Youden")),
+            ("11_FIG_ROC_DATA", _tr("ROC figure source data — FPR, TPR, thresholds", "Dados-base da figura ROC — FPR, TPR, limiares")),
+            ("12_FIG_CALIBRATION_DATA", _tr("Calibration figure source data — bins, observed event rate", "Dados-base da figura de calibração — bins, taxa observada")),
+            ("13_FIG_DCA_DATA", _tr("DCA figure source data — net benefit by threshold", "Dados-base da figura DCA — benefício líquido por limiar")),
+            ("14_APPENDIX", _tr("Supplementary sheets appended by the caller", "Abas suplementares adicionadas pelo chamador")),
+            ("", ""),
+            (_tr("Analysis note", "Nota metodológica"), _tr(
+                "Primary analysis: triple cohort (AI Risk + EuroSCORE II + STS Score in the same patients). "
+                "The 8% threshold remains the primary operational threshold; additional threshold rows are supplementary. "
+                "Reclassification (NRI/IDI) is complementary and exploratory.",
+                "Análise principal: coorte tripla (AI Risk + EuroSCORE II + STS Score nos mesmos pacientes). "
+                "O limiar de 8% permanece como limiar operacional principal; as demais linhas de limiar são suplementares. "
+                "Reclassificação (NRI/IDI) é complementar e exploratória.",
+            )),
+        ]
+        readme_df = pd.DataFrame(readme_rows, columns=[_tr("Field", "Campo"), _tr("Value", "Valor")])
+        readme_df.to_excel(writer, sheet_name="00_README", index=False)
+
+        # ── 01_EXECUTIVE_SUMMARY ───────────────────────────────────────────
+        exec_rows = []
+        if not triple_ci.empty:
+            try:
+                best_auc = triple_ci.sort_values("AUC", ascending=False).iloc[0]
+                best_brier = triple_ci.sort_values("Brier", ascending=True).iloc[0]
+                exec_rows += [
+                    (_tr("Triple cohort n", "n coorte tripla"), n_triple),
+                    (_tr("Decision threshold", "Limiar de decisão"), f"{threshold:.0%}"),
+                    (_tr("Best AUC (score)", "Melhor AUC (escore)"), best_auc["Score"]),
+                    ("AUC", f"{best_auc['AUC']:.3f}"),
+                    ("AUC 95% CI", f"{best_auc.get('AUC_IC95_inf', ''):.3f}–{best_auc.get('AUC_IC95_sup', ''):.3f}"),
+                    (_tr("Best Brier (score)", "Melhor Brier (escore)"), best_brier["Score"]),
+                    ("Brier", f"{best_brier['Brier']:.4f}"),
+                ]
+            except Exception:
+                pass
+        if not calib_df.empty:
+            for _, row in calib_df.iterrows():
+                exec_rows.append((
+                    f"{row['Score']} — {_tr('Intercept / Slope', 'Intercepto / Slope')}",
+                    f"{row.get('Calibration intercept', ''):.4f} / {row.get('Calibration slope', ''):.4f}",
+                ))
+        if not threshold_metrics.empty:
+            for _, row in threshold_metrics.iterrows():
+                exec_rows.append((
+                    f"{row['Score']} — {_tr('Sensitivity / Specificity', 'Sensibilidade / Especificidade')} @ {threshold:.0%}",
+                    f"{row.get('Sensitivity', ''):.3f} / {row.get('Specificity', ''):.3f}",
+                ))
+        exec_df = pd.DataFrame(exec_rows, columns=[_tr("Metric", "Métrica"), _tr("Value", "Valor")])
+        exec_df.to_excel(writer, sheet_name="01_EXECUTIVE_SUMMARY", index=False)
+
+        # ── 02_MAIN_METRICS ────────────────────────────────────────────────
+        if not triple_ci.empty:
+            triple_ci.to_excel(writer, sheet_name="02_MAIN_METRICS", index=False)
+
+        # ── 03_THRESHOLD_PERF ─────────────────────────────────────────────
+        if not threshold_metrics.empty:
+            threshold_metrics.to_excel(writer, sheet_name="03_THRESHOLD_PERF", index=False)
+
+        # ── 04_CALIBRATION ────────────────────────────────────────────────
+        if not calib_df.empty:
+            calib_df.to_excel(writer, sheet_name="04_CALIBRATION", index=False)
+
+        # ── 05_PAIRWISE ───────────────────────────────────────────────────
+        pairwise_frames = []
+        if not delong_df.empty:
+            dl = delong_df.copy()
+            dl.insert(0, _tr("Method", "Método"), "DeLong")
+            pairwise_frames.append(dl)
+        if not formal_df.empty:
+            bt = formal_df.copy()
+            bt.insert(0, _tr("Method", "Método"), "Bootstrap")
+            pairwise_frames.append(bt)
+        if pairwise_frames:
+            pd.concat(pairwise_frames, ignore_index=True).to_excel(
+                writer, sheet_name="05_PAIRWISE", index=False
+            )
+
+        # ── 06_RECLASSIFICATION ───────────────────────────────────────────
+        if not reclass_df.empty:
+            reclass_df.to_excel(writer, sheet_name="06_RECLASSIFICATION", index=False)
+
+        # ── 07_CLINICAL_UTILITY (DCA) ─────────────────────────────────────
+        if dca_df is not None and not dca_df.empty:
+            dca_df.to_excel(writer, sheet_name="07_CLINICAL_UTILITY", index=False)
+
+        # ── 08_OVERALL_COMPARE ────────────────────────────────────────────
+        if metrics_all is not None and not metrics_all.empty:
+            metrics_all.to_excel(writer, sheet_name="08_OVERALL_COMPARE", index=False)
+
+        # ── 09_ALLPAIRS_FULL ──────────────────────────────────────────────
+        if pair_df is not None and not pair_df.empty:
+            pair_df.to_excel(writer, sheet_name="09_ALLPAIRS_FULL", index=False)
+
+        # ── 10_THRESHOLD_COMPARISON ───────────────────────────────────────
+        if threshold_comparison_df is not None:
+            _threshold_comp.to_excel(writer, sheet_name="10_THRESHOLD_COMPARISON", index=False)
+
+        # ── 11-13 figure source-data sheets ───────────────────────────────
+        if roc_plot_df is not None:
+            _roc_plot.to_excel(writer, sheet_name="11_FIG_ROC_DATA", index=False)
+        if calibration_plot_df is not None:
+            _cal_plot.to_excel(writer, sheet_name="12_FIG_CALIBRATION_DATA", index=False)
+        if dca_plot_df is not None:
+            _dca_plot.to_excel(writer, sheet_name="13_FIG_DCA_DATA", index=False)
+
+        # ── 14_APPENDIX (caller-supplied extra sheets) ────────────────────
+        if extra_sheets:
+            for sheet_key, sheet_df in extra_sheets.items():
+                safe_name = re.sub(r'[\\/*?\[\]:/]', '_', str(sheet_key))[:31]
+                sheet_df.to_excel(writer, sheet_name=safe_name, index=False)
+
+    return buf.getvalue()
 
 
 def statistical_summary_to_pdf(md_text: str) -> bytes:
@@ -426,3 +779,698 @@ def statistical_summary_to_pdf(md_text: str) -> bytes:
     _flush_table()  # flush any table at end of input
 
     return bytes(pdf.output())
+
+
+# ---------------------------------------------------------------------------
+# Comparison Summary Report and Full Package
+# ---------------------------------------------------------------------------
+
+def _build_comparison_summary_md(
+    triple_ci: pd.DataFrame,
+    calib_df: pd.DataFrame,
+    formal_df: pd.DataFrame,
+    delong_df: pd.DataFrame,
+    threshold_metrics: pd.DataFrame,
+    threshold: float,
+    n_triple: int,
+    model_version: str,
+    language: str = "English",
+) -> str:
+    """Internal: curated Markdown for the Summary Report PDF.
+
+    Includes: main performance + narrative, Calibration at a Glance, threshold
+    performance, pairwise comparisons (DeLong + bootstrap), interpretation note.
+    Excludes: full calibration table and NRI/IDI (those are in the Full Package).
+    """
+    def _tr(en, pt):
+        return en if language == "English" else pt
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    lines = [
+        f"# {_tr('Statistical Comparison — Summary Report', 'Comparação Estatística — Relatório Sumário')}",
+        "",
+        f"**{_tr('Generated', 'Gerado em')}:** {now}",
+        f"**{_tr('Model version', 'Versão do modelo')}:** {model_version}",
+        f"**{_tr('Triple comparison sample', 'Amostra da comparação tripla')}:** n = {n_triple}",
+        f"**{_tr('Decision threshold', 'Limiar de decisão')}:** {threshold:.0%}",
+        "",
+    ]
+
+    # Main performance with 95% CI
+    if not triple_ci.empty:
+        lines.append(f"## {_tr('Main Performance (95% CI)', 'Desempenho Principal (IC 95%)')}")
+        lines.append("")
+        lines.append(f"| {_tr('Score', 'Escore')} | n | AUC (95% CI) | AUPRC (95% CI) | Brier (95% CI) |")
+        lines.append("|:--|:--|:--|:--|:--|")
+        for _, row in triple_ci.iterrows():
+            auc_ci = f"{row['AUC']:.3f} ({row.get('AUC_IC95_inf', np.nan):.3f}-{row.get('AUC_IC95_sup', np.nan):.3f})"
+            auprc_ci = f"{row['AUPRC']:.3f} ({row.get('AUPRC_IC95_inf', np.nan):.3f}-{row.get('AUPRC_IC95_sup', np.nan):.3f})"
+            brier_ci = f"{row['Brier']:.4f} ({row.get('Brier_IC95_inf', np.nan):.4f}-{row.get('Brier_IC95_sup', np.nan):.4f})"
+            lines.append(f"| {row['Score']} | {row.get('n', '')} | {auc_ci} | {auprc_ci} | {brier_ci} |")
+        lines.append("")
+        try:
+            best_auc_row = triple_ci.sort_values("AUC", ascending=False).iloc[0]
+            best_brier_row = triple_ci.sort_values("Brier", ascending=True).iloc[0]
+            lines.append(
+                f"> {_tr('Primary result', 'Resultado principal')}: "
+                f"{_tr('best discrimination', 'melhor discriminação')} — {best_auc_row['Score']} "
+                f"(AUC {best_auc_row['AUC']:.3f}); "
+                f"{_tr('best calibration', 'melhor calibração')} — {best_brier_row['Score']} "
+                f"(Brier {best_brier_row['Brier']:.4f})."
+            )
+            lines.append("")
+        except Exception:
+            pass
+
+    # Calibration at a Glance
+    if not calib_df.empty:
+        lines.append(f"## {_tr('Calibration at a Glance', 'Calibração em Resumo')}")
+        lines.append("")
+        lines.append(
+            _tr(
+                "Intercept near 0 and slope near 1 indicate good calibration. "
+                "Brier score measures probabilistic accuracy (lower is better).",
+                "Intercepto próximo de 0 e slope próximo de 1 indicam boa calibração. "
+                "Brier score mede acurácia probabilística (menor é melhor).",
+            )
+        )
+        lines.append("")
+        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | Brier | HL p |")
+        lines.append("|:--|:--|:--|:--|:--|")
+        for _, row in calib_df.iterrows():
+            brier_val = f"{row['Brier']:.4f}" if pd.notna(row.get('Brier')) else "-"
+            lines.append(
+                f"| {row['Score']} | {row.get('Calibration intercept', np.nan):.4f} "
+                f"| {row.get('Calibration slope', np.nan):.4f} "
+                f"| {brier_val} "
+                f"| {row.get('HL p-value', np.nan):.4f} |"
+            )
+        lines.append("")
+
+    # Threshold classification
+    if not threshold_metrics.empty:
+        lines.append(f"## {_tr('Classification at threshold', 'Classificação no limiar')} {threshold:.0%}")
+        lines.append("")
+        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Sensitivity', 'Sensibilidade')} | {_tr('Specificity', 'Especificidade')} | PPV | NPV |")
+        lines.append("|:--|:--|:--|:--|:--|")
+        for _, row in threshold_metrics.iterrows():
+            ppv = f"{row['PPV']:.3f}" if pd.notna(row.get('PPV')) else "-"
+            npv = f"{row['NPV']:.3f}" if pd.notna(row.get('NPV')) else "-"
+            lines.append(f"| {row['Score']} | {row.get('Sensitivity', np.nan):.3f} | {row.get('Specificity', np.nan):.3f} | {ppv} | {npv} |")
+        lines.append("")
+
+    # Pairwise — DeLong
+    if not delong_df.empty:
+        lines.append(f"## {_tr('Pairwise Comparisons', 'Comparações Pareadas')}")
+        lines.append("")
+        comp_col = [c for c in delong_df.columns if "Comparison" in c or "Comparação" in c]
+        comp_key = comp_col[0] if comp_col else "Comparison"
+        lines.append(f"### {_tr('DeLong Test', 'Teste de DeLong')}")
+        lines.append("")
+        lines.append(f"| {_tr('Comparison', 'Comparação')} | ΔAUC | z | p |")
+        lines.append("|:--|:--|:--|:--|")
+        for _, row in delong_df.iterrows():
+            lines.append(f"| {row.get(comp_key, '')} | {row.get('Delta AUC', np.nan):.3f} | {row.get('z', np.nan):.2f} | {row.get('p (DeLong)', np.nan):.4f} |")
+        lines.append("")
+
+    # Pairwise — Bootstrap
+    if not formal_df.empty:
+        comp_col = [c for c in formal_df.columns if "Comparison" in c or "Comparação" in c]
+        comp_key = comp_col[0] if comp_col else "Comparison"
+        ci_lo_col = [c for c in formal_df.columns if "CI low" in c or "IC95% inf" in c]
+        ci_hi_col = [c for c in formal_df.columns if "CI high" in c or "IC95% sup" in c]
+        lo_key = ci_lo_col[0] if ci_lo_col else "95% CI low"
+        hi_key = ci_hi_col[0] if ci_hi_col else "95% CI high"
+        lines.append(f"### {_tr('Bootstrap AUC Comparison', 'Comparação de AUC por Bootstrap')}")
+        lines.append("")
+        lines.append(f"| {_tr('Comparison', 'Comparação')} | ΔAUC | 95% CI | p |")
+        lines.append("|:--|:--|:--|:--|")
+        for _, row in formal_df.iterrows():
+            lines.append(f"| {row.get(comp_key, '')} | {row.get('Delta AUC (A-B)', np.nan):.3f} | {row.get(lo_key, np.nan):.3f}-{row.get(hi_key, np.nan):.3f} | {row.get('p (bootstrap)', np.nan):.4f} |")
+        lines.append("")
+
+    # Interpretation note
+    lines.append(f"## {_tr('Interpretation note', 'Nota interpretativa')}")
+    lines.append("")
+    lines.append(
+        _tr(
+            "This summary report covers primary discrimination, calibration, and pairwise comparison metrics. "
+            "Reclassification statistics (NRI/IDI), the full calibration table, and threshold comparison across candidate cutoffs are included in the Full Package export.",
+            "Este relatório sumário cobre métricas primárias de discriminação, calibração e comparação pareada. "
+            "Estatísticas de reclassificação (NRI/IDI), a tabela completa de calibração e a comparação de limiares entre cortes candidatos estão no pacote completo.",
+        )
+    )
+    lines.append("")
+    lines.append("---")
+    lines.append(f"*{_tr('Generated by AI Risk', 'Gerado pelo AI Risk')}*")
+
+    return "\n".join(lines)
+
+
+def _build_comparison_full_md(
+    triple_ci: pd.DataFrame,
+    calib_df: pd.DataFrame,
+    formal_df: pd.DataFrame,
+    delong_df: pd.DataFrame,
+    reclass_df: pd.DataFrame,
+    threshold_metrics: pd.DataFrame,
+    threshold: float,
+    n_triple: int,
+    model_version: str,
+    language: str = "English",
+    metrics_all: pd.DataFrame = None,
+    dca_df: pd.DataFrame = None,
+    pair_df: pd.DataFrame = None,
+    threshold_comparison_df: pd.DataFrame = None,
+) -> str:
+    """Internal: comprehensive Markdown for the Full Report PDF.
+
+    Covers every section shown in the Comparison UI:
+      Executive Summary, Overall Comparison, Main Performance (95% CI),
+      Calibration at a Glance, Full Calibration, Threshold Classification,
+      All-Pairs Pairwise (full cohort), DeLong, Bootstrap, DCA,
+      Reclassification (NRI/IDI), Interpretation, Methodological Appendix.
+    """
+    def _tr(en, pt):
+        return en if language == "English" else pt
+
+    _metrics_all = metrics_all if metrics_all is not None else pd.DataFrame()
+    _dca_df = dca_df if dca_df is not None else pd.DataFrame()
+    _pair_df = pair_df if pair_df is not None else pd.DataFrame()
+    _threshold_comp = threshold_comparison_df if threshold_comparison_df is not None else pd.DataFrame()
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [
+        f"# {_tr('Statistical Comparison — Full Report', 'Comparação Estatística — Relatório Completo')}",
+        "",
+        f"**{_tr('Generated', 'Gerado em')}:** {now}",
+        f"**{_tr('Model version', 'Versão do modelo')}:** {model_version}",
+        f"**{_tr('Triple comparison sample', 'Amostra da comparação tripla')}:** n = {n_triple}",
+        f"**{_tr('Decision threshold', 'Limiar de decisão')}:** {threshold:.0%}",
+        "",
+    ]
+
+    # ── Section 1: Executive Summary ──────────────────────────────────────
+    lines.append(f"## {_tr('Executive Summary', 'Resumo Executivo')}")
+    lines.append("")
+    if not triple_ci.empty:
+        try:
+            best_auc = triple_ci.sort_values("AUC", ascending=False).iloc[0]
+            best_brier = triple_ci.sort_values("Brier", ascending=True).iloc[0]
+            best_auprc = triple_ci.sort_values("AUPRC", ascending=False).iloc[0]
+            lines += [
+                f"| {_tr('Metric', 'Métrica')} | {_tr('Best score', 'Melhor escore')} | {_tr('Value', 'Valor')} |",
+                "|:--|:--|:--|",
+                f"| {_tr('Discrimination (AUC)', 'Discriminação (AUC)')} | {best_auc['Score']} | "
+                f"{best_auc['AUC']:.3f} (95% CI {best_auc.get('AUC_IC95_inf', np.nan):.3f}-{best_auc.get('AUC_IC95_sup', np.nan):.3f}) |",
+                f"| AUPRC | {best_auprc['Score']} | "
+                f"{best_auprc['AUPRC']:.3f} (95% CI {best_auprc.get('AUPRC_IC95_inf', np.nan):.3f}-{best_auprc.get('AUPRC_IC95_sup', np.nan):.3f}) |",
+                f"| {_tr('Calibration (Brier)', 'Calibração (Brier)')} | {best_brier['Score']} | "
+                f"{best_brier['Brier']:.4f} (95% CI {best_brier.get('Brier_IC95_inf', np.nan):.4f}-{best_brier.get('Brier_IC95_sup', np.nan):.4f}) |",
+                f"| n (triple cohort) | — | {n_triple} |",
+                f"| {_tr('Decision threshold', 'Limiar de decisão')} | — | {threshold:.0%} |",
+                "",
+            ]
+        except Exception:
+            pass
+
+    # ── Section 2: Overall comparison (all available patients) ────────────
+    if not _metrics_all.empty:
+        lines.append(f"## {_tr('Overall Comparison (All Available Patients)', 'Comparação Geral (Todos os Pacientes Disponíveis)')}")
+        lines.append("")
+        lines.append(_tr(
+            "Each score evaluated with all patients for whom it is available. Sample sizes differ — "
+            "use the triple cohort analysis below for direct head-to-head comparison.",
+            "Cada escore avaliado com todos os pacientes disponíveis para ele. Tamanhos de amostra diferem — "
+            "use a análise da coorte tripla abaixo para comparação direta.",
+        ))
+        lines.append("")
+        lines.extend(_df_to_md_table(_metrics_all))
+        lines.append("")
+
+    # ── Section 3: Main performance — triple cohort (95% CI) ─────────────
+    if not triple_ci.empty:
+        lines.append(f"## {_tr('Main Performance — Triple Cohort (95% CI)', 'Desempenho Principal — Coorte Tripla (IC 95%)')}")
+        lines.append("")
+        lines.append(_tr(
+            "Primary analysis: all three scores evaluated in the same patients (matched cohort). "
+            "95% CI via 2000 bootstrap resamples (seed=42).",
+            "Análise principal: os três escores avaliados nos mesmos pacientes (coorte pareada). "
+            "IC 95% via 2000 reamostras bootstrap (seed=42).",
+        ))
+        lines.append("")
+        lines.append(f"| {_tr('Score', 'Escore')} | n | AUC (95% CI) | AUPRC (95% CI) | Brier (95% CI) |")
+        lines.append("|:--|:--|:--|:--|:--|")
+        for _, row in triple_ci.iterrows():
+            auc_ci = f"{row['AUC']:.3f} ({row.get('AUC_IC95_inf', np.nan):.3f}-{row.get('AUC_IC95_sup', np.nan):.3f})"
+            auprc_ci = f"{row['AUPRC']:.3f} ({row.get('AUPRC_IC95_inf', np.nan):.3f}-{row.get('AUPRC_IC95_sup', np.nan):.3f})"
+            brier_ci = f"{row['Brier']:.4f} ({row.get('Brier_IC95_inf', np.nan):.4f}-{row.get('Brier_IC95_sup', np.nan):.4f})"
+            lines.append(f"| {row['Score']} | {row.get('n', '')} | {auc_ci} | {auprc_ci} | {brier_ci} |")
+        lines.append("")
+        try:
+            best_auc = triple_ci.sort_values("AUC", ascending=False).iloc[0]
+            best_brier = triple_ci.sort_values("Brier", ascending=True).iloc[0]
+            lines.append(
+                f"> {_tr('Primary result', 'Resultado principal')}: "
+                f"{_tr('best AUC', 'melhor AUC')} — {best_auc['Score']} ({best_auc['AUC']:.3f}); "
+                f"{_tr('best Brier', 'melhor Brier')} — {best_brier['Score']} ({best_brier['Brier']:.4f})."
+            )
+            lines.append("")
+        except Exception:
+            pass
+
+    # ── Section 4: Calibration at a Glance ───────────────────────────────
+    if not calib_df.empty:
+        lines.append(f"## {_tr('Calibration at a Glance', 'Calibração em Resumo')}")
+        lines.append("")
+        lines.append(_tr(
+            "Intercept near 0 and slope near 1 indicate good calibration. "
+            "Brier measures probabilistic accuracy (lower is better). HL p-value is complementary only.",
+            "Intercepto próximo de 0 e slope próximo de 1 indicam boa calibração. "
+            "Brier mede acurácia probabilística (menor é melhor). p-valor de HL é apenas complementar.",
+        ))
+        lines.append("")
+        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | Brier | HL p |")
+        lines.append("|:--|:--|:--|:--|:--|")
+        for _, row in calib_df.iterrows():
+            brier_val = f"{row['Brier']:.4f}" if pd.notna(row.get('Brier')) else "-"
+            lines.append(
+                f"| {row['Score']} | {row.get('Calibration intercept', np.nan):.4f} "
+                f"| {row.get('Calibration slope', np.nan):.4f} | {brier_val} "
+                f"| {row.get('HL p-value', np.nan):.4f} |"
+            )
+        lines.append("")
+
+    # ── Section 5: Full calibration table ────────────────────────────────
+    if not calib_df.empty:
+        lines.append(f"## {_tr('Calibration (Full)', 'Calibração (Completa)')}")
+        lines.append("")
+        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | HL chi2 | HL p | Brier |")
+        lines.append("|:--|:--|:--|:--|:--|:--|")
+        for _, row in calib_df.iterrows():
+            brier_val = f"{row['Brier']:.4f}" if pd.notna(row.get('Brier')) else "-"
+            lines.append(
+                f"| {row['Score']} | {row.get('Calibration intercept', np.nan):.4f} "
+                f"| {row.get('Calibration slope', np.nan):.4f} "
+                f"| {row.get('HL chi-square', np.nan):.2f} "
+                f"| {row.get('HL p-value', np.nan):.4f} | {brier_val} |"
+            )
+        lines.append("")
+
+    # ── Section 6: Threshold classification ──────────────────────────────
+    if not threshold_metrics.empty:
+        lines.append(f"## {_tr('Classification at Threshold', 'Classificação no Limiar')} {threshold:.0%}")
+        lines.append("")
+        lines.append(_tr(
+            "PPV and NPV depend strongly on event prevalence and selected threshold.",
+            "PPV e NPV dependem fortemente da prevalência do evento e do limiar selecionado.",
+        ))
+        lines.append("")
+        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Sensitivity', 'Sensibilidade')} | {_tr('Specificity', 'Especificidade')} | PPV | NPV |")
+        lines.append("|:--|:--|:--|:--|:--|")
+        for _, row in threshold_metrics.iterrows():
+            ppv = f"{row['PPV']:.3f}" if pd.notna(row.get('PPV')) else "-"
+            npv = f"{row['NPV']:.3f}" if pd.notna(row.get('NPV')) else "-"
+            lines.append(f"| {row['Score']} | {row.get('Sensitivity', np.nan):.3f} | {row.get('Specificity', np.nan):.3f} | {ppv} | {npv} |")
+        lines.append("")
+
+    # ── Section 7: Threshold comparison across candidate cutoffs ─────────
+    lines.append(
+        f"## {_tr('Threshold Performance Across Candidate Cutoffs', 'Desempenho por Limiar nos Cortes Candidatos')}"
+    )
+    lines.append("")
+    lines.append(_tr(
+        "Operational note: 8% remains the primary clinical threshold. The other thresholds below are supplementary for comparison.",
+        "Nota operacional: 8% permanece como limiar clínico principal. Os demais limiares abaixo são suplementares para comparação.",
+    ))
+    lines.append("")
+    if not _threshold_comp.empty:
+        lines.extend(_df_to_md_table(_threshold_comp, float_fmt=".4f"))
+    else:
+        lines.append(_tr(
+            "Threshold comparison table unavailable for this export.",
+            "Tabela de comparação de limiares indisponível nesta exportação.",
+        ))
+    lines.append("")
+
+    # ── Section 8: Pairwise comparisons ──────────────────────────────────
+    if not _pair_df.empty or not delong_df.empty or not formal_df.empty:
+        lines.append(f"## {_tr('Pairwise Comparisons', 'Comparações Pareadas')}")
+        lines.append("")
+
+    if not _pair_df.empty:
+        lines.append(f"### {_tr('Bootstrap — All Pairs, Full Cohort', 'Bootstrap — Todos os Pares, Coorte Completa')}")
+        lines.append("")
+        lines.append(_tr(
+            "Uses all available patients per pair (larger n than triple cohort). Complementary to the triple analysis.",
+            "Usa todos os pacientes disponíveis por par (n maior que coorte tripla). Complementar à análise tripla.",
+        ))
+        lines.append("")
+        lines.extend(_df_to_md_table(_pair_df))
+        lines.append("")
+
+    if not delong_df.empty:
+        comp_col = [c for c in delong_df.columns if "Comparison" in c or "Comparação" in c]
+        comp_key = comp_col[0] if comp_col else "Comparison"
+        lines.append(f"### {_tr('DeLong Test — Triple Cohort', 'Teste de DeLong — Coorte Tripla')}")
+        lines.append("")
+        lines.append(f"| {_tr('Comparison', 'Comparação')} | ΔAUC | z | p |")
+        lines.append("|:--|:--|:--|:--|")
+        for _, row in delong_df.iterrows():
+            lines.append(f"| {row.get(comp_key, '')} | {row.get('Delta AUC', np.nan):.3f} | {row.get('z', np.nan):.2f} | {row.get('p (DeLong)', np.nan):.4f} |")
+        lines.append("")
+
+    if not formal_df.empty:
+        comp_col = [c for c in formal_df.columns if "Comparison" in c or "Comparação" in c]
+        comp_key = comp_col[0] if comp_col else "Comparison"
+        ci_lo_col = [c for c in formal_df.columns if "CI low" in c or "IC95% inf" in c]
+        ci_hi_col = [c for c in formal_df.columns if "CI high" in c or "IC95% sup" in c]
+        lo_key = ci_lo_col[0] if ci_lo_col else "95% CI low"
+        hi_key = ci_hi_col[0] if ci_hi_col else "95% CI high"
+        lines.append(f"### {_tr('Bootstrap AUC — Triple Cohort', 'Bootstrap AUC — Coorte Tripla')}")
+        lines.append("")
+        lines.append(f"| {_tr('Comparison', 'Comparação')} | ΔAUC | 95% CI | p |")
+        lines.append("|:--|:--|:--|:--|")
+        for _, row in formal_df.iterrows():
+            lines.append(f"| {row.get(comp_key, '')} | {row.get('Delta AUC (A-B)', np.nan):.3f} | {row.get(lo_key, np.nan):.3f}-{row.get(hi_key, np.nan):.3f} | {row.get('p (bootstrap)', np.nan):.4f} |")
+        lines.append("")
+
+    # ── Section 9: Clinical Utility — DCA ────────────────────────────────
+    if not _dca_df.empty:
+        lines.append(f"## {_tr('Clinical Utility — Decision Curve Analysis', 'Utilidade Clínica — Decision Curve Analysis')}")
+        lines.append("")
+        lines.append(_tr(
+            "Net benefit across risk thresholds 5%-20%. Higher net benefit indicates greater clinical utility. "
+            "Treat-all and treat-none are reference strategies.",
+            "Benefício líquido nos limiares de risco 5%-20%. Benefício líquido maior indica maior utilidade clínica. "
+            "Tratar todos e tratar nenhum são estratégias de referência.",
+        ))
+        lines.append("")
+        _dca_compact = (
+            _dca_df[_dca_df["Threshold"].isin([0.05, 0.10, 0.15, 0.20])].copy()
+            if "Threshold" in _dca_df.columns
+            else _dca_df
+        )
+        lines.extend(_df_to_md_table(_dca_compact, float_fmt=".4f"))
+        lines.append("")
+
+    # ── Section 10: Reclassification (NRI/IDI) ───────────────────────────
+    if not reclass_df.empty:
+        lines.append(f"## {_tr('Reclassification (NRI/IDI)', 'Reclassificação (NRI/IDI)')}")
+        lines.append("")
+        lines.append(_tr(
+            "NRI: movement to more appropriate risk categories (<5% low, 5-15% intermediate, >15% high). "
+            "IDI: average improvement in separation between events and non-events. "
+            "Both are complementary — do not use as sole evidence of superiority.",
+            "NRI: movimento para categorias de risco mais apropriadas (<5% baixo, 5-15% intermediário, >15% alto). "
+            "IDI: melhora média na separação entre eventos e não-eventos. "
+            "Ambas são complementares — não usar como única evidência de superioridade.",
+        ))
+        lines.append("")
+        comp_col = [c for c in reclass_df.columns if "Comparison" in c or "Comparação" in c]
+        comp_key = comp_col[0] if comp_col else "Comparison"
+        lines.append(f"| {_tr('Comparison', 'Comparação')} | NRI events | NRI non-events | NRI total | IDI |")
+        lines.append("|:--|:--|:--|:--|:--|")
+        for _, row in reclass_df.iterrows():
+            lines.append(
+                f"| {row.get(comp_key, '')} | {row.get('NRI events', np.nan):.3f} "
+                f"| {row.get('NRI non-events', np.nan):.3f} | {row.get('NRI total', np.nan):.3f} "
+                f"| {row.get('IDI', np.nan):.4f} |"
+            )
+        lines.append("")
+
+    # ── Section 11: Interpretation ────────────────────────────────────────
+    lines.append(f"## {_tr('Interpretation', 'Interpretação')}")
+    lines.append("")
+    if not triple_ci.empty:
+        try:
+            best_auc = triple_ci.sort_values("AUC", ascending=False).iloc[0]
+            best_brier = triple_ci.sort_values("Brier", ascending=True).iloc[0]
+            best_auprc = triple_ci.sort_values("AUPRC", ascending=False).iloc[0]
+            lines.append(
+                _tr(
+                    f"In the triple cohort (n={n_triple}), {best_auc['Score']} achieved the highest discrimination "
+                    f"(AUC {best_auc['AUC']:.3f}, 95% CI {best_auc.get('AUC_IC95_inf', np.nan):.3f}-{best_auc.get('AUC_IC95_sup', np.nan):.3f}) "
+                    f"and {best_auprc['Score']} the highest AUPRC ({best_auprc['AUPRC']:.3f}). "
+                    f"Best probabilistic calibration (Brier) was {best_brier['Score']} "
+                    f"({best_brier['Brier']:.4f}, 95% CI {best_brier.get('Brier_IC95_inf', np.nan):.4f}-{best_brier.get('Brier_IC95_sup', np.nan):.4f}). "
+                    f"DCA and reclassification results are complementary to discrimination and calibration findings.",
+                    f"Na coorte tripla (n={n_triple}), {best_auc['Score']} alcançou a maior discriminação "
+                    f"(AUC {best_auc['AUC']:.3f}, IC 95% {best_auc.get('AUC_IC95_inf', np.nan):.3f}-{best_auc.get('AUC_IC95_sup', np.nan):.3f}) "
+                    f"e {best_auprc['Score']} o maior AUPRC ({best_auprc['AUPRC']:.3f}). "
+                    f"Melhor calibração probabilística (Brier) foi {best_brier['Score']} "
+                    f"({best_brier['Brier']:.4f}, IC 95% {best_brier.get('Brier_IC95_inf', np.nan):.4f}-{best_brier.get('Brier_IC95_sup', np.nan):.4f}). "
+                    f"Resultados de DCA e reclassificação são complementares aos achados de discriminação e calibração.",
+                )
+            )
+        except Exception:
+            pass
+    lines.append("")
+
+    # ── Section 12: Methodological Appendix ──────────────────────────────
+    lines.append(f"## {_tr('Methodological Appendix', 'Apêndice Metodológico')}")
+    lines.append("")
+    bullet = lambda en, pt: f"- {_tr(en, pt)}"  # noqa: E731
+    lines += [
+        bullet(
+            "Triple cohort: patients with simultaneous AI Risk, EuroSCORE II, and STS Score — ensures identical observations for all comparisons.",
+            "Coorte tripla: pacientes com AI Risk, EuroSCORE II e STS Score simultâneos — garante observações idênticas em todas as comparações.",
+        ),
+        bullet(
+            "Confidence intervals: 2000 bootstrap resamples, percentile method, seed=42.",
+            "Intervalos de confiança: 2000 reamostras bootstrap, método percentil, seed=42.",
+        ),
+        bullet(
+            "DeLong test: formal AUC comparison for correlated samples (same patients). Complements bootstrap delta AUC.",
+            "Teste de DeLong: comparação formal de AUC em amostras correlacionadas (mesmos pacientes). Complementa delta AUC por bootstrap.",
+        ),
+        bullet(
+            "Calibration: intercept-slope method; Hosmer-Lemeshow (10 bins); Brier score. HL p-value should not be interpreted in isolation.",
+            "Calibração: método intercepto-slope; Hosmer-Lemeshow (10 bins); Brier score. p-valor de HL não deve ser interpretado isoladamente.",
+        ),
+        bullet(
+            "NRI/IDI: complementary reclassification metrics. Risk cutoffs: <5% low, 5-15% intermediate, >15% high.",
+            "NRI/IDI: métricas complementares de reclassificação. Cortes: <5% baixo, 5-15% intermediário, >15% alto.",
+        ),
+        bullet(
+            "Decision curve analysis: net benefit evaluated across threshold range 5%-20%. Treat-all and treat-none as reference strategies.",
+            "Decision curve analysis: benefício líquido avaliado no intervalo 5%-20%. Tratar todos e tratar nenhum como referências.",
+        ),
+        bullet(
+            "Figures (ROC curves, calibration plots, boxplots, DCA plot) are rendered interactively in the application and are not included in this export.",
+            "Figuras (curvas ROC, gráficos de calibração, boxplots, gráfico de DCA) são renderizadas interativamente no aplicativo e não estão incluídas nesta exportação.",
+        ),
+    ]
+    lines += ["", "---", f"*{_tr('Generated by AI Risk', 'Gerado pelo AI Risk')}*"]
+
+    return "\n".join(lines)
+
+
+def build_comparison_full_pdf(
+    triple_ci: pd.DataFrame,
+    calib_df: pd.DataFrame,
+    formal_df: pd.DataFrame,
+    delong_df: pd.DataFrame,
+    reclass_df: pd.DataFrame,
+    threshold_metrics: pd.DataFrame,
+    threshold: float,
+    n_triple: int,
+    model_version: str,
+    language: str = "English",
+    metrics_all: pd.DataFrame = None,
+    dca_df: pd.DataFrame = None,
+    pair_df: pd.DataFrame = None,
+    threshold_comparison_df: pd.DataFrame = None,
+) -> bytes:
+    """Build a comprehensive Full Report PDF for the Comparison tab.
+
+    Covers all sections shown in the Comparison UI: executive summary,
+    overall comparison, main performance (95% CI), calibration (at-a-glance
+    and full), threshold classification, threshold comparison across candidate
+    cutoffs, pairwise comparisons (all-pairs + DeLong + bootstrap), DCA,
+    NRI/IDI, interpretation, and methodological appendix. Returns empty bytes
+    if fpdf2 is not installed.
+    """
+    md = _build_comparison_full_md(
+        triple_ci=triple_ci,
+        calib_df=calib_df,
+        formal_df=formal_df,
+        delong_df=delong_df,
+        reclass_df=reclass_df,
+        threshold_metrics=threshold_metrics,
+        threshold=threshold,
+        n_triple=n_triple,
+        model_version=model_version,
+        language=language,
+        metrics_all=metrics_all,
+        dca_df=dca_df,
+        pair_df=pair_df,
+        threshold_comparison_df=threshold_comparison_df,
+    )
+    return statistical_summary_to_pdf(md)
+
+
+def build_comparison_summary_pdf(
+    triple_ci: pd.DataFrame,
+    calib_df: pd.DataFrame,
+    formal_df: pd.DataFrame,
+    delong_df: pd.DataFrame,
+    threshold_metrics: pd.DataFrame,
+    threshold: float,
+    n_triple: int,
+    model_version: str,
+    language: str = "English",
+) -> bytes:
+    """Build a curated editorial PDF for the Comparison tab Summary Report.
+
+    Covers: main performance (95% CI), Calibration at a Glance, threshold
+    classification, pairwise comparisons (DeLong + bootstrap).
+    NRI/IDI and the full calibration table are intentionally excluded
+    (available in the Full Package).
+    Returns empty bytes if fpdf2 is not installed.
+    """
+    md = _build_comparison_summary_md(
+        triple_ci=triple_ci,
+        calib_df=calib_df,
+        formal_df=formal_df,
+        delong_df=delong_df,
+        threshold_metrics=threshold_metrics,
+        threshold=threshold,
+        n_triple=n_triple,
+        model_version=model_version,
+        language=language,
+    )
+    return statistical_summary_to_pdf(md)
+
+
+def build_comparison_full_package(
+    triple_ci: pd.DataFrame,
+    calib_df: pd.DataFrame,
+    formal_df: pd.DataFrame,
+    delong_df: pd.DataFrame,
+    reclass_df: pd.DataFrame,
+    threshold_metrics: pd.DataFrame,
+    threshold: float,
+    n_triple: int,
+    model_version: str,
+    language: str = "English",
+    source_file: str = "",
+    endpoint: str = "30-day / in-hospital mortality",
+    cohort_note: str = "",
+    dca_df: pd.DataFrame = None,
+    metrics_all: pd.DataFrame = None,
+    pair_df: pd.DataFrame = None,
+    threshold_comparison_df: pd.DataFrame = None,
+    roc_plot_df: pd.DataFrame = None,
+    calibration_plot_df: pd.DataFrame = None,
+    dca_plot_df: pd.DataFrame = None,
+) -> bytes:
+    """Build a Full Package ZIP for the Comparison tab.
+
+    ZIP contents:
+      comparison_summary.pdf      — curated Summary Report PDF (no NRI/IDI, no DCA)
+      comparison_full_report.pdf  — comprehensive PDF (all sections incl. DCA, NRI/IDI, appendix)
+      comparison_full_report.md   — full narrative Markdown report
+      comparison_tables.xlsx      — structured XLSX workbook (numbered sheets + DCA/overall/allpairs/threshold comparison)
+      comparison_metrics.csv      — flat CSV (all tables concatenated)
+      figures/*.png               — exportable ROC, calibration, and DCA figures when available
+      comparison_*_data.csv       — source data for exported figures
+    """
+    import zipfile
+
+    summary_pdf = build_comparison_summary_pdf(
+        triple_ci=triple_ci,
+        calib_df=calib_df,
+        formal_df=formal_df,
+        delong_df=delong_df,
+        threshold_metrics=threshold_metrics,
+        threshold=threshold,
+        n_triple=n_triple,
+        model_version=model_version,
+        language=language,
+    )
+
+    full_pdf = build_comparison_full_pdf(
+        triple_ci=triple_ci,
+        calib_df=calib_df,
+        formal_df=formal_df,
+        delong_df=delong_df,
+        reclass_df=reclass_df,
+        threshold_metrics=threshold_metrics,
+        threshold=threshold,
+        n_triple=n_triple,
+        model_version=model_version,
+        language=language,
+        metrics_all=metrics_all,
+        dca_df=dca_df,
+        pair_df=pair_df,
+        threshold_comparison_df=threshold_comparison_df,
+    )
+
+    full_md = _build_comparison_full_md(
+        triple_ci=triple_ci,
+        calib_df=calib_df,
+        formal_df=formal_df,
+        delong_df=delong_df,
+        reclass_df=reclass_df,
+        threshold_metrics=threshold_metrics,
+        threshold=threshold,
+        n_triple=n_triple,
+        model_version=model_version,
+        language=language,
+        metrics_all=metrics_all,
+        dca_df=dca_df,
+        pair_df=pair_df,
+        threshold_comparison_df=threshold_comparison_df,
+    )
+
+    xlsx_bytes = build_comparison_xlsx(
+        triple_ci=triple_ci,
+        calib_df=calib_df,
+        formal_df=formal_df,
+        delong_df=delong_df,
+        reclass_df=reclass_df,
+        threshold_metrics=threshold_metrics,
+        threshold=threshold,
+        n_triple=n_triple,
+        model_version=model_version,
+        language=language,
+        source_file=source_file,
+        endpoint=endpoint,
+        cohort_note=cohort_note,
+        dca_df=dca_df,
+        metrics_all=metrics_all,
+        pair_df=pair_df,
+        threshold_comparison_df=threshold_comparison_df,
+        roc_plot_df=roc_plot_df,
+        calibration_plot_df=calibration_plot_df,
+        dca_plot_df=dca_plot_df,
+    )
+
+    csv_bytes = statistical_summary_to_csv(full_md).encode("utf-8")
+    figure_pngs = _comparison_figure_pngs(
+        roc_plot_df=roc_plot_df,
+        calibration_plot_df=calibration_plot_df,
+        dca_plot_df=dca_plot_df,
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        if summary_pdf:
+            zf.writestr("comparison_summary.pdf", summary_pdf)
+        if full_pdf:
+            zf.writestr("comparison_full_report.pdf", full_pdf)
+        zf.writestr("comparison_full_report.md", full_md.encode("utf-8"))
+        zf.writestr("comparison_tables.xlsx", xlsx_bytes)
+        zf.writestr("comparison_metrics.csv", csv_bytes)
+        if roc_plot_df is not None and not roc_plot_df.empty:
+            zf.writestr("comparison_roc_data.csv", roc_plot_df.to_csv(index=False).encode("utf-8"))
+        if calibration_plot_df is not None and not calibration_plot_df.empty:
+            zf.writestr("comparison_calibration_data.csv", calibration_plot_df.to_csv(index=False).encode("utf-8"))
+        if dca_plot_df is not None and not dca_plot_df.empty:
+            zf.writestr("comparison_dca_data.csv", dca_plot_df.to_csv(index=False).encode("utf-8"))
+        for fig_name, fig_bytes in figure_pngs.items():
+            if fig_bytes:
+                zf.writestr(fig_name, fig_bytes)
+    return buf.getvalue()

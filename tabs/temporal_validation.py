@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Temporal Validation tab — extracted from app.py (tab index 9).
 
 Conservative extraction: behaviour, text, i18n, threading model, session-state
@@ -318,7 +319,6 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
     bundle_info = ctx.bundle_info
     xlsx_path = ctx.xlsx_path
 
-    _bytes_download_btn = ctx.bytes_download_btn
     _update_phase = ctx.update_phase
     _sts_score_patient_ids = ctx.sts_score_patient_ids
 
@@ -326,16 +326,23 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
 
     st.subheader(tr("Temporal Validation", "Validação Temporal"))
     st.caption(tr(
-        "This module applies a previously locked model to a later independent cohort. "
-        "No retraining, recalibration, or model reselection is performed.",
-        "Este módulo aplica um modelo previamente congelado em uma coorte posterior e independente. "
-        "Não há retreinamento, recalibração ou nova seleção de modelo.",
+        "Prospective validation: a previously locked model is applied to an independent later cohort. "
+        "No retraining, recalibration, or model reselection is performed. "
+        "Primary analysis uses the locked model with the fixed operational threshold. "
+        "Recalibration and exploratory threshold analyses are supplementary.",
+        "Validação prospectiva: um modelo previamente congelado é aplicado a uma coorte posterior independente. "
+        "Não há retreinamento, recalibração ou nova seleção de modelo. "
+        "A análise principal usa o modelo congelado com o limiar operacional fixo. "
+        "Recalibração e análises exploratórias de limiar são suplementares.",
     ))
-    st.info(tr(
-        "The frozen model pipeline (preprocessing + fitted estimator + calibration) is applied "
-        "exactly as saved. The locked clinical threshold from training is used for all classification metrics.",
-        "O pipeline congelado do modelo (pré-processamento + estimador ajustado + calibração) é aplicado "
-        "exatamente como salvo. O limiar clínico bloqueado do treinamento é usado para todas as métricas de classificação.",
+
+    # ── Block 2: Locked Model ──────────────────────────────────────────────
+    st.markdown(tr("### Locked Model", "### Modelo Congelado"))
+    st.caption(tr(
+        "The frozen pipeline (preprocessing + fitted estimator + calibration) is applied exactly as saved. "
+        "The locked threshold is used for all primary classification metrics.",
+        "O pipeline congelado (pré-processamento + estimador ajustado + calibração) é aplicado exatamente como salvo. "
+        "O limiar bloqueado é usado para todas as métricas de classificação primárias.",
     ))
 
     # ── 1. Locked model info ──
@@ -403,13 +410,20 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
             hide_index=True,
         )
 
-    # ── 2. Upload temporal cohort ──
+    # ── Block 1: Cohort Integrity ──────────────────────────────────────────
     st.divider()
-    st.markdown(tr("### Upload temporal cohort", "### Upload da coorte temporal"))
+    st.markdown(tr("### Cohort Integrity", "### Integridade da Coorte"))
     st.caption(tr(
-        "Upload a dataset with the same structure as the training data. "
+        "Upload the validation dataset to verify temporal separation, event rate, "
+        "STS availability, and normalization compatibility before running the model.",
+        "Faça upload do dataset de validação para verificar separação temporal, taxa de eventos, "
+        "disponibilidade do STS e compatibilidade de normalização antes de executar o modelo.",
+    ))
+
+    # ── 2. Upload temporal cohort ──
+    st.markdown(tr("**Upload temporal cohort**", "**Upload da coorte temporal**"))
+    st.caption(tr(
         "Accepted formats: .xlsx, .csv, .parquet, .db, .sqlite, .sqlite3",
-        "Faça upload de um dataset com a mesma estrutura dos dados de treinamento. "
         "Formatos aceitos: .xlsx, .csv, .parquet, .db, .sqlite, .sqlite3",
     ))
 
@@ -761,7 +775,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                 _tv_run = st.button(
                     tr("Run temporal validation", "Executar validação temporal"),
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                     disabled=_tv_chrono_blocked or _tv_sts_running_early,
                 )
 
@@ -1076,7 +1090,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             _tv_n_common = len(_common_sub)
                             if _tv_n_common >= 10 and _common_sub["morte_30d"].nunique() >= 2:
                                 _tv_common_perf = evaluate_scores_temporal(
-                                    _common_sub, "morte_30d", _tv_score_cols
+                                    _common_sub, "morte_30d", _tv_score_cols, _tv_locked_threshold
                                 )
                                 if _tv_common_perf is not None and not _tv_common_perf.empty:
                                     _tv_common_perf["Score"] = _tv_common_perf["Score"].replace(_tv_rename)
@@ -1798,7 +1812,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _tv_n_common = len(_common_sub)
                         if _tv_n_common >= 10 and _common_sub["morte_30d"].nunique() >= 2:
                             _tv_common_perf = evaluate_scores_temporal(
-                                _common_sub, "morte_30d", _tv_score_cols
+                                _common_sub, "morte_30d", _tv_score_cols, _tv_locked_threshold
                             )
                             if not _tv_common_perf.empty:
                                 _tv_common_perf["Score"] = _tv_common_perf["Score"].replace(_tv_rename)
@@ -2582,9 +2596,15 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                         key="tv_aud_dl_xlsx_rst",
                                     )
 
-                    # ── 7. Display results ──
+                    # ── Block 3: Main Validation Result ───────────────────
                     st.divider()
-                    st.markdown(tr("### Results", "### Resultados"))
+                    st.markdown(tr("### Main Validation Result", "### Resultado Principal da Validação"))
+                    st.caption(tr(
+                        "Locked model applied to the validation cohort. Fixed operational threshold. "
+                        "This is the primary analysis — do not confuse with exploratory recalibration below.",
+                        "Modelo congelado aplicado à coorte de validação. Limiar operacional fixo. "
+                        "Esta é a análise principal — não confundir com recalibração exploratória abaixo.",
+                    ))
 
                     if _tv_sts_availability in ("complete", "partial", "unavailable") and _tv_sts_n_eligible > 0:
                         _tv_sts_availability_note = build_sts_availability_summary(
@@ -2667,6 +2687,25 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     lambda v: f"{v:.4f}" if pd.notna(v) else "—"
                                 )
                             st.dataframe(_tv_perf_display, width="stretch", hide_index=True)
+
+                    # ── Calibration at a Glance ──────────────────────────
+                    st.markdown(tr("**Calibration at a Glance**", "**Calibração em Resumo**"))
+                    if not _tv_calib_df.empty:
+                        st.caption(tr(
+                            "Intercept near 0 and slope near 1 indicate good calibration. "
+                            "HL p-value is complementary — do not interpret in isolation.",
+                            "Intercepto próximo de 0 e slope próximo de 1 indicam boa calibração. "
+                            "p-valor de HL é apenas complementar — não interpretar isoladamente.",
+                        ))
+                        _tv_cag_cols = [c for c in ["Score", "Calibration_Intercept", "Calibration_Slope", "HL_p"] if c in _tv_calib_df.columns]
+                        st.dataframe(_tv_calib_df[_tv_cag_cols], width="stretch", hide_index=True)
+                    else:
+                        st.caption(tr(
+                            "Calibration summary not available for this cohort "
+                            "(insufficient events or single outcome class).",
+                            "Resumo de calibração não disponível para esta coorte "
+                            "(eventos insuficientes ou classe de desfecho única).",
+                        ))
 
                     # 7.3 Pairwise comparison
                     if not _tv_pairwise.empty:
@@ -2796,7 +2835,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             legend=dict(x=0.6, y=0.05),
                             height=420,
                         )
-                        st.plotly_chart(_fig_roc, use_container_width=True)
+                        st.plotly_chart(_fig_roc, width="stretch")
                         st.caption(tr(
                             "× marker = locked threshold; ◆ marker = Youden's J optimal (exploratory).",
                             "Marcador × = limiar bloqueado; ◆ = ótimo de Youden (exploratório).",
@@ -2825,7 +2864,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             title=tr("Precision-Recall Curves — Temporal Validation", "Curvas Precisão-Recall — Validação Temporal"),
                             height=420,
                         )
-                        st.plotly_chart(_fig_pr, use_container_width=True)
+                        st.plotly_chart(_fig_pr, width="stretch")
                         st.caption(tr(
                             f"Dashed baseline = prevalence ({_tv_prevalence:.1%}).",
                             f"Linha tracejada = prevalência ({_tv_prevalence:.1%}).",
@@ -2879,7 +2918,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             title=tr("Calibration Curves — Temporal Validation", "Curvas de Calibração — Validação Temporal"),
                             height=420,
                         )
-                        st.plotly_chart(_fig_cal, use_container_width=True)
+                        st.plotly_chart(_fig_cal, width="stretch")
                         st.caption(tr(
                             "Error bars = Wilson 95% CI per bin. Quantile binning (equal-size bins).",
                             "Barras de erro = IC 95% de Wilson por bin. Binagem por quantil (bins de tamanho igual).",
@@ -2922,7 +2961,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             title=tr("Distribution of Predicted Probabilities", "Distribuição das Probabilidades Preditas"),
                             height=380,
                         )
-                        st.plotly_chart(_fig_dist, use_container_width=True)
+                        st.plotly_chart(_fig_dist, width="stretch")
 
                     # 8.5 Decision Curve Analysis
                     with st.expander(tr("Decision Curve Analysis (DCA)", "Análise de Curva de Decisão (DCA)"), expanded=False):
@@ -2967,7 +3006,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 yaxis=dict(range=[-0.05, None]),
                                 height=420,
                             )
-                            st.plotly_chart(_fig_dca, use_container_width=True)
+                            st.plotly_chart(_fig_dca, width="stretch")
                         else:
                             st.info(tr("Insufficient data for DCA.", "Dados insuficientes para DCA."))
 
@@ -3012,7 +3051,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 title=tr("Observed vs Predicted by Decile", "Observado vs Predito por Decil"),
                                 height=400,
                             )
-                            st.plotly_chart(_fig_decile, use_container_width=True)
+                            st.plotly_chart(_fig_decile, width="stretch")
                         else:
                             st.info(tr("At least 20 rows required per score.", "Mínimo de 20 linhas por escore necessárias."))
 
@@ -3045,7 +3084,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     height=280, margin=dict(l=50, r=20, t=50, b=40),
                                 )
                                 with _cm_cols[_ax_i]:
-                                    st.plotly_chart(_fig_cm_i, use_container_width=True)
+                                    st.plotly_chart(_fig_cm_i, width="stretch")
 
                     # ── 9. Threshold Analysis ──
                     st.divider()
@@ -3126,11 +3165,36 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                         title=f"{_label} — {tr('Sensitivity / Specificity Trade-off', 'Trade-off Sensibilidade / Especificidade')}",
                                         height=320,
                                     )
-                                    st.plotly_chart(_fig_sweep, use_container_width=True)
+                                    st.plotly_chart(_fig_sweep, width="stretch")
+
+                    # ── Block 4: Supplementary / Exploratory Analyses ─────
+                    _tv_has_common = (
+                        _tv_common_perf is not None and not _tv_common_perf.empty
+                    )
+                    st.divider()
+                    st.markdown(tr(
+                        "### Supplementary Analyses, Predictions & Export",
+                        "### Análises Suplementares, Predições e Exportação",
+                    ))
+                    if _tv_has_common:
+                        st.caption(tr(
+                            "Common cohort and post-hoc recalibration are exploratory — they do not "
+                            "replace the primary result above. Case-level predictions and export "
+                            "options follow below.",
+                            "Coorte comum e recalibração pós-hoc são exploratórias — não substituem "
+                            "o resultado principal acima. Predições por paciente e opções de "
+                            "exportação seguem abaixo.",
+                        ))
+                    else:
+                        st.caption(tr(
+                            "Post-hoc recalibration is exploratory and does not replace the primary "
+                            "result above. Case-level predictions and export options follow below.",
+                            "A recalibração pós-hoc é exploratória e não substitui o resultado "
+                            "principal acima. Predições por paciente e opções de exportação seguem abaixo.",
+                        ))
 
                     # ── 10. Common Cohort Comparison ──
                     if _tv_common_perf is not None and not _tv_common_perf.empty:
-                        st.divider()
                         with st.expander(
                             tr(
                                 f"Common Cohort — All models on STS-available subset (n={_tv_n_common})",
@@ -3153,7 +3217,6 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             st.dataframe(_tv_common_perf, hide_index=True)
 
                     # ── 11. Post-hoc Recalibration (exploratory) ──
-                    st.divider()
                     with st.expander(
                         tr(
                             "Post-hoc Recalibration — Exploratory analysis only",
@@ -3242,7 +3305,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     title=tr("Calibration: Before vs After Recalibration", "Calibração: Antes vs Depois da Recalibração"),
                                     height=350,
                                 )
-                                st.plotly_chart(_fig_rcal, use_container_width=True)
+                                st.plotly_chart(_fig_rcal, width="stretch")
                             else:
                                 st.info(tr("Insufficient data for recalibration.", "Dados insuficientes para recalibração."))
 
@@ -3314,136 +3377,159 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                     st.markdown(tr("### Export results", "### Exportar resultados"))
 
                     # Build markdown report (primary)
-                    _sts_acct_for_report = {
-                        "n_total":         _tv_cohort_summary.get("n_total", 0),
-                        "n_not_supported": _tv_n_not_supported,
-                        "n_uncertain":     _tv_n_uncertain,
-                        "n_supported":     _tv_sts_n_eligible,
-                        "n_final_usable":  _tv_sts_n_score,
-                    } if _tv_sts_n_eligible > 0 else None
-                    _tv_md = build_temporal_validation_summary(
-                        _tv_cohort_summary, _tv_perf, _tv_pairwise, _tv_calib_df,
-                        _tv_risk_cat, _tv_meta, _tv_locked_threshold, language,
-                        sts_availability=_tv_sts_availability_note,
-                        normalization_report=_tv_norm_report,
-                        sts_accounting=_sts_acct_for_report,
-                        common_cohort_perf=_tv_common_perf,
-                        n_common=_tv_n_common,
-                    )
+                    def _build_tv_exploratory_summaries():
+                        _expl_recal = build_exploratory_recalibration_summary(
+                            _tv_exploratory_recal, _tv_rename, language,
+                        )
+                        _expl_thresh = build_exploratory_threshold_summary(
+                            _tv_exploratory_thresh_tables, _tv_locked_threshold,
+                            _tv_youden, _tv_rename, language,
+                        )
+                        return _expl_recal, _expl_thresh
 
-                    # Build exploratory appendix and append to Markdown / PDF export
-                    _expl_recal_sum = build_exploratory_recalibration_summary(
-                        _tv_exploratory_recal, _tv_rename, language,
-                    )
-                    _expl_thresh_sum = build_exploratory_threshold_summary(
-                        _tv_exploratory_thresh_tables, _tv_locked_threshold,
-                        _tv_youden, _tv_rename, language,
-                    )
-                    _expl_md = build_exploratory_temporal_validation_section(
-                        _expl_recal_sum, _expl_thresh_sum, language,
-                    )
-                    if _expl_md:
-                        _tv_md = _tv_md + "\n" + _expl_md
+                    def _build_tv_markdown_bytes() -> bytes:
+                        _sts_acct_for_report = {
+                            "n_total":         _tv_cohort_summary.get("n_total", 0),
+                            "n_not_supported": _tv_n_not_supported,
+                            "n_uncertain":     _tv_n_uncertain,
+                            "n_supported":     _tv_sts_n_eligible,
+                            "n_final_usable":  _tv_sts_n_score,
+                        } if _tv_sts_n_eligible > 0 else None
+                        _tv_md = build_temporal_validation_summary(
+                            _tv_cohort_summary, _tv_perf, _tv_pairwise, _tv_calib_df,
+                            _tv_risk_cat, _tv_meta, _tv_locked_threshold, language,
+                            sts_availability=_tv_sts_availability_note,
+                            normalization_report=_tv_norm_report,
+                            sts_accounting=_sts_acct_for_report,
+                            common_cohort_perf=_tv_common_perf,
+                            n_common=_tv_n_common,
+                        )
+                        _expl_recal_sum, _expl_thresh_sum = _build_tv_exploratory_summaries()
+                        _expl_md = build_exploratory_temporal_validation_section(
+                            _expl_recal_sum, _expl_thresh_sum, language,
+                        )
+                        if _expl_md:
+                            _tv_md = _tv_md + "\n" + _expl_md
+                        return _tv_md.encode("utf-8")
 
-                    # 9.1 XLSX
-                    _tv_xlsx_buf = BytesIO()
-                    with pd.ExcelWriter(_tv_xlsx_buf, engine="openpyxl") as _tv_writer:
-                        # Cohort summary sheet
-                        _cs_export = pd.DataFrame([
-                            {"Property": k, "Value": v} for k, v in _tv_cohort_summary.items()
-                        ])
-                        _cs_export.to_excel(_tv_writer, sheet_name="cohort_summary", index=False)
-                        # Performance sheet
-                        if not _tv_perf.empty:
-                            _tv_perf.to_excel(_tv_writer, sheet_name="performance", index=False)
-                        # Pairwise sheet
-                        if not _tv_pairwise.empty:
-                            _tv_pairwise.to_excel(_tv_writer, sheet_name="pairwise_comparison", index=False)
-                        # Risk categories sheet
-                        if not _tv_risk_cat.empty:
-                            _tv_risk_cat.to_excel(_tv_writer, sheet_name="risk_categories", index=False)
-                        # Calibration sheet
-                        if not _tv_calib_df.empty:
-                            _tv_calib_df.to_excel(_tv_writer, sheet_name="calibration", index=False)
-                        # Case-level predictions sheet
-                        _tv_case_export = _tv_data[_tv_export_case_cols].copy()
-                        _tv_case_export.to_excel(_tv_writer, sheet_name="case_level_predictions", index=False)
-                        # Common cohort comparison sheet
-                        if _tv_common_perf is not None and not _tv_common_perf.empty:
-                            _tv_common_perf.to_excel(_tv_writer, sheet_name="common_cohort", index=False)
-                        # Normalization summary sheet (only when pipeline was run)
-                        if _tv_norm_report is not None:
-                            pd.DataFrame(_tv_norm_report.to_export_rows()).to_excel(
-                                _tv_writer, sheet_name="Normalization_Summary", index=False
+                    def _build_tv_xlsx_bytes() -> bytes:
+                        _expl_recal_sum, _expl_thresh_sum = _build_tv_exploratory_summaries()
+                        _tv_xlsx_buf = BytesIO()
+                        with pd.ExcelWriter(_tv_xlsx_buf, engine="openpyxl") as _tv_writer:
+                            _cs_export = pd.DataFrame([
+                                {"Property": k, "Value": v} for k, v in _tv_cohort_summary.items()
+                            ])
+                            _cs_export.to_excel(_tv_writer, sheet_name="cohort_summary", index=False)
+                            if not _tv_perf.empty:
+                                _tv_perf.to_excel(_tv_writer, sheet_name="performance", index=False)
+                            if not _tv_pairwise.empty:
+                                _tv_pairwise.to_excel(_tv_writer, sheet_name="pairwise_comparison", index=False)
+                            if not _tv_risk_cat.empty:
+                                _tv_risk_cat.to_excel(_tv_writer, sheet_name="risk_categories", index=False)
+                            if not _tv_calib_df.empty:
+                                _tv_calib_df.to_excel(_tv_writer, sheet_name="calibration", index=False)
+                            _tv_case_export = _tv_data[_tv_export_case_cols].copy()
+                            _tv_case_export.to_excel(_tv_writer, sheet_name="case_level_predictions", index=False)
+                            if _tv_common_perf is not None and not _tv_common_perf.empty:
+                                _tv_common_perf.to_excel(_tv_writer, sheet_name="common_cohort", index=False)
+                            if _tv_norm_report is not None:
+                                pd.DataFrame(_tv_norm_report.to_export_rows()).to_excel(
+                                    _tv_writer, sheet_name="Normalization_Summary", index=False
+                                )
+                            if _expl_recal_sum.get("available") and not _expl_recal_sum["table"].empty:
+                                _expl_recal_sum["table"].to_excel(
+                                    _tv_writer, sheet_name="Exploratory_Recalibration", index=False
+                                )
+                            if _expl_thresh_sum.get("available") and not _expl_thresh_sum["table"].empty:
+                                _expl_thresh_sum["table"].to_excel(
+                                    _tv_writer, sheet_name="Exploratory_Thresholds", index=False
+                                )
+                        return _tv_xlsx_buf.getvalue()
+
+                    def _build_tv_csv_bytes() -> bytes:
+                        return _tv_data[_tv_export_case_cols].copy().to_csv(index=False).encode("utf-8")
+
+                    def _build_tv_pdf_bytes() -> bytes:
+                        return statistical_summary_to_pdf(_build_tv_markdown_bytes().decode("utf-8"))
+
+                    def _lazy_tv_export_button(label: str, filename: str, mime: str, kind: str, build_fn):
+                        _exports = st.session_state.get("_tv_exports", {})
+                        if _exports.get("sig") != _tv_context_sig:
+                            _exports = {"sig": _tv_context_sig}
+                            st.session_state["_tv_exports"] = _exports
+
+                        _slot = st.empty()
+                        if kind in _exports and _exports[kind]:
+                            _slot.download_button(
+                                label,
+                                data=_exports[kind],
+                                file_name=filename,
+                                mime=mime,
+                                key=f"dl_tv_{kind}",
+                                on_click="ignore",
                             )
-                        # Exploratory sheets (separate — do not overwrite primary sheets)
-                        if _expl_recal_sum.get("available") and not _expl_recal_sum["table"].empty:
-                            _expl_recal_sum["table"].to_excel(
-                                _tv_writer, sheet_name="Exploratory_Recalibration", index=False
-                            )
-                        if _expl_thresh_sum.get("available") and not _expl_thresh_sum["table"].empty:
-                            _expl_thresh_sum["table"].to_excel(
-                                _tv_writer, sheet_name="Exploratory_Thresholds", index=False
-                            )
-                    _tv_xlsx_bytes = _tv_xlsx_buf.getvalue()
+                            return
 
-                    # 9.2 CSV
-                    _tv_csv_export = _tv_data[_tv_export_case_cols].copy()
-                    _tv_csv_bytes = _tv_csv_export.to_csv(index=False).encode("utf-8")
-
-                    # 9.4 PDF
-                    _tv_pdf_bytes = statistical_summary_to_pdf(_tv_md)
-
-                    # 9.5 Markdown
-                    _tv_md_bytes = _tv_md.encode("utf-8")
-
-                    st.session_state["_tv_exports"] = {
-                        "xlsx": _tv_xlsx_bytes,
-                        "csv": _tv_csv_bytes,
-                        "pdf": _tv_pdf_bytes,
-                        "md": _tv_md_bytes,
-                    }
+                        if _slot.button(label, key=f"prepare_tv_{kind}"):
+                            with st.spinner(tr("Preparing export...", "Preparando export...")):
+                                _exports[kind] = build_fn()
+                                st.session_state["_tv_exports"] = _exports
+                            if _exports[kind]:
+                                _slot.download_button(
+                                    label,
+                                    data=_exports[kind],
+                                    file_name=filename,
+                                    mime=mime,
+                                    key=f"dl_tv_{kind}",
+                                    on_click="ignore",
+                                )
+                                st.caption(tr(
+                                    "File ready. Click the same button to download.",
+                                    "Arquivo pronto. Clique no mesmo botão para baixar.",
+                                ))
+                            else:
+                                st.caption(tr("Export unavailable for this environment.", "Export indisponível neste ambiente."))
 
                     # Download buttons — rendered here for both fresh runs and
                     # session-cache restores so the user never has to recompute
                     # just to download.
+                    import datetime as _tv_dt
+                    _tv_date_tag = _tv_dt.datetime.now().strftime("%Y%m%d")
+                    _tv_export_base = f"ai_risk_temporal_{MODEL_VERSION}_{_tv_date_tag}"
+
                     _ex_c1, _ex_c2, _ex_c3, _ex_c4 = st.columns(4)
                     with _ex_c1:
-                        _bytes_download_btn(
-                            _tv_xlsx_bytes,
-                            "temporal_validation_summary.xlsx",
-                            tr("Download XLSX", "Baixar XLSX"),
+                        _lazy_tv_export_button(
+                            tr("XLSX summary", "XLSX resumo"),
+                            f"{_tv_export_base}_summary.xlsx",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_tv_xlsx",
+                            "xlsx",
+                            _build_tv_xlsx_bytes,
                         )
                     with _ex_c2:
-                        _bytes_download_btn(
-                            _tv_csv_bytes,
-                            "temporal_validation_predictions.csv",
-                            tr("Download CSV", "Baixar CSV"),
+                        _lazy_tv_export_button(
+                            tr("CSV predictions", "CSV predicoes"),
+                            f"{_tv_export_base}_predictions.csv",
                             "text/csv",
-                            key="dl_tv_csv",
+                            "csv",
+                            _build_tv_csv_bytes,
                         )
                     with _ex_c3:
-                        if _tv_pdf_bytes:
-                            _bytes_download_btn(
-                                _tv_pdf_bytes,
-                                "temporal_validation_report.pdf",
-                                tr("Download PDF", "Baixar PDF"),
-                                "application/pdf",
-                                key="dl_tv_pdf",
-                            )
-                        else:
-                            st.caption(tr("PDF export requires fpdf library.", "Exportação PDF requer biblioteca fpdf."))
-                    with _ex_c4:
-                        _bytes_download_btn(
-                            _tv_md_bytes,
-                            "temporal_validation_report.md",
-                            tr("Download Markdown", "Baixar Markdown"),
-                            "text/markdown",
-                            key="dl_tv_md",
+                        _lazy_tv_export_button(
+                            tr("PDF report", "Relatorio PDF"),
+                            f"{_tv_export_base}_report.pdf",
+                            "application/pdf",
+                            "pdf",
+                            _build_tv_pdf_bytes,
                         )
-
+                    with _ex_c4:
+                        _lazy_tv_export_button(
+                            tr("Markdown", "Markdown"),
+                            f"{_tv_export_base}_report.md",
+                            "text/markdown",
+                            "md",
+                            _build_tv_markdown_bytes,
+                        )
                     if _tv_run:
                         # Log audit — only on fresh computation, not cache restores.
                         log_analysis(
