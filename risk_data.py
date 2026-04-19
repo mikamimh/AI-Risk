@@ -51,6 +51,10 @@ NONE_IS_VALID_COLUMNS = {
     "tricuspid_regurgitation_pre",
 }
 
+LITERAL_NONE_IS_VALID_COLUMNS = NONE_IS_VALID_COLUMNS | {
+    "Arrhythmia Recent",
+}
+
 # Binary history variables where a blank cell in the source data means the
 # condition is absent (implicit negative), NOT that the information is unknown.
 # This convention is standard in cardiac surgery registries (STS, EuroSCORE II):
@@ -67,7 +71,6 @@ BLANK_MEANS_NO_COLUMNS: frozenset = frozenset({
     "Previous surgery",
     "HF",
     "Arrhythmia Remote",
-    "Arrhythmia Recent",
     "Family Hx of CAD",
     "Anticoagulation/ Antiaggregation",
 })
@@ -123,6 +126,86 @@ def _normalize_coronary_symptom_column(df: pd.DataFrame) -> pd.DataFrame:
         return df
     out = df.copy()
     out["Coronary Symptom"] = out["Coronary Symptom"].map(normalize_coronary_symptom_value)
+    return out
+
+
+ARRHYTHMIA_RECENT_CANONICAL_VALUES: Dict[str, str] = {
+    "none": "None",
+    "no": "None",
+    "no recent arrhythmia": "None",
+    "sem arritmia recente": "None",
+    "atrial fibrillation": "Atrial Fibrillation",
+    "af": "Atrial Fibrillation",
+    "fa": "Atrial Fibrillation",
+    "atrial flutter": "Atrial Flutter",
+    "flutter": "Atrial Flutter",
+    "v tach / v fib": "V. Tach / V. Fib",
+    "vt/vf": "V. Tach / V. Fib",
+    "ventricular tachycardia": "V. Tach / V. Fib",
+    "ventricular fibrillation": "V. Tach / V. Fib",
+    "third degree block": "3rd Degree Block",
+    "3rd degree block": "3rd Degree Block",
+    "3 degree block": "3rd Degree Block",
+}
+
+
+def normalize_arrhythmia_recent_value(value: object) -> object:
+    """Canonicalize exact Arrhythmia Recent labels without filling blanks."""
+    if pd.isna(value):
+        return value
+    text = str(value).strip()
+    lower = text.lower()
+    if lower in MISSING_TOKENS and lower != "none":
+        return np.nan
+    return ARRHYTHMIA_RECENT_CANONICAL_VALUES.get(lower, value)
+
+
+def _normalize_arrhythmia_recent_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Canonicalize Arrhythmia Recent before missing-token normalization."""
+    if "Arrhythmia Recent" not in df.columns:
+        return df
+    out = df.copy()
+    out["Arrhythmia Recent"] = out["Arrhythmia Recent"].map(normalize_arrhythmia_recent_value)
+    return out
+
+
+def parse_suspension_anticoagulation_days(value: object) -> float:
+    """Parse the conditional days-since-anticoagulation-suspension field.
+
+    Blanks and unknown/not-applicable tokens remain missing. Plain numeric
+    values are preserved, and only simple recoverable text forms are accepted:
+    ``"> 5"``, ``"5 days"``, ``"2d"``. Ambiguous free text remains missing.
+    """
+    if pd.isna(value):
+        return np.nan
+    text = str(value).strip()
+    if text == "" or text.lower() in MISSING_TOKENS:
+        return np.nan
+
+    parsed = parse_number(text, strict=True)
+    if pd.notna(parsed) and float(parsed) >= 0:
+        return float(parsed)
+
+    match = re.fullmatch(
+        r"[<>~]?\s*([-+]?\d+(?:[.,]\d+)?)\s*(?:d|day|days|dia|dias)?\.?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return np.nan
+    recovered = parse_number(match.group(1), strict=True)
+    if pd.isna(recovered) or float(recovered) < 0:
+        return np.nan
+    return float(recovered)
+
+
+def _normalize_suspension_anticoagulation_days_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply narrow numeric parsing to Suspension of Anticoagulation (day)."""
+    col = "Suspension of Anticoagulation (day)"
+    if col not in df.columns:
+        return df
+    out = df.copy()
+    out[col] = out[col].map(parse_suspension_anticoagulation_days)
     return out
 
 
@@ -749,9 +832,9 @@ def is_missing(value: object, column: str | None = None) -> bool:
     """Context-aware missing value detection.
 
     Returns ``True`` if *value* should be treated as missing data.
-    For columns in :data:`NONE_IS_VALID_COLUMNS` (valve severity),
+    For columns in :data:`LITERAL_NONE_IS_VALID_COLUMNS`,
     ``"none"`` is **not** treated as missing because it is a valid
-    clinical value meaning *no disease*.
+    clinical value.
     """
     if pd.isna(value):
         return True
@@ -759,7 +842,7 @@ def is_missing(value: object, column: str | None = None) -> bool:
     if not txt:
         return True
     txt_lower = txt.lower()
-    if column and column in NONE_IS_VALID_COLUMNS and txt_lower == "none":
+    if column and column in LITERAL_NONE_IS_VALID_COLUMNS and txt_lower == "none":
         return False
     return txt_lower in MISSING_TOKENS
 
@@ -1670,8 +1753,8 @@ def normalize_external_tokens(
     for col in out.columns:
         if out[col].dtype != object:
             continue
-        if col in NONE_IS_VALID_COLUMNS:
-            # Never overwrite valve-severity columns ("None" = no disease)
+        if col in LITERAL_NONE_IS_VALID_COLUMNS:
+            # Never overwrite columns where literal "None" is a clinical value.
             continue
 
         non_null = out[col].dropna()
@@ -2146,6 +2229,8 @@ def normalize_external_dataset(
     df = df_raw.copy()
 
     df, column_mapping = canonicalize_external_columns(df)
+    df = _normalize_arrhythmia_recent_column(df)
+    df = _normalize_suspension_anticoagulation_days_column(df)
     df, token_summary = normalize_external_tokens(df)
     df, unit_summary = normalize_external_units(df)
     df, scope_summary = apply_external_scope_rules(df)
@@ -2324,6 +2409,8 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
 
     # ── Unified normalization ──
     data = _normalize_coronary_symptom_column(data)
+    data = _normalize_arrhythmia_recent_column(data)
+    data = _normalize_suspension_anticoagulation_days_column(data)
     data = _impute_blank_as_none(data)
     data, ingestion_report = normalize_dataframe(data, source_label="flat")
     # Interpret blank as implicit "No" for binary history columns where the
@@ -2472,6 +2559,8 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
 
     # ── Unified normalization ──
     pre_post = _normalize_coronary_symptom_column(pre_post)
+    pre_post = _normalize_arrhythmia_recent_column(pre_post)
+    pre_post = _normalize_suspension_anticoagulation_days_column(pre_post)
     pre_post = _impute_blank_as_none(pre_post)
     pre_post, ingestion_report = normalize_dataframe(pre_post, source_label="master")
     # Interpret blank as implicit "No" for binary history columns where the

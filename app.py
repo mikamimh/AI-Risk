@@ -1,4 +1,21 @@
 # force-reload-v5: ensure modeling.py / sts_calculator.py / sts_cache.py changes are picked up
+import warnings as _warnings
+
+_SKLEARN_PARALLEL_DELAYED_WARNING = (
+    r"`sklearn\.utils\.parallel\.delayed` should be used with "
+    r"`sklearn\.utils\.parallel\.Parallel`.*"
+)
+_warnings.filterwarnings(
+    "ignore",
+    message=_SKLEARN_PARALLEL_DELAYED_WARNING,
+    category=UserWarning,
+)
+_warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"sklearn\.utils\.parallel",
+)
+
 import importlib as _il
 import modeling as _modeling_mod
 try:
@@ -43,6 +60,7 @@ from risk_data import (
     PreparedData,
     REQUIRED_SOURCE_TABLES,
     is_combined_surgery,
+    normalize_arrhythmia_recent_value,
     parse_number,
     prepare_master_dataset,
     procedure_weight,
@@ -1671,6 +1689,46 @@ def prediction_uncertainty(patient_pred_df: pd.DataFrame, prob_col: str, imputed
         f"Faixa interquartil de risco: {low*100:.1f}% a {high*100:.1f}%.",
     )
     return range_text, confidence
+
+
+_MODEL_DISAGREEMENT_RANGE_THRESHOLD = 0.10
+
+
+def candidate_model_disagreement_summary(model_probs: Dict[str, float]) -> dict:
+    """Summarize individual-level disagreement across candidate AI models."""
+    clean = {
+        str(name): float(prob)
+        for name, prob in model_probs.items()
+        if prob is not None and np.isfinite(prob)
+    }
+    if len(clean) < 2:
+        return {
+            "n": len(clean),
+            "min": np.nan,
+            "max": np.nan,
+            "range": np.nan,
+            "median": np.nan,
+            "iqr": np.nan,
+            "high": False,
+            "low_end_boosting": [],
+        }
+
+    vals = pd.Series(clean, dtype=float)
+    low_end_boosting = [
+        name
+        for name in ("LightGBM", "XGBoost")
+        if name in clean and clean[name] <= 1e-4
+    ]
+    return {
+        "n": int(len(vals)),
+        "min": float(vals.min()),
+        "max": float(vals.max()),
+        "range": float(vals.max() - vals.min()),
+        "median": float(vals.median()),
+        "iqr": float(vals.quantile(0.75) - vals.quantile(0.25)),
+        "high": bool((vals.max() - vals.min()) > _MODEL_DISAGREEMENT_RANGE_THRESHOLD),
+        "low_end_boosting": low_end_boosting,
+    }
 
 
 def model_table_column_config(kind: str) -> dict:
@@ -3948,7 +4006,7 @@ elif _active_tab == 1:  # Individual Prediction
             "PVD": yn_pt_to_en(pvd2),
             "Cancer ≤ 5 yrs": yn_pt_to_en(cancer5),
             "Arrhythmia Remote": yn_pt_to_en(arr_rem),
-            "Arrhythmia Recent": yn_pt_to_en(arr_rec),
+            "Arrhythmia Recent": normalize_arrhythmia_recent_value(yn_pt_to_en(arr_rec)),
             "Family Hx of CAD": yn_pt_to_en(fam_cad),
             "Smoking (Pack-year)": str(int(smoke_pack_years)) if _is_current and smoke_pack_years else "Never",
             "Ex-Smoker (Pack-year)": str(int(smoke_pack_years)) if _is_former and smoke_pack_years else "Never",
@@ -4010,9 +4068,12 @@ elif _active_tab == 1:  # Individual Prediction
         sts_prob = sts_result.get("predmort", np.nan)
 
         patient_pred = []
+        _patient_model_probs: Dict[str, float] = {}
         for model_name in model_options:
             p = float(artifacts.fitted_models[model_name].predict_proba(model_input)[:, 1][0])
+            _patient_model_probs[model_name] = p
             patient_pred.append({tr("Model", "Modelo"): model_name, tr("Probability", "Probabilidade"): p})
+        _model_disagreement = candidate_model_disagreement_summary(_patient_model_probs)
         patient_pred_df = pd.DataFrame(patient_pred).sort_values(tr("Probability", "Probabilidade"), ascending=False)
         patient_pred_df[tr("Probability", "Probabilidade")] = patient_pred_df[tr("Probability", "Probabilidade")].map(lambda x: f"{x*100:.2f}%")
         quality_alerts = data_quality_alerts(form_map, prepared)
@@ -4050,7 +4111,7 @@ elif _active_tab == 1:  # Individual Prediction
         r1, r2, r3 = st.columns(3)
         r1.metric("\U0001f916 AI Risk", f"{ia_prob*100:.2f}%", _risk_badge(ia_prob), delta_color="off")
         r2.metric("\U0001f4ca EuroSCORE II", f"{euro_prob*100:.2f}%", _risk_badge(euro_prob), delta_color="off")
-        r3.metric("\U0001f310 STS", "-" if np.isnan(sts_prob) else f"{sts_prob*100:.2f}%", _risk_badge(sts_prob), delta_color="off")
+        r3.metric("\U0001f310 STS Score", "-" if np.isnan(sts_prob) else f"{sts_prob*100:.2f}%", _risk_badge(sts_prob), delta_color="off")
 
         # ── COMPLETENESS / RELIABILITY — anchored immediately below the result ─
         st.markdown(
@@ -4082,6 +4143,35 @@ elif _active_tab == 1:  # Individual Prediction
             st.warning(tr(
                 f"Moderate-relevance variables missing: {', '.join(_completeness['missing_moderate'])}",
                 f"Variáveis de relevância moderada ausentes: {', '.join(_completeness['missing_moderate'])}",
+            ))
+
+        if _model_disagreement.get("high"):
+            _boost_note_en = ""
+            _boost_note_pt = ""
+            _low_boost = _model_disagreement.get("low_end_boosting") or []
+            if _low_boost:
+                _boost_names = ", ".join(_low_boost)
+                _boost_note_en = (
+                    f" Very low calibrated estimates from {_boost_names} are present; "
+                    "this can occur with isotonic-calibrated boosting models at the low end of the risk distribution."
+                )
+                _boost_note_pt = (
+                    f" Estimativas calibradas muito baixas de {_boost_names} estão presentes; "
+                    "isso pode ocorrer em modelos boosting com calibração isotônica no extremo inferior da distribuição de risco."
+                )
+            st.warning(tr(
+                "High disagreement between candidate AI models. "
+                f"The primary prediction remains the selected model (**{forced_model}**), but candidate estimates range from "
+                f"{_model_disagreement['min']*100:.1f}% to {_model_disagreement['max']*100:.1f}% "
+                f"(range {_model_disagreement['range']*100:.1f} percentage points; median {_model_disagreement['median']*100:.1f}%). "
+                "Interpret this estimate with caution and review input completeness and key risk factors."
+                + _boost_note_en,
+                "Alta discordância entre os modelos candidatos de IA. "
+                f"A predição principal continua sendo o modelo selecionado (**{forced_model}**), mas as estimativas variam de "
+                f"{_model_disagreement['min']*100:.1f}% a {_model_disagreement['max']*100:.1f}% "
+                f"(amplitude {_model_disagreement['range']*100:.1f} pontos percentuais; mediana {_model_disagreement['median']*100:.1f}%). "
+                "Interprete esta estimativa com cautela e revise a completude dos dados e os principais fatores de risco."
+                + _boost_note_pt,
             ))
 
         st.caption(tr(
@@ -4131,7 +4221,7 @@ elif _active_tab == 1:  # Individual Prediction
 
         out = pd.DataFrame(
             {
-                tr("Score", "Escore"): ["\U0001f916 AI Risk", "\U0001f4ca EuroSCORE II", "\U0001f310 STS"],
+                tr("Score", "Escore"): ["\U0001f916 AI Risk", "\U0001f4ca EuroSCORE II", "\U0001f310 STS Score"],
                 tr("Probability", "Probabilidade"): [ia_prob, euro_prob, sts_prob],
                 tr("Class", "Classe"): [_risk_badge(ia_prob), _risk_badge(euro_prob), _risk_badge(sts_prob)],
             }
@@ -4172,6 +4262,16 @@ elif _active_tab == 1:  # Individual Prediction
                 "The table below shows predictions from all candidate models for comparison. Differences are expected — each algorithm learns patterns differently.",
                 f"O resumo de risco usa **{forced_model}**, selecionado como o modelo de melhor desempenho na validação cruzada interna (maior AUC). "
                 "A tabela abaixo mostra as predições de todos os modelos candidatos para comparação. Diferenças são esperadas — cada algoritmo aprende padrões de forma diferente.",
+            ))
+            st.caption(tr(
+                f"Candidate-model spread: min {_model_disagreement['min']*100:.1f}%, "
+                f"median {_model_disagreement['median']*100:.1f}%, "
+                f"max {_model_disagreement['max']*100:.1f}%, "
+                f"range {_model_disagreement['range']*100:.1f} percentage points.",
+                f"Dispersão entre modelos candidatos: mínimo {_model_disagreement['min']*100:.1f}%, "
+                f"mediana {_model_disagreement['median']*100:.1f}%, "
+                f"máximo {_model_disagreement['max']*100:.1f}%, "
+                f"amplitude {_model_disagreement['range']*100:.1f} pontos percentuais.",
             ))
             _model_col = tr("Model", "Modelo")
             _styled_pred = patient_pred_df.copy()

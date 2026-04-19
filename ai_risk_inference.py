@@ -26,7 +26,9 @@ from risk_data import (
     BLANK_MEANS_NO_COLUMNS,
     MISSING_TOKENS,
     is_combined_surgery,
+    normalize_arrhythmia_recent_value,
     normalize_coronary_symptom_value,
+    parse_suspension_anticoagulation_days,
     procedure_weight,
     thoracic_aorta_surgery,
 )
@@ -87,22 +89,18 @@ def _build_input_row(feature_columns, form: Dict[str, object]) -> pd.DataFrame:
                     break
     if "Coronary Symptom" in row:
         row["Coronary Symptom"] = normalize_coronary_symptom_value(row["Coronary Symptom"])
+    if "Arrhythmia Recent" in row:
+        row["Arrhythmia Recent"] = normalize_arrhythmia_recent_value(row["Arrhythmia Recent"])
     surg = form.get("Surgery", "")
     row["cirurgia_combinada"] = is_combined_surgery(surg)
     row["peso_procedimento"] = procedure_weight(surg)
     row["thoracic_aorta_flag"] = thoracic_aorta_surgery(surg)
 
-    # Clean numeric fields that may contain string values from CSV
-    _susp = row.get("Suspension of Anticoagulation (day)")
-    if isinstance(_susp, str):
-        _susp_clean = _susp.strip().replace(">", "").strip()
-        if _susp_clean.lower() in MISSING_TOKENS:
-            row["Suspension of Anticoagulation (day)"] = np.nan
-        else:
-            try:
-                row["Suspension of Anticoagulation (day)"] = float(_susp_clean)
-            except (ValueError, TypeError):
-                row["Suspension of Anticoagulation (day)"] = np.nan
+    # Clean conditional numeric fields that may contain simple text values.
+    if "Suspension of Anticoagulation (day)" in row:
+        row["Suspension of Anticoagulation (day)"] = parse_suspension_anticoagulation_days(
+            row.get("Suspension of Anticoagulation (day)")
+        )
 
     defaults = {col: "No" for col in BLANK_MEANS_NO_COLUMNS}
     defaults.update({

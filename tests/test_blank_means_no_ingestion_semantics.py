@@ -5,7 +5,9 @@ from ai_risk_inference import _build_input_row
 import risk_data
 from risk_data import (
     BLANK_MEANS_NO_COLUMNS,
+    normalize_arrhythmia_recent_value,
     normalize_coronary_symptom_value,
+    parse_suspension_anticoagulation_days,
     prepare_flat_dataset,
 )
 
@@ -37,6 +39,18 @@ def test_row_inference_canonicalizes_literal_none_coronary_symptom():
     assert row.at[0, "Coronary Symptom"] == "No coronary symptoms"
 
 
+def test_row_inference_preserves_arrhythmia_recent_none_as_valid_value():
+    row = _build_input_row(["Arrhythmia Recent"], {"Arrhythmia Recent": "None"})
+
+    assert row.at[0, "Arrhythmia Recent"] == "None"
+
+
+def test_row_inference_keeps_arrhythmia_recent_blank_missing():
+    row = _build_input_row(["Arrhythmia Recent"], {"Arrhythmia Recent": ""})
+
+    assert pd.isna(row.at[0, "Arrhythmia Recent"])
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -50,6 +64,25 @@ def test_row_inference_canonicalizes_literal_none_coronary_symptom():
 )
 def test_coronary_symptom_canonicalizer_is_narrow(raw, expected):
     assert normalize_coronary_symptom_value(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("None", "None"),
+        ("No", "None"),
+        ("Atrial Fibrillation", "Atrial Fibrillation"),
+        ("AF", "Atrial Fibrillation"),
+        ("", pd.NA),
+        ("Unknown", pd.NA),
+    ],
+)
+def test_arrhythmia_recent_canonicalizer_is_narrow(raw, expected):
+    result = normalize_arrhythmia_recent_value(raw)
+    if pd.isna(expected):
+        assert pd.isna(result)
+    else:
+        assert result == expected
 
 
 @pytest.mark.parametrize("missing_token", ["", "-", "nan", "N/A", "not informed"])
@@ -78,6 +111,28 @@ def test_suspension_of_anticoagulation_numeric_string_is_preserved():
     row = _build_input_row([col], {col: "> 5"})
 
     assert row.at[0, col] == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("> 5", 5.0),
+        ("5 days", 5.0),
+        ("2d", 2.0),
+        ("3 dias", 3.0),
+    ],
+)
+def test_suspension_of_anticoagulation_recoverable_text_is_parsed(raw, expected):
+    col = "Suspension of Anticoagulation (day)"
+
+    row = _build_input_row([col], {col: raw})
+
+    assert row.at[0, col] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("raw", ["5-7 days", "several days", "unknown duration"])
+def test_suspension_of_anticoagulation_ambiguous_text_stays_missing(raw):
+    assert pd.isna(parse_suspension_anticoagulation_days(raw))
 
 
 def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch):
@@ -156,6 +211,7 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
 
     for col in BLANK_MEANS_NO_COLUMNS:
         assert data.at["P1", col] == "No"
+    assert pd.isna(data.at["P1", "Arrhythmia Recent"])
     assert pd.isna(data.at["P1", "Suspension of Anticoagulation (day)"])
     assert pd.isna(data.at["P1", "Creatinine (mg/dL)"])
     assert pd.isna(data.at["P1", "Coronary Symptom"])
@@ -163,4 +219,6 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
     assert pd.isna(data.at["P1", "Aortic Regurgitation"])
     assert pd.isna(data.at["P3", "Coronary Symptom"])
     assert pd.isna(data.at["P3", "Aortic Stenosis"])
+    assert data.at["P3", "Arrhythmia Recent"] == "None"
     assert data.at["P4", "Coronary Symptom"] == "No coronary symptoms"
+    assert data.at["P4", "Arrhythmia Recent"] == "None"

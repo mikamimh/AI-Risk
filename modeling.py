@@ -54,6 +54,11 @@ warnings.filterwarnings(
     ),
     category=UserWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"sklearn\.utils\.parallel",
+)
 
 try:
     from catboost import CatBoostClassifier
