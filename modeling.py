@@ -46,6 +46,14 @@ warnings.filterwarnings(
     message=r"X does not have valid feature names, but LGBMClassifier was fitted with feature names",
     category=UserWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message=(
+        r"`sklearn\.utils\.parallel\.delayed` should be used with "
+        r"`sklearn\.utils\.parallel\.Parallel`.*"
+    ),
+    category=UserWarning,
+)
 
 try:
     from catboost import CatBoostClassifier
