@@ -2326,8 +2326,14 @@ def _fig_to_png_bytes(fig) -> bytes:
     return buf.getvalue()
 
 
+@st.fragment
 def _chart_download_buttons(data_df: pd.DataFrame, png_bytes: bytes | None, chart_name: str):
-    """Add XLSX + PNG download buttons below a chart."""
+    """Add XLSX + PNG download buttons below a chart.
+
+    Isolated as a fragment so that clicking either button does not trigger a
+    full-page rerun — preventing the MediaFileStorageError that occurs when a
+    rerun replaces the registered file before the browser can fetch it.
+    """
     c1, c2, _ = st.columns([1, 1, 4])
     with c1:
         buf = BytesIO()
@@ -4519,31 +4525,31 @@ elif _active_tab == 1:  # Individual Prediction
         with _rpt_c2:
             _rpt_pdf = statistical_summary_to_pdf(_report_text)
             if _rpt_pdf:
-                st.download_button(
-                    tr("Download PDF", "Baixar PDF"),
+                _bytes_download_btn(
                     _rpt_pdf,
                     f"report_{_patient_id}.pdf",
-                    mime="application/pdf",
+                    tr("Download PDF", "Baixar PDF"),
+                    "application/pdf",
                     key="dl_report_pdf",
                 )
         with _rpt_c3:
             _rpt_xlsx = statistical_summary_to_xlsx(_report_text)
             if _rpt_xlsx:
-                st.download_button(
-                    tr("Download XLSX", "Baixar XLSX"),
+                _bytes_download_btn(
                     _rpt_xlsx,
                     f"report_{_patient_id}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    tr("Download XLSX", "Baixar XLSX"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="dl_report_xlsx",
                 )
         with _rpt_c4:
             _rpt_csv = statistical_summary_to_csv(_report_text)
             if _rpt_csv:
-                st.download_button(
-                    tr("Download CSV", "Baixar CSV"),
+                _bytes_download_btn(
                     _rpt_csv,
                     f"report_{_patient_id}.csv",
-                    mime="text/csv",
+                    tr("Download CSV", "Baixar CSV"),
+                    "text/csv",
                     key="dl_report_csv",
                 )
 
@@ -5270,6 +5276,98 @@ elif _active_tab == 7:  # Data Quality
                 for proc, count in _dq["surgery_dist"].items()
             ])
             st.dataframe(_surg_df, width="stretch", hide_index=True)
+
+    _macro_dist = _dq.get("procedure_group_dist", {})
+    _surg_cov = _dq.get("surgery_coverage", {})
+    if _macro_dist or _surg_cov:
+        with st.expander(tr("Procedure macro-group coverage", "Cobertura por macrogrupo cirúrgico"), expanded=False):
+            st.caption(tr(
+                "Taxonomy mapping audit: how many surgeries resolved to a known macro group vs. unrecognised text (Other) or absent/blank (Unknown).",
+                "Auditoria de mapeamento taxonômico: quantas cirurgias foram resolvidas para um macrogrupo conhecido vs. texto não reconhecido (Other) ou ausente/branco (Unknown).",
+            ))
+            if _surg_cov:
+                _cov_n = _surg_cov.get("total", 0)
+                _cov_mapped = _surg_cov.get("n_mapped", 0)
+                _cov_unk = _surg_cov.get("n_unknown", 0)
+                _cov_other = _surg_cov.get("n_other", 0)
+                _cov_rate = _surg_cov.get("coverage_rate", 0.0)
+                _cov1, _cov2, _cov3, _cov4 = st.columns(4)
+                _cov1.metric(tr("Total surgeries", "Total de cirurgias"), _cov_n)
+                _cov2.metric(tr("Mapped", "Mapeados"), f"{_cov_mapped} ({_cov_rate:.0%})")
+                _cov3.metric(tr("Other (unrecognised text)", "Other (texto não reconhecido)"), _cov_other)
+                _cov4.metric(tr("Unknown (absent/blank)", "Unknown (ausente/branco)"), _cov_unk)
+                if _cov_other > 0:
+                    st.warning(tr(
+                        f"{_cov_other} surgery value(s) resolved to 'Other' — text present but not in procedure taxonomy. See unrecognised values below.",
+                        f"{_cov_other} valor(es) de cirurgia resolvido(s) como 'Other' — texto presente mas fora da taxonomia. Veja os valores não reconhecidos abaixo.",
+                    ))
+                    _unrec = _surg_cov.get("top_unrecognized", [])
+                    if _unrec:
+                        st.dataframe(
+                            pd.DataFrame(_unrec, columns=[tr("Surgery text", "Texto da cirurgia"), tr("Count", "Contagem")]),
+                            width="stretch",
+                            hide_index=True,
+                        )
+            if _macro_dist:
+                st.divider()
+                _n_total_macro = sum(_macro_dist.values())
+                _macro_rows = sorted(_macro_dist.items(), key=lambda x: x[1], reverse=True)
+                _macro_df = pd.DataFrame([
+                    {
+                        tr("Macro group", "Macrogrupo"): grp,
+                        tr("Count", "Contagem"): cnt,
+                        tr("%", "%"): f"{cnt / _n_total_macro:.1%}" if _n_total_macro > 0 else "—",
+                    }
+                    for grp, cnt in _macro_rows
+                ])
+                st.dataframe(_macro_df, width="stretch", hide_index=True)
+
+    _nf_audit = _dq.get("never_feature_audit", {})
+    if _nf_audit:
+        _nf_leaked = _nf_audit.get("leaked_into_features", [])
+        with st.expander(
+            tr("Column exclusion policy audit", "Auditoria de política de exclusão de colunas"),
+            expanded=bool(_nf_leaked),
+        ):
+            st.caption(tr(
+                "Columns present in the loaded dataset that are excluded from AI Risk features by policy category. "
+                "The 'Leaked into features' row should always be empty — if it is not, this is a data integrity issue.",
+                "Colunas presentes no dataset carregado que são excluídas das variáveis do AI Risk por categoria de política. "
+                "A linha 'Vazaram para features' deve sempre ser vazia — se não estiver, há um problema de integridade nos dados.",
+            ))
+            if _nf_leaked:
+                st.error(tr(
+                    f"DATA INTEGRITY ISSUE: {len(_nf_leaked)} never-feature column(s) leaked into feature set: {_nf_leaked}",
+                    f"PROBLEMA DE INTEGRIDADE: {len(_nf_leaked)} coluna(s) proibida(s) vazaram para o conjunto de features: {_nf_leaked}",
+                ))
+            _nf_rows = [
+                {
+                    tr("Category", "Categoria"): tr("Outcome (target variable)", "Desfecho (variável alvo)"),
+                    tr("Columns in data", "Colunas no dataset"): ", ".join(_nf_audit.get("outcome", [])) or "—",
+                    tr("Count", "Qtd"): len(_nf_audit.get("outcome", [])),
+                },
+                {
+                    tr("Category", "Categoria"): tr("Postoperative / future info", "Pós-operatório / informação futura"),
+                    tr("Columns in data", "Colunas no dataset"): ", ".join(_nf_audit.get("postoperative", [])) or "—",
+                    tr("Count", "Qtd"): len(_nf_audit.get("postoperative", [])),
+                },
+                {
+                    tr("Category", "Categoria"): tr("Comparator scores (STS / EuroSCORE)", "Scores comparadores (STS / EuroSCORE)"),
+                    tr("Columns in data", "Colunas no dataset"): ", ".join(_nf_audit.get("comparator_score", [])) or "—",
+                    tr("Count", "Qtd"): len(_nf_audit.get("comparator_score", [])),
+                },
+                {
+                    tr("Category", "Categoria"): tr("Reference / metadata / IDs", "Referência / metadados / IDs"),
+                    tr("Columns in data", "Colunas no dataset"): ", ".join(_nf_audit.get("metadata", [])) or "—",
+                    tr("Count", "Qtd"): len(_nf_audit.get("metadata", [])),
+                },
+                {
+                    tr("Category", "Categoria"): tr("Leaked into features (must be 0)", "Vazaram para features (deve ser 0)"),
+                    tr("Columns in data", "Colunas no dataset"): ", ".join(_nf_leaked) or "—",
+                    tr("Count", "Qtd"): len(_nf_leaked),
+                },
+            ]
+            st.dataframe(pd.DataFrame(_nf_rows), width="stretch", hide_index=True)
 
     with st.expander(tr("Analysis audit trail", "Trilha de auditoria"), expanded=False):
         st.caption(tr(

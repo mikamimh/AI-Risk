@@ -710,6 +710,118 @@ FLAT_PREOP_ALLOWED_COLUMNS = {
     "Aortic Root Abscess",
 }
 
+# ── Never-feature column policy ───────────────────────────────────────────────
+# Columns that must never enter AI Risk training, validation, or inference
+# as predictors. Applied as belt-and-suspenders on top of the allowlist
+# (flat path) and sheet-level structural separation (multi-sheet path).
+# Names are canonical app names: post-_normalize_flat_columns for CSV,
+# sheet column names for Excel.
+
+EXCLUDED_OUTCOME_COLUMNS: frozenset = frozenset({
+    "Death",
+    "morte_30d",
+})
+
+EXCLUDED_POSTOPERATIVE_COLUMNS: frozenset = frozenset({
+    # Post-op functional status
+    "nyha_post",
+    # Drain, ICU, length of stay
+    "drain_debit_day_1", "drain_debit_day_2", "drain_debit_day_3",
+    "icu_days",
+    "postoperative_hospitalization_days",
+    "hospital_stay_days",
+    "transfusion",
+    # Post-op labs
+    "creatinine_post_mg_dl",
+    "hematocrit_post_pct",
+    "wbc_count_post_10e3_ul",
+    "platelet_count_post_cells_ul",
+    # Post-op complications
+    "acute_myocardial_infarction_post",
+    "pneumonia_post",
+    "stroke_post",
+    "atrial_fibrillation_post",
+    "av_block_post",
+    "vasoplegic_syndrome_post",
+    "cardiogenic_shock_post",
+    "hemorrhagic_shock_post",
+    "septic_shock_post",
+    "infective_endocarditis_post",
+    "pulmonary_embolism_post",
+    "surgical_site_infection_post",
+    "mediastinitis_post",
+    "delirium_post",
+    "dialysis_post",
+    "reoperated",
+    "rehospitalization_lt_30_days",
+    "other_complications",
+    # Post-op echocardiography
+    "lvef_post_pct",
+    "aortic_stenosis_post",
+    "aortic_mean_gradient_post_mmhg",
+    "aortic_valve_area_post_cm2",
+    "aortic_regurgitation_post",
+    "vena_contracta_post",
+    "pht_aortic_post",
+    "mitral_mean_gradient_post_mmhg",
+    "mitral_valve_area_post_cm2",
+    "mitral_regurgitation_post",
+    "vena_contracta_mm_post",
+    "pht_mitral_post",
+    "tricuspid_regurgitation_post",
+    "psap_post",
+    "tapse_post",
+})
+
+EXCLUDED_COMPARATOR_SCORE_COLUMNS: frozenset = frozenset({
+    # EuroSCORE II (raw and derived)
+    "EuroSCORE II",
+    "EuroSCORE II Automático",
+    "euroscore_sheet",
+    "euroscore_auto_sheet",
+    "euroscore_calc",
+    "euroscore_sheet_clean",
+    "euroscore_auto_sheet_clean",
+    # STS Score predicted endpoints
+    "sts_score",
+    "sts_score_sheet",
+    "Operative Mortality",
+    "Morbidity & Mortality",
+    "Stroke",
+    "Renal Failure",
+    "Reoperation",
+    "Prolonged Ventilation",
+    "Deep Sternal Wound Infection",
+    "Long Hospital Stay (>14 days)",
+    "Short Hospital Stay (<6 days)",
+})
+
+EXCLUDED_METADATA_COLUMNS: frozenset = frozenset({
+    # Patient identity and temporal reference
+    "Name",
+    "_patient_key",
+    "Procedure Date",
+    "_proc_date",
+    "patient_id",
+    "surgery_year",
+    "surgery_quarter",
+    "days_pre_echo_to_surgery",
+    "days_surgery_to_post_echo",
+    # AI Risk model output columns (circular leakage)
+    "ia_risk_oof",
+    "ia_risk_fullfit",
+    "classe_ia",
+    "classe_euro",
+    "classe_sts",
+})
+
+NEVER_FEATURE_COLUMNS: frozenset = (
+    EXCLUDED_OUTCOME_COLUMNS
+    | EXCLUDED_POSTOPERATIVE_COLUMNS
+    | EXCLUDED_COMPARATOR_SCORE_COLUMNS
+    | EXCLUDED_METADATA_COLUMNS
+)
+
 
 def _norm_text(value: object) -> str:
     if pd.isna(value):
@@ -1256,6 +1368,150 @@ NON_AORTA_EXCLUSIONS = {
     "surgical treatment of anomalous aortic origin of coronary",
     "removal of panus in aortic valve",
 }
+
+# ── Procedure intermediate-group classification ───────────────────────────────
+# Replaces the coarser procedure_macro_group with a clinically richer taxonomy
+# that separates aortic valve from mitral/tricuspid, aortic root reconstruction
+# from aneurysm/dissection repair, and retains all other distinctions.
+#
+# NOTE: procedure_group is derived and stored in the dataset but is NOT used as
+# a model feature. A controlled ablation (n=454, 68 events) showed consistent
+# degradation when including it as a TargetEncoder input (AUC −0.017,
+# AUPRC −0.020, Brier +0.002, calibration slope 0.954 vs 1.028, feature
+# importance rank 54/62). TargetEncoder is unstable for 11-category taxonomies
+# at this cohort size. The feature is retained exclusively for Data Quality
+# auditing (procedure_group_dist, audit_surgery_coverage).
+#
+# Priority list: higher index = highest-risk / dominant for combined surgeries.
+# Semantics:
+#   UNKNOWN    — surgery field absent, blank, or a recognised missing token
+#   OTHER      — surgery text present but not matched in PROCEDURE_INTERMEDIATE_GROUP_MAP
+_INTERMEDIATE_GROUP_PRIORITY: List[str] = [
+    "UNKNOWN",
+    "OTHER",
+    "OTHER_CARDIAC",
+    "CONGENITAL_STRUCTURAL",
+    "CABG_OPCAB",
+    "MITRAL_TRICUSPID",
+    "AORTIC_VALVE",
+    "AORTA_ANEURYSM",
+    "AORTA_ROOT",
+    "CARDIAC_MASS_THROMBUS",
+    "HF_TRANSPLANT",
+]
+
+PROCEDURE_INTERMEDIATE_GROUP_MAP: Dict[str, str] = {
+    # CABG / coronary bypass
+    "cabg": "CABG_OPCAB",
+    "opcab": "CABG_OPCAB",
+    "surgical treatment of anomalous aortic origin of coronary": "CABG_OPCAB",
+    "left ventricular aneurysmectomy": "CABG_OPCAB",   # post-MI LV aneurysm
+    # Aortic valve (AVR, repair, homografts)
+    "avr": "AORTIC_VALVE",
+    "av repair": "AORTIC_VALVE",
+    "ross": "AORTIC_VALVE",
+    "pulmonary homograft implantation": "AORTIC_VALVE",
+    "aortic homograft implantation": "AORTIC_VALVE",
+    "removal of panus in aortic valve": "AORTIC_VALVE",
+    # Mitral / tricuspid valve
+    "mvr": "MITRAL_TRICUSPID",
+    "mv repair": "MITRAL_TRICUSPID",
+    "tvr": "MITRAL_TRICUSPID",
+    "tv repair": "MITRAL_TRICUSPID",
+    "myectomy": "MITRAL_TRICUSPID",   # septal myectomy; LVOT / mitral contact
+    # Aortic root reconstruction (valve + root composite)
+    "bentall-de bono procedure": "AORTA_ROOT",
+    "valve sparing aortic root replacement (david procedure)": "AORTA_ROOT",
+    # Thoracic aortic aneurysm, dissection, endovascular
+    "aortic aneurism repair": "AORTA_ANEURYSM",
+    "aortic dissection repair": "AORTA_ANEURYSM",
+    "debranching": "AORTA_ANEURYSM",
+    "tevar": "AORTA_ANEURYSM",
+    "evar": "AORTA_ANEURYSM",
+    # HF / transplant
+    "heart transplant": "HF_TRANSPLANT",
+    # Congenital / structural
+    "asd closure": "CONGENITAL_STRUCTURAL",
+    "vsd correction": "CONGENITAL_STRUCTURAL",
+    "pfo closure": "CONGENITAL_STRUCTURAL",
+    "percutaneous closure of pfo": "CONGENITAL_STRUCTURAL",
+    "laao": "CONGENITAL_STRUCTURAL",
+    # Cardiac mass / thrombus
+    "intracardiac tumor resection": "CARDIAC_MASS_THROMBUS",
+    "resection of intracardiac and/or pulmonary artery thrombus": "CARDIAC_MASS_THROMBUS",
+    "thrombus removal": "CARDIAC_MASS_THROMBUS",
+    # Other cardiac (devices, pericardial)
+    "pericardiectomy": "OTHER_CARDIAC",
+    "pacemaker implantation": "OTHER_CARDIAC",
+    "pacemaker electrode extraction": "OTHER_CARDIAC",
+}
+
+
+def procedure_group(text: object) -> str:
+    """Return the intermediate procedure group for a Surgery field value.
+
+    Provides finer clinical resolution than a broad macro-group while avoiding
+    the noise of raw procedure text.  For combined surgeries the highest-priority
+    group (by clinical risk) is returned.
+
+    Returns:
+        'UNKNOWN'     — field absent, blank, or a recognised missing token.
+        'OTHER'       — text present but not in PROCEDURE_INTERMEDIATE_GROUP_MAP.
+        'OTHER_CARDIAC' — pacemaker, pericardiectomy, and other non-classified cardiac.
+        <GROUP>       — one of the nine clinical procedure groups.
+    """
+    s = _norm_text(text)
+    if not s or s.lower() in MISSING_TOKENS:
+        return "UNKNOWN"
+    normalized = s.replace(";", ",").replace("+", ",")
+    parts = [p.strip().lower() for p in normalized.split(",") if p.strip()]
+    groups = [PROCEDURE_INTERMEDIATE_GROUP_MAP.get(p, "OTHER") for p in parts]
+    if not groups:
+        return "UNKNOWN"
+    return max(
+        groups,
+        key=lambda g: _INTERMEDIATE_GROUP_PRIORITY.index(g) if g in _INTERMEDIATE_GROUP_PRIORITY else 0,
+    )
+
+
+def audit_surgery_coverage(surgery_series: "pd.Series") -> dict:
+    """Return procedure-group mapping coverage statistics for a Surgery column.
+
+    Pure function — no side-effects, no external state.
+
+    Returns
+    -------
+    dict with keys:
+        total           : int   — total rows evaluated
+        n_mapped        : int   — rows resolved to a known procedure group
+        n_unknown       : int   — rows with blank/missing surgery info
+        n_other         : int   — rows with text present but not in taxonomy
+        coverage_rate   : float — n_mapped / total
+        top_unrecognized: list[tuple[str, int]] — top-10 raw Surgery values
+                          that resolved to 'OTHER', by frequency
+    """
+    import pandas as _pd
+    total = len(surgery_series)
+    groups = surgery_series.map(procedure_group)
+    n_unknown = int((groups == "UNKNOWN").sum())
+    n_other = int((groups == "OTHER").sum())
+    n_mapped = total - n_unknown - n_other
+    coverage_rate = n_mapped / total if total > 0 else 0.0
+    other_mask = groups == "OTHER"
+    top_unrecognized: list = []
+    if n_other > 0:
+        top_unrecognized = [
+            (str(v), int(c))
+            for v, c in surgery_series[other_mask].value_counts().head(10).items()
+        ]
+    return {
+        "total": total,
+        "n_mapped": n_mapped,
+        "n_unknown": n_unknown,
+        "n_other": n_other,
+        "coverage_rate": coverage_rate,
+        "top_unrecognized": top_unrecognized,
+    }
 
 
 def split_surgery_procedures(text: object) -> List[str]:
@@ -2689,6 +2945,7 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
         data["cirurgia_combinada"] = data["Surgery"].map(is_combined_surgery)
         data["peso_procedimento"] = data["Surgery"].map(procedure_weight)
         data["thoracic_aorta_flag"] = data["Surgery"].map(thoracic_aorta_surgery)
+        data["procedure_group"] = data["Surgery"].map(procedure_group)
 
     if "_patient_key" not in data.columns:
         if "Name" in data.columns:
@@ -2711,22 +2968,7 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
     # source data convention is: present → documented; absent → left blank.
     data = _impute_blank_as_no(data)
 
-    exclude_cols = {
-        "morte_30d",
-        "Death",
-        "euroscore_sheet",
-        "euroscore_auto_sheet",
-        "euroscore_calc",
-        "sts_score",
-        "sts_score_sheet",
-        "euroscore_sheet_clean",
-        "euroscore_auto_sheet_clean",
-        "ia_risk_oof",
-        "ia_risk_fullfit",
-        "classe_ia",
-        "classe_euro",
-        "classe_sts",
-    }
+    exclude_cols = set(NEVER_FEATURE_COLUMNS)
     allowed_cols = (
         set(FLAT_PREOP_ALLOWED_COLUMNS)
         | {"cirurgia_combinada", "peso_procedimento", "thoracic_aorta_flag", "_patient_key"}
@@ -2763,11 +3005,13 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
         if c in allowed_cols and c not in exclude_cols and c != "_patient_key"
         and c not in _noise_cols_flat and not _should_exclude_flat(c)
     ]
+    _nf_in_data = sorted(c for c in data.columns if c in NEVER_FEATURE_COLUMNS)
     info = {
         "n_rows": int(len(data)),
         "n_features": int(len(feature_columns)),
         "positive_rate": float(pd.to_numeric(data["morte_30d"], errors="coerce").mean()),
         "source_type": "flat",
+        "never_feature_columns_in_source": _nf_in_data,
     }
     return PreparedData(data=data, feature_columns=feature_columns, info=info, ingestion_report=ingestion_report)
 
@@ -2841,6 +3085,7 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
     pre_post["cirurgia_combinada"] = pre_post["Surgery"].map(is_combined_surgery)
     pre_post["peso_procedimento"] = pre_post["Surgery"].map(procedure_weight)
     pre_post["thoracic_aorta_flag"] = pre_post["Surgery"].map(thoracic_aorta_surgery)
+    pre_post["procedure_group"] = pre_post["Surgery"].map(procedure_group)
 
     eu_series = pd.Series(dtype=float)
     if eu is not None and "Patient" in eu.columns and "EuroSCORE II" in eu.columns:
@@ -2920,6 +3165,18 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
         if c not in _noise_cols and not _too_sparse_or_constant(c)
     ]
 
+    # Belt-and-suspenders: block any never-feature column that may have slipped
+    # through sheet-level structural separation (e.g. a preop sheet that grew
+    # unexpected columns).
+    _nf_hits = sorted(c for c in feature_columns if c in NEVER_FEATURE_COLUMNS)
+    if _nf_hits:
+        warnings.warn(
+            f"Never-feature policy intercepted {len(_nf_hits)} column(s) in "
+            f"multi-sheet path: {_nf_hits}. Check source sheet for unexpected columns.",
+            stacklevel=2,
+        )
+    feature_columns = [c for c in feature_columns if c not in NEVER_FEATURE_COLUMNS]
+
     info = {
         "n_rows": len(pre_post),
         "n_features": len(feature_columns),
@@ -2934,6 +3191,7 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
         "excluded_no_pre_post_match": int(pre_unique_after - pre_post_rows),
         "echo_rows": int(len(eco)),
         "available_optional_tables": [t for t in OPTIONAL_SOURCE_TABLES if t in tables],
+        "never_feature_intercepted": _nf_hits,
     }
 
     return PreparedData(data=pre_post, feature_columns=feature_columns, info=info, ingestion_report=ingestion_report)

@@ -646,6 +646,32 @@ def compute_data_quality_summary(
                 procedure_counts[p] = procedure_counts.get(p, 0) + 1
         surgery_dist = dict(sorted(procedure_counts.items(), key=lambda x: x[1], reverse=True)[:15])
 
+    # Procedure-group distribution and coverage (uses derived column when available)
+    procedure_group_dist: dict = {}
+    surgery_coverage: dict = {}
+    if "procedure_group" in df.columns:
+        procedure_group_dist = df["procedure_group"].value_counts().to_dict()
+    if "Surgery" in df.columns:
+        from risk_data import audit_surgery_coverage
+        surgery_coverage = audit_surgery_coverage(df["Surgery"])
+
+    # Never-feature policy audit: which excluded-category columns are present in data
+    from risk_data import (
+        EXCLUDED_OUTCOME_COLUMNS,
+        EXCLUDED_POSTOPERATIVE_COLUMNS,
+        EXCLUDED_COMPARATOR_SCORE_COLUMNS,
+        EXCLUDED_METADATA_COLUMNS,
+        NEVER_FEATURE_COLUMNS,
+    )
+    cols_in_data = set(df.columns)
+    never_feature_audit = {
+        "outcome": sorted(cols_in_data & EXCLUDED_OUTCOME_COLUMNS),
+        "postoperative": sorted(cols_in_data & EXCLUDED_POSTOPERATIVE_COLUMNS),
+        "comparator_score": sorted(cols_in_data & EXCLUDED_COMPARATOR_SCORE_COLUMNS),
+        "metadata": sorted(cols_in_data & EXCLUDED_METADATA_COLUMNS),
+        "leaked_into_features": sorted(c for c in feature_columns if c in NEVER_FEATURE_COLUMNS),
+    }
+
     return {
         "n_total": n_total,
         "n_events": n_events,
@@ -658,6 +684,9 @@ def compute_data_quality_summary(
         "n_sts_sheet": n_sts_sheet,
         "n_triple": n_triple,
         "surgery_dist": surgery_dist,
+        "procedure_group_dist": procedure_group_dist,
+        "surgery_coverage": surgery_coverage,
+        "never_feature_audit": never_feature_audit,
     }
 
 

@@ -19,11 +19,12 @@ VARIABLE_DICTIONARY: List[Dict[str, str]] = [
     {"variable": "Race", "definition": "Self-reported race/ethnicity", "origin": "Preoperative", "unit": "categorical", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Demographics"},
 
     # --- Surgical ---
-    {"variable": "Surgery", "definition": "Planned surgical procedure(s), comma-separated", "origin": "Preoperative", "unit": "text", "transformation": "Used for procedure weight, thoracic aorta flag, combined surgery flag", "in_model": "Derived features only", "domain": "Procedure"},
+    {"variable": "Surgery", "definition": "Planned surgical procedure(s), comma-separated", "origin": "Preoperative", "unit": "text", "transformation": "Used for procedure weight, thoracic aorta flag, combined surgery flag; procedure_group derived for DQ audit only", "in_model": "Derived features only", "domain": "Procedure"},
     {"variable": "Surgical Priority", "definition": "Urgency classification: Elective, Urgent, Emergency, Salvage", "origin": "Preoperative", "unit": "categorical", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Procedure"},
     {"variable": "cirurgia_combinada", "definition": "Whether surgery involves multiple procedures", "origin": "Derived from Surgery", "unit": "0/1", "transformation": "Binary", "in_model": "Yes", "domain": "Procedure"},
     {"variable": "peso_procedimento", "definition": "EuroSCORE II procedure weight category", "origin": "Derived from Surgery", "unit": "categorical", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Procedure"},
     {"variable": "thoracic_aorta_flag", "definition": "Whether surgery involves thoracic aorta", "origin": "Derived from Surgery", "unit": "0/1", "transformation": "Binary", "in_model": "Yes", "domain": "Procedure"},
+    {"variable": "procedure_group", "definition": "Intermediate procedure group (CABG_OPCAB, AORTIC_VALVE, MITRAL_TRICUSPID, AORTA_ROOT, AORTA_ANEURYSM, HF_TRANSPLANT, CONGENITAL_STRUCTURAL, CARDIAC_MASS_THROMBUS, OTHER_CARDIAC, OTHER, UNKNOWN)", "origin": "Derived from Surgery", "unit": "categorical", "transformation": "Computed for Data Quality audit and surgery coverage reporting only — not used in training or inference", "in_model": "No (excluded by controlled ablation: consistent degradation at n=454 — AUC -0.017, AUPRC -0.020; TargetEncoder unstable at this cohort size)", "domain": "Procedure"},
 
     # --- Clinical Status ---
     {"variable": "Preoperative NYHA", "definition": "New York Heart Association functional class (I-IV)", "origin": "Preoperative", "unit": "I/II/III/IV", "transformation": "Categorical (TargetEncoder)", "in_model": "Yes", "domain": "Clinical"},
