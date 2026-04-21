@@ -4,6 +4,8 @@
 
 Research tool developed as part of a master's dissertation on risk stratification in cardiovascular surgery using artificial intelligence.
 
+The training source can be a canonical multi-sheet workbook/database, a flat CSV/Parquet table, or a single-sheet Excel export. Single-sheet Excel files with default names such as `Planilha1` are treated like flat datasets.
+
 ## What this app does
 
 The system reads structured clinical data from hospital electronic records, builds an analytical dataset with one row per surgery, and calculates three risk scores for predicting 30-day or in-hospital mortality:
@@ -187,6 +189,8 @@ The app accepts multiple data formats:
 
 ### Multi-sheet format (`.xlsx`, `.xls`, `.db`, `.sqlite`)
 
+Use this format when the source is split across clinical tables. Excel/database inputs with multiple sheets/tables are expected to contain the required names below.
+
 Required sheets/tables:
 - `Preoperative` — patient demographics, comorbidities, clinical status
 - `Pre-Echocardiogram` — echocardiographic data
@@ -200,6 +204,13 @@ Optional sheets/tables:
 ### Flat format (`.csv`, `.parquet`, single-sheet `.xlsx`/`.xls`)
 
 A single table with all variables. Excel exports with one worksheet, including default sheet names such as `Planilha1`, are handled as flat datasets. Must include a `morte_30d` or `Death` column for the outcome.
+
+Format selection rule:
+- `.csv` and `.parquet` are always treated as flat datasets.
+- `.xlsx`/`.xls` with exactly one worksheet is treated as a flat dataset, regardless of the sheet name.
+- `.xlsx`/`.xls` with multiple worksheets is treated as a multi-sheet source and must include `Preoperative`, `Pre-Echocardiogram`, and `Postoperative`.
+
+For flat Excel, the app reads cell values, not visual formatting. Symbols stored as text (for example `<=`, `>=`, `≤`, `≥`, `³`, `μ`, accented text) are preserved better than in many CSV exports; icons, colors, conditional-formatting arrows, and inserted images are not interpreted as data.
 
 **Accepted `Death` / `morte_30d` column values** — the canonical timing-based format is preferred, but boolean-style labels are also accepted as a fallback:
 
