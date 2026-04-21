@@ -586,6 +586,14 @@ def _download_to_file(url: str, out_path: Path) -> tuple[bool, str]:
 
 def _validate_source(path: str) -> tuple[bool, str]:
     ext = Path(path).suffix.lower()
+
+    def _has_flat_outcome(columns) -> bool:
+        mapped = {
+            FLAT_ALIAS_TO_APP_COLUMNS.get(str(c).strip(), str(c).strip())
+            for c in columns
+        }
+        return bool({"morte_30d", "Death"} & mapped)
+
     if ext in {".csv", ".parquet"}:
         try:
             if ext == ".csv":
@@ -594,7 +602,7 @@ def _validate_source(path: str) -> tuple[bool, str]:
                 df = pd.read_parquet(path)
         except Exception as e:
             return False, f"invalid_dataset: {e}"
-        if "morte_30d" not in df.columns and "Death" not in df.columns and "death" not in df.columns:
+        if not _has_flat_outcome(df.columns):
             return False, "flat_dataset_missing_column: morte_30d_or_Death_or_death"
         return True, "ok"
     if ext in {".db", ".sqlite", ".sqlite3"}:
@@ -618,6 +626,14 @@ def _validate_source(path: str) -> tuple[bool, str]:
     names = set(xls.sheet_names)
     missing = sorted(REQUIRED_SHEETS - names)
     if missing:
+        if len(xls.sheet_names) == 1:
+            sheet_name = xls.sheet_names[0]
+            try:
+                df = pd.read_excel(path, sheet_name=sheet_name, nrows=5)
+            except Exception as e:
+                return False, f"invalid_xlsx_flat_sheet: {e}"
+            if _has_flat_outcome(df.columns):
+                return True, "ok"
         found = ", ".join(sorted(xls.sheet_names))
         return False, f"missing_sheets: {', '.join(missing)} | found_sheets: {found}"
     return True, "ok"
@@ -689,7 +705,7 @@ O app avalia **discriminação e calibração** conjuntamente, juntamente com ut
         st.markdown(
             tr(
                 """
-**Data sources:** The app accepts Excel files (.xlsx with Preoperative, Pre-Echocardiogram, and Postoperative sheets) or flat CSV/Parquet files. CSV files with either `,` or `;` as field separator and comma or dot as decimal separator are handled automatically.
+**Data sources:** The app accepts multi-sheet Excel files (.xlsx with Preoperative, Pre-Echocardiogram, and Postoperative sheets), single-sheet flat Excel files, or flat CSV/Parquet files. CSV files with either `,` or `;` as field separator and comma or dot as decimal separator are handled automatically.
 
 **Inclusion criteria (Excel):** Only records with 'Surgery' and 'Procedure Date' fields are included. Records are matched across the three sheets using patient identity and procedure date. Name and date are used only for internal linkage and **never as predictors**.
 
@@ -698,7 +714,7 @@ O app avalia **discriminação e calibração** conjuntamente, juntamente com ut
 **Primary outcome:** 30-day or in-hospital mortality, extracted from the `Death` column. Values "Operative" or numeric ≤30 (days to death, including 0 = immediate postoperative death) are coded as events; ">30" or "-" are coded as survivors.
 """,
                 """
-**Fontes de dados:** O app aceita arquivos Excel (.xlsx com abas Preoperative, Pre-Echocardiogram e Postoperative) ou arquivos CSV/Parquet. Arquivos CSV com separador `,` ou `;` e decimal com vírgula ou ponto são tratados automaticamente.
+**Fontes de dados:** O app aceita arquivos Excel multi-abas (.xlsx com abas Preoperative, Pre-Echocardiogram e Postoperative), Excel plano de aba única, ou arquivos CSV/Parquet. Arquivos CSV com separador `,` ou `;` e decimal com vírgula ou ponto são tratados automaticamente.
 
 **Critérios de inclusão (Excel):** Apenas registros com os campos 'Surgery' e 'Procedure Date' são incluídos. Os registros são pareados entre as três abas usando identidade do paciente e data do procedimento. Nome e data são usados apenas para vinculação interna e **nunca como preditores**.
 

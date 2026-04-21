@@ -1559,6 +1559,27 @@ def _read_csv_auto(path: str, nrows: int | None = None) -> pd.DataFrame:
     )
 
 
+def _read_flat_excel(path: str, nrows: int | None = None) -> pd.DataFrame:
+    """Read an Excel workbook that represents a single flat cohort table.
+
+    Multi-sheet XLSX files with the canonical source tables are handled by
+    :func:`prepare_master_dataset`. This helper is for exported CSV-like Excel
+    files, commonly saved with a default sheet name such as ``Planilha1``.
+    """
+    xls = pd.ExcelFile(path)
+    if not xls.sheet_names:
+        raise ValueError("Excel workbook has no sheets")
+    if len(xls.sheet_names) > 1:
+        raise ValueError(
+            "Flat Excel files must contain exactly one sheet; multi-sheet "
+            "workbooks must include Preoperative, Pre-Echocardiogram, and "
+            "Postoperative sheets."
+        )
+    df = pd.read_excel(path, sheet_name=xls.sheet_names[0], nrows=nrows)
+    df.columns = [re.sub(r"\s+", " ", str(c)).strip() for c in df.columns]
+    return df
+
+
 def normalize_dataframe(
     df: pd.DataFrame,
     *,
@@ -2535,6 +2556,8 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
     ext = Path(source_path).suffix.lower()
     if ext == ".csv":
         df = _read_csv_auto(source_path)
+    elif ext in {".xlsx", ".xls"}:
+        df = _read_flat_excel(source_path)
     elif ext == ".parquet":
         df = pd.read_parquet(source_path)
     else:
@@ -2677,6 +2700,8 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
     tables = _load_source_tables(xlsx_path)
     missing_tables = [t for t in REQUIRED_SOURCE_TABLES if t not in tables]
     if missing_tables:
+        if ext in {".xlsx", ".xls"} and len(tables) == 1:
+            return prepare_flat_dataset(xlsx_path)
         raise ValueError(f"Missing required tables/sheets: {', '.join(missing_tables)}")
 
     pre = tables["Preoperative"]

@@ -197,9 +197,9 @@ Optional sheets/tables:
 - `EuroSCORE II Automático` — automatically calculated EuroSCORE II values
 - `STS Score` — pre-calculated STS Score values for reference/fallback
 
-### Flat format (`.csv`, `.parquet`)
+### Flat format (`.csv`, `.parquet`, single-sheet `.xlsx`/`.xls`)
 
-A single table with all variables. Must include a `morte_30d` or `Death` column for the outcome.
+A single table with all variables. Excel exports with one worksheet, including default sheet names such as `Planilha1`, are handled as flat datasets. Must include a `morte_30d` or `Death` column for the outcome.
 
 **Accepted `Death` / `morte_30d` column values** — the canonical timing-based format is preferred, but boolean-style labels are also accepted as a fallback:
 

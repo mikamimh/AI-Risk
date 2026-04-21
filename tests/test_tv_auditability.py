@@ -194,6 +194,40 @@ class TestPrepareInfoKeys:
         assert "pre_rows_before_criteria" not in prepared.info
         assert "matched_pre_post_rows" not in prepared.info
 
+    def test_single_sheet_xlsx_is_accepted_as_flat_dataset(self, tmp_path):
+        """A CSV-like XLSX export with a default sheet name is a flat source."""
+        from risk_data import prepare_flat_dataset
+        xlsx_path = tmp_path / "cohort.xlsx"
+        pd.DataFrame({
+            "surgery_pre": ["CABG", "AVR", "MVR"],
+            "death": ["No", "Yes", "No"],
+            "age_years": [65, 72, 58],
+            "sex": ["Male", "Female", "Male"],
+        }).to_excel(xlsx_path, sheet_name="Planilha1", index=False)
+
+        prepared = prepare_flat_dataset(str(xlsx_path))
+
+        assert prepared.info.get("source_type") == "flat"
+        assert prepared.info.get("n_rows") == 3
+        assert "Death" in prepared.data.columns
+        assert prepared.data["morte_30d"].tolist() == [0, 1, 0]
+
+    def test_prepare_master_falls_back_for_single_sheet_flat_xlsx(self, tmp_path):
+        """prepare_master_dataset should not require source sheets for flat XLSX."""
+        from risk_data import prepare_master_dataset
+        xlsx_path = tmp_path / "cohort.xlsx"
+        pd.DataFrame({
+            "Surgery": ["CABG", "AVR"],
+            "Death": ["No", "Yes"],
+            "Age (years)": [65, 72],
+            "Sex": ["Male", "Female"],
+        }).to_excel(xlsx_path, sheet_name="Planilha1", index=False)
+
+        prepared = prepare_master_dataset(str(xlsx_path))
+
+        assert prepared.info.get("source_type") == "flat"
+        assert prepared.info.get("n_rows") == 2
+
 
 # ---------------------------------------------------------------------------
 # 4. fail_log not inherited between runs with different context sigs
