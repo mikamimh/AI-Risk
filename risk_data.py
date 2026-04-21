@@ -459,6 +459,28 @@ def _impute_blank_as_none(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def add_missingness_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Add conservative panel-level missingness indicators.
+
+    The indicators are intentionally limited to routinely available
+    preoperative laboratory panels. They encode whether a clinical
+    information block was partially unavailable before median/mode imputation,
+    without adding one indicator per raw variable.
+    """
+    out = df.copy()
+    for indicator, source_cols in MISSINGNESS_INDICATOR_SPECS.items():
+        missing_any = pd.Series(False, index=out.index)
+        for col in source_cols:
+            if col in out.columns:
+                missing_any = missing_any | out[col].apply(
+                    lambda v, c=col: is_missing(v, column=c)
+                )
+            else:
+                missing_any = pd.Series(True, index=out.index)
+        out[indicator] = missing_any.astype(int)
+    return out
+
+
 REQUIRED_SOURCE_TABLES = [
     "Preoperative",
     "Pre-Echocardiogram",
@@ -470,6 +492,24 @@ OPTIONAL_SOURCE_TABLES = [
     "EuroSCORE II Automático",
     "STS Score",
 ]
+
+MISSINGNESS_INDICATOR_SPECS: Dict[str, tuple[str, ...]] = {
+    "missing_renal_labs": (
+        "Creatinine (mg/dL)",
+        "Cr clearance, ml/min *",
+    ),
+    "missing_cbc_labs": (
+        "Hematocrit (%)",
+        "WBC Count (10³/μL)",
+        "Platelet Count (cells/μL)",
+    ),
+    "missing_coagulation_labs": (
+        "INR",
+        "PTT",
+    ),
+}
+
+MISSINGNESS_INDICATOR_COLUMNS: frozenset = frozenset(MISSINGNESS_INDICATOR_SPECS)
 
 FLAT_ALIAS_TO_APP_COLUMNS = {
     "patient_id": "Name",
@@ -2666,6 +2706,7 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
     data = _normalize_suspension_anticoagulation_days_column(data)
     data = _impute_blank_as_none(data)
     data, ingestion_report = normalize_dataframe(data, source_label="flat")
+    data = add_missingness_indicators(data)
     # Interpret blank as implicit "No" for binary history columns where the
     # source data convention is: present → documented; absent → left blank.
     data = _impute_blank_as_no(data)
@@ -2686,13 +2727,22 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
         "classe_euro",
         "classe_sts",
     }
-    allowed_cols = set(FLAT_PREOP_ALLOWED_COLUMNS) | {"cirurgia_combinada", "peso_procedimento", "thoracic_aorta_flag", "_patient_key"}
+    allowed_cols = (
+        set(FLAT_PREOP_ALLOWED_COLUMNS)
+        | {"cirurgia_combinada", "peso_procedimento", "thoracic_aorta_flag", "_patient_key"}
+        | set(MISSINGNESS_INDICATOR_COLUMNS)
+    )
     _noise_cols_flat = {
         "Others informations", "Others",
         "Classification of Heart Failure According to Ejection Fraction",
         "Preoperative Medications",
     }
-    _engineered = {"cirurgia_combinada", "peso_procedimento", "thoracic_aorta_flag"}
+    _engineered = {
+        "cirurgia_combinada",
+        "peso_procedimento",
+        "thoracic_aorta_flag",
+        *MISSINGNESS_INDICATOR_COLUMNS,
+    }
 
     def _should_exclude_flat(col_name: str) -> bool:
         if col_name in _engineered:
@@ -2822,6 +2872,7 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
     pre_post = _normalize_suspension_anticoagulation_days_column(pre_post)
     pre_post = _impute_blank_as_none(pre_post)
     pre_post, ingestion_report = normalize_dataframe(pre_post, source_label="master")
+    pre_post = add_missingness_indicators(pre_post)
     # Interpret blank as implicit "No" for binary history columns where the
     # source data convention is: present → documented; absent → left blank.
     pre_post = _impute_blank_as_no(pre_post)
@@ -2837,7 +2888,12 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
 
     pre_features = [c for c in pre.columns if c not in pre_cols_exclude]
     echo_features = [c for c in eco.columns if c not in echo_cols_exclude and c not in pre_features]
-    engineered = ["cirurgia_combinada", "peso_procedimento", "thoracic_aorta_flag"]
+    engineered = [
+        "cirurgia_combinada",
+        "peso_procedimento",
+        "thoracic_aorta_flag",
+        *MISSINGNESS_INDICATOR_COLUMNS,
+    ]
     feature_columns = pre_features + echo_features + engineered
     feature_columns = [c for c in feature_columns if c in pre_post.columns]
 

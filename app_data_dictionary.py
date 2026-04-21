@@ -11,6 +11,7 @@ from risk_data import (
     FLAT_ALIAS_TO_APP_COLUMNS,
     FLAT_PREOP_ALLOWED_COLUMNS,
     LITERAL_NONE_IS_VALID_COLUMNS,
+    MISSINGNESS_INDICATOR_SPECS,
     MISSING_TOKENS,
     OPTIONAL_SOURCE_TABLES,
     REQUIRED_SOURCE_TABLES,
@@ -37,6 +38,24 @@ ENGINEERED_COLUMNS = {
         "definition": "Derived flag for thoracic-aorta procedures.",
         "unit": "0/1",
         "transformation": "Derived from Surgery using risk_data.thoracic_aorta_surgery.",
+    },
+    "missing_renal_labs": {
+        "domain": "Laboratory",
+        "definition": "Panel-level indicator that at least one renal laboratory input was missing.",
+        "unit": "0/1",
+        "transformation": "Derived before imputation from Creatinine (mg/dL) and Cr clearance, ml/min *.",
+    },
+    "missing_cbc_labs": {
+        "domain": "Laboratory",
+        "definition": "Panel-level indicator that at least one complete blood count input was missing.",
+        "unit": "0/1",
+        "transformation": "Derived before imputation from Hematocrit, WBC Count, and Platelet Count.",
+    },
+    "missing_coagulation_labs": {
+        "domain": "Laboratory",
+        "definition": "Panel-level indicator that at least one coagulation laboratory input was missing.",
+        "unit": "0/1",
+        "transformation": "Derived before imputation from INR and PTT.",
     },
 }
 
@@ -314,7 +333,7 @@ def get_reading_rules_dataframe(language: str = "English") -> pd.DataFrame:
     rows = [
         {
             "Rule": "Accepted sources",
-            "Current behavior": ".xlsx/.xls/.db/.sqlite multi-table sources; .csv/.parquet flat sources.",
+            "Current behavior": ".xlsx/.xls/.db/.sqlite multi-table sources; .csv/.parquet and single-sheet .xlsx/.xls flat sources.",
             "Code source": "risk_data.prepare_master_dataset",
         },
         {
@@ -356,6 +375,14 @@ def get_reading_rules_dataframe(language: str = "English") -> pd.DataFrame:
             "Rule": "Clinical plausibility checks",
             "Current behavior": f"{len(_CLINICAL_PLAUSIBILITY_RANGES)} numeric columns have range rescue/clearing after parse_number.",
             "Code source": "risk_data._CLINICAL_PLAUSIBILITY_RANGES",
+        },
+        {
+            "Rule": "Missingness indicators",
+            "Current behavior": (
+                f"{len(MISSINGNESS_INDICATOR_SPECS)} conservative panel-level "
+                "laboratory missingness indicators are derived before imputation."
+            ),
+            "Code source": "risk_data.MISSINGNESS_INDICATOR_SPECS",
         },
         {
             "Rule": "Multi-sheet patient matching",

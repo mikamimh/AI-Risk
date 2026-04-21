@@ -25,6 +25,7 @@ from model_metadata import assess_input_completeness
 from risk_data import (
     BLANK_MEANS_NO_COLUMNS,
     MISSING_TOKENS,
+    add_missingness_indicators,
     is_combined_surgery,
     normalize_arrhythmia_recent_value,
     normalize_coronary_symptom_value,
@@ -125,6 +126,7 @@ def _build_input_row(feature_columns, form: Dict[str, object]) -> pd.DataFrame:
                 row[c] = v
 
     out = pd.DataFrame([row])
+    out = add_missingness_indicators(out)
     return out
 
 

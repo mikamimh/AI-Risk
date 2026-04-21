@@ -57,6 +57,7 @@ from explainability import ModelExplainer, show_explainability_ui
 from modeling import clean_features, train_and_select_model
 from risk_data import (
     FLAT_ALIAS_TO_APP_COLUMNS,
+    MISSINGNESS_INDICATOR_COLUMNS,
     PreparedData,
     REQUIRED_SOURCE_TABLES,
     is_combined_surgery,
@@ -1275,6 +1276,7 @@ def _feature_group(base_feature: str) -> str:
     lab = {
         "Weight (kg)", "Height (cm)", "Cr clearance, ml/min *", "Creatinine (mg/dL)", "Hematocrit (%)",
         "WBC Count (10³/μL)", "Platelet Count (cells/μL)", "INR", "PTT", "KDIGO †",
+        *MISSINGNESS_INDICATOR_COLUMNS,
     }
     echo = {
         "Pré-LVEF, %", "PSAP", "TAPSE", "Aortic Stenosis", "Aortic Regurgitation",
@@ -4132,7 +4134,12 @@ elif _active_tab == 1:  # Individual Prediction
         # Use model_input (post clean_features) but restore values that
         # clean_features wrongly converted to NaN (e.g. categorical "No"→NaN).
         # A feature is "informed" if the user provided a value in form_map.
-        _derived = {"cirurgia_combinada", "peso_procedimento", "thoracic_aorta_flag"}
+        _derived = {
+            "cirurgia_combinada",
+            "peso_procedimento",
+            "thoracic_aorta_flag",
+            *MISSINGNESS_INDICATOR_COLUMNS,
+        }
         _completeness_row = model_input.copy()
         for _fc in artifacts.feature_columns:
             if _fc in _completeness_row.columns and pd.isna(_completeness_row.at[_completeness_row.index[0], _fc]):

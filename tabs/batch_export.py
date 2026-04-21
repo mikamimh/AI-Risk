@@ -24,7 +24,7 @@ from ai_risk_inference import (
 from euroscore import euroscore_from_inputs
 from export_helpers import statistical_summary_to_pdf
 from model_metadata import log_analysis
-from risk_data import FLAT_ALIAS_TO_APP_COLUMNS
+from risk_data import FLAT_ALIAS_TO_APP_COLUMNS, MISSINGNESS_INDICATOR_COLUMNS
 from stats_compare import class_risk
 from sts_calculator import calculate_sts_batch
 
@@ -193,7 +193,12 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
             st.success(tr(f"Loaded {len(new_df)} rows × {len(new_df.columns)} columns.", f"Carregadas {len(new_df)} linhas × {len(new_df.columns)} colunas."))
 
             # Show column mapping status (exclude derived features computed by the app)
-            _derived_features = {"cirurgia_combinada", "peso_procedimento", "thoracic_aorta_flag"}
+            _derived_features = {
+                "cirurgia_combinada",
+                "peso_procedimento",
+                "thoracic_aorta_flag",
+                *MISSINGNESS_INDICATOR_COLUMNS,
+            }
             matched_cols = [c for c in artifacts.feature_columns if c in new_df.columns or c in _derived_features]
             missing_cols = [c for c in artifacts.feature_columns if c not in new_df.columns and c not in _derived_features]
             _compat_cols = st.columns(4)
