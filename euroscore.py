@@ -243,10 +243,7 @@ def euroscore_from_row(row: pd.Series) -> float:
     active_endo = ie_val in {"yes", "possible", "active"}
 
     critical = _yes(row.get("Critical preoperative state", np.nan))
-    # LVEF: try preoperative field first, then echocardiogram field as fallback
     lvef = parse_number(row.get("Pré-LVEF, %"))
-    if np.isnan(lvef):
-        lvef = parse_number(row.get("LVEF, %"))
     lv_cat = _lv_category(lvef)
     recent_mi = _recent_mi_from_coronary(row.get("Coronary Symptom"))
 

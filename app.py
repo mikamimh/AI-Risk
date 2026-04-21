@@ -61,6 +61,10 @@ from risk_data import (
     REQUIRED_SOURCE_TABLES,
     is_combined_surgery,
     normalize_arrhythmia_recent_value,
+    normalize_arrhythmia_remote_value,
+    normalize_cva_value,
+    normalize_hf_value,
+    normalize_pneumonia_value,
     parse_number,
     prepare_master_dataset,
     procedure_weight,
@@ -1244,7 +1248,7 @@ def _feature_group(base_feature: str) -> str:
         "Age (years)", "Sex", "Preoperative NYHA", "CCS4", "Diabetes", "PVD", "Previous surgery",
         "Dialysis", "IE", "HF", "Hypertension", "Dyslipidemia", "CVA", "Cancer ≤ 5 yrs",
         "Arrhythmia Remote", "Arrhythmia Recent", "Family Hx of CAD", "Smoking (Pack-year)",
-        "Ex-Smoker (Pack-year)", "Alcohol", "Pneumonia", "Chronic Lung Disease", "Poor mobility",
+        "Alcohol", "Pneumonia", "Chronic Lung Disease", "Poor mobility",
         "Critical preoperative state", "Coronary Symptom", "Left Main Stenosis ≥ 50%",
         "Proximal LAD Stenosis ≥ 70%", "No. of Diseased Vessels",
     }
@@ -1253,7 +1257,7 @@ def _feature_group(base_feature: str) -> str:
         "WBC Count (10³/μL)", "Platelet Count (cells/μL)", "INR", "PTT", "KDIGO †",
     }
     echo = {
-        "Pré-LVEF, %", "LVEF, %", "PSAP", "TAPSE", "Aortic Stenosis", "Aortic Regurgitation",
+        "Pré-LVEF, %", "PSAP", "TAPSE", "Aortic Stenosis", "Aortic Regurgitation",
         "Mitral Stenosis", "Mitral Regurgitation", "Tricuspid Regurgitation", "Aortic Root Abscess",
         "AVA (cm²)", "MVA (cm²)", "Aortic Mean gradient (mmHg)", "Mitral Mean gradient (mmHg)",
         "PHT Aortic", "PHT Mitral", "Vena contracta", "Vena contracta (mm)",
@@ -1499,7 +1503,7 @@ def _patient_factor_label(base_feature: str, form_map: Dict[str, object]) -> str
             if float(age) >= 65:
                 return tr("Advanced age", "Idade avançada")
             return tr("Age below 65 years", "Idade abaixo de 65 anos")
-    if base_feature in {"Pré-LVEF, %", "LVEF, %"}:
+    if base_feature == "Pré-LVEF, %":
         lvef = parse_number(val)
         if pd.notna(lvef):
             if float(lvef) <= 40:
@@ -1642,7 +1646,7 @@ def data_quality_alerts(form_map: Dict[str, object], prepared) -> list[tuple[str
     weight = parse_number(form_map.get("Weight (kg)"))
     height = parse_number(form_map.get("Height (cm)"))
     creatinine = parse_number(form_map.get("Creatinine (mg/dL)"))
-    lvef = parse_number(form_map.get("LVEF, %"))
+    lvef = parse_number(form_map.get("Pré-LVEF, %"))
     psap = parse_number(form_map.get("PSAP"))
     hct = parse_number(form_map.get("Hematocrit (%)"))
 
@@ -3882,35 +3886,27 @@ elif _active_tab == 1:  # Individual Prediction
         st.markdown(tr("**Comorbidities**", "**Comorbidades**"))
         cx1, cx2, cx3, cx4 = st.columns(4)
         with cx1:
-            hf = st.selectbox(tr("Heart failure (HF)", "Insuficiência cardíaca (HF)"), yn_options, index=0, help=hp("Clinical diagnosis of heart failure before surgery. Usually associated with worse functional reserve.", "Diagnóstico clínico de insuficiência cardíaca antes da cirurgia. Geralmente associa-se a pior reserva funcional."))
+            hf = st.selectbox(tr("Heart failure (HF)", "Insuficiência cardíaca (HF)"), [tr("None", "Nenhuma"), tr("Acute", "Aguda"), tr("Chronic", "Crônica"), tr("Both", "Ambas")], index=0, help=hp("Clinical diagnosis of heart failure before surgery. Specify timing: Acute, Chronic, or Both.", "Diagnóstico clínico de insuficiência cardíaca antes da cirurgia. Especifique: Aguda, Crônica ou Ambas."))
             htn = st.selectbox(tr("Hypertension", "Hipertensão"), yn_options, index=0, help=hp("History of systemic arterial hypertension.", "História de hipertensão arterial sistêmica."))
             dlp = st.selectbox(tr("Dyslipidemia", "Dislipidemia"), yn_options, index=0, help=hp("Presence of dyslipidemia or lipid-lowering treatment.", "Presença de dislipidemia ou uso de tratamento redutor de lipídios."))
             diabetes_pt = st.selectbox(tr("Diabetes", "Diabetes"), [tr("No", "Não"), "Oral", tr("Insulin", "Insulina"), tr("Diet", "Dieta"), tr("No Control Method", "Sem método de controle")], index=0, help=hp("Diabetes treatment category. Insulin usually indicates more severe metabolic disease in risk models.", "Categoria de tratamento do diabetes. Uso de insulina costuma indicar doença metabólica mais grave nos modelos de risco."))
         with cx2:
-            cva = st.selectbox(tr("Cerebrovascular disease (CVA)", "Doença cerebrovascular (CVA)"), yn_options, index=0, help=hp("History of stroke or cerebrovascular disease.", "História de AVC ou doença cerebrovascular."))
+            cva = st.selectbox(tr("Cerebrovascular disease (CVA)", "Doença cerebrovascular (CVA)"), [tr("No", "Não"), tr("≤ 30 days", "≤ 30 dias"), tr("≥ 30 days", "≥ 30 dias"), tr("Timing unk", "Timing desconhecido"), "TIA", tr("Other CVD", "Outra DCV")], index=0, help=hp("History of stroke or cerebrovascular disease. Specify timing when known.", "História de AVC ou doença cerebrovascular. Especifique o timing quando conhecido."))
             pvd2 = st.selectbox(tr("Peripheral vascular disease (PVD)", "Doença vascular periférica (PVD)"), yn_options, index=0, key="pvd_comorb", help=hp("Peripheral arterial disease. In EuroSCORE II it is used as an approximation of extracardiac arteriopathy.", "Doença arterial periférica. No EuroSCORE II é usada como aproximação de extracardiac arteriopathy."))
             cancer5 = st.selectbox(tr("Cancer <= 5 years", "Câncer <= 5 anos"), yn_options, index=0, help=hp("History of cancer diagnosed or treated within the last 5 years.", "História de câncer diagnosticado ou tratado nos últimos 5 anos."))
             dialysis = st.selectbox(tr("Dialysis", "Diálise"), yn_options, index=0, help=hp("Indicates established dialysis therapy. Strong marker of severe renal dysfunction.", "Indica terapia dialítica estabelecida. Marcador forte de disfunção renal grave."))
         with cx3:
-            arr_rem = st.selectbox(tr("Remote arrhythmia", "Arritmia remota"), yn_options, index=0, help=hp("Past history of arrhythmia not active in the immediate perioperative period.", "História pregressa de arritmia sem atividade imediata no perioperatório."))
-            arr_rec = st.selectbox(tr("Recent arrhythmia", "Arritmia recente"), yn_options, index=0, help=hp("Recent arrhythmia before surgery, suggesting greater electrical instability.", "Arritmia recente antes da cirurgia, sugerindo maior instabilidade elétrica."))
+            _arrhythmia_options = ["None", tr("Atrial Fibrillation", "Fibrilação Atrial"), tr("Atrial Flutter", "Flutter Atrial"), "V. Tach / V. Fib", tr("3rd Degree Block", "Bloqueio 3º Grau")]
+            arr_rem = st.selectbox(tr("Remote arrhythmia", "Arritmia remota"), _arrhythmia_options, index=0, help=hp("Past arrhythmia type. 'None' means no history of arrhythmia.", "Tipo de arritmia pregressa. 'None' indica ausência de histórico de arritmia."))
+            arr_rec = st.selectbox(tr("Recent arrhythmia", "Arritmia recente"), _arrhythmia_options, index=0, help=hp("Recent arrhythmia before surgery. 'None' means no recent arrhythmia.", "Arritmia recente antes da cirurgia. 'None' indica ausência de arritmia recente."))
             fam_cad = st.selectbox(tr("Family history of CAD", "História familiar de DAC"), yn_options, index=0, help=hp("Family history of coronary artery disease.", "História familiar de doença arterial coronariana."))
             ie_pt = st.selectbox(tr("Active/probable endocarditis", "Endocardite ativa/provável"), [tr("No", "Não"), tr("Yes", "Sim"), tr("Possible", "Possível")], index=0, help=hp("Active or probable infective endocarditis at the time of surgery. In this app, 'Possible' is treated as positive for EuroSCORE II operationalization.", "Endocardite infecciosa ativa ou provável no momento da cirurgia. Neste app, 'Possível' é tratada como positiva na operacionalização do EuroSCORE II."))
         with cx4:
             smoker = st.selectbox(tr("Smoking", "Tabagismo"), [tr("Never", "Nunca"), tr("Current", "Atual"), tr("Former", "Ex-tabagista")], index=0, help=hp("Smoking status. Active or former smoking may reflect pulmonary and vascular risk burden.", "Situação tabágica. Tabagismo atual ou prévio pode refletir maior carga de risco pulmonar e vascular."))
             _smoker_en = str(smoker).strip().lower()
-            _is_current = _smoker_en in {"atual", "current"}
-            _is_former = _smoker_en in {"ex-tabagista", "former"}
-            if _is_current or _is_former:
-                smoke_pack_years = st.number_input(
-                    tr("Pack-years", "Maços-ano"),
-                    min_value=0.0, max_value=300.0, value=20.0, step=5.0, format="%.0f",
-                    help=hp("Pack-years = (packs/day) × years of smoking. Leave default if unknown.", "Maços-ano = (maços/dia) × anos de tabagismo. Deixe o padrão se desconhecido."),
-                )
-            else:
-                smoke_pack_years = None
+            _smoking_status = "Current" if _smoker_en in {"atual", "current"} else "Former" if _smoker_en in {"ex-tabagista", "former"} else "Never"
             alcohol = st.selectbox(tr("Alcohol", "Álcool"), yn_options, index=0, help=hp("History of relevant alcohol use.", "História de uso relevante de álcool."))
-            recent_pneum = st.selectbox(tr("Recent pneumonia", "Pneumonia recente"), yn_options, index=0, help=hp("Recent pneumonia before surgery, which may indicate active systemic stress or pulmonary compromise.", "Pneumonia recente antes da cirurgia, podendo indicar estresse sistêmico ou comprometimento pulmonar ativo."))
+            recent_pneum = st.selectbox(tr("Recent pneumonia", "Pneumonia recente"), [tr("No", "Não"), tr("Under treatment", "Em tratamento"), tr("Treated", "Tratada")], index=0, help=hp("Recent pneumonia before surgery. Specify if still under treatment or already treated.", "Pneumonia recente antes da cirurgia. Especifique se ainda em tratamento ou já tratada."))
             cpd = st.selectbox(tr("Chronic lung disease", "Doença pulmonar crônica"), yn_options, index=0, help=hp("Chronic pulmonary disease. This usually increases operative risk and is used in EuroSCORE II operationalization.", "Doença pulmonar crônica. Geralmente aumenta o risco operatório e é usada na operacionalização do EuroSCORE II."))
 
         ox1, ox2 = st.columns(2)
@@ -4022,7 +4018,6 @@ elif _active_tab == 1:  # Individual Prediction
             "INR": inr,
             "PTT": ptt,
             "Pré-LVEF, %": lvef,
-            "LVEF, %": lvef,
             "PSAP": psap,
             "TAPSE": tapse,
             "Surgical Priority": urgency_map[urgency_pt],
@@ -4034,19 +4029,18 @@ elif _active_tab == 1:  # Individual Prediction
             "Chronic Lung Disease": yn_pt_to_en(cpd),
             "Poor mobility": yn_pt_to_en(mobility),
             "Critical preoperative state": yn_pt_to_en(critical),
-            "HF": yn_pt_to_en(hf),
+            "HF": normalize_hf_value(hf),
             "Hypertension": yn_pt_to_en(htn),
             "Dyslipidemia": yn_pt_to_en(dlp),
-            "CVA": yn_pt_to_en(cva),
+            "CVA": normalize_cva_value(cva),
             "PVD": yn_pt_to_en(pvd2),
             "Cancer ≤ 5 yrs": yn_pt_to_en(cancer5),
-            "Arrhythmia Remote": yn_pt_to_en(arr_rem),
-            "Arrhythmia Recent": normalize_arrhythmia_recent_value(yn_pt_to_en(arr_rec)),
+            "Arrhythmia Remote": normalize_arrhythmia_remote_value(arr_rem),
+            "Arrhythmia Recent": normalize_arrhythmia_recent_value(arr_rec),
             "Family Hx of CAD": yn_pt_to_en(fam_cad),
-            "Smoking (Pack-year)": str(int(smoke_pack_years)) if _is_current and smoke_pack_years else "Never",
-            "Ex-Smoker (Pack-year)": str(int(smoke_pack_years)) if _is_former and smoke_pack_years else "Never",
+            "Smoking (Pack-year)": _smoking_status,
             "Alcohol": yn_pt_to_en(alcohol),
-            "Pneumonia": yn_pt_to_en(recent_pneum),
+            "Pneumonia": normalize_pneumonia_value(recent_pneum),
             "Anticoagulation/ Antiaggregation": yn_pt_to_en(anticoag_pt),
             "Suspension of Anticoagulation (day)": float(suspension_days),
             "Aortic Stenosis": a_stenosis,
@@ -4976,9 +4970,8 @@ elif _active_tab == 6:  # Subgroups
     _nan_f = pd.Series(np.nan, index=subgroup_df.index)
     _nan_o = pd.Series(np.nan, index=subgroup_df.index, dtype=object)
     subgroup_df["LVEF group"] = [
-        _lvef_group(eco, pre) for eco, pre in zip(
-            subgroup_df["LVEF, %"] if "LVEF, %" in subgroup_df.columns else _nan_f,
-            subgroup_df["Pré-LVEF, %"] if "Pré-LVEF, %" in subgroup_df.columns else _nan_f,
+        _lvef_group(np.nan, pre) for pre in (
+            subgroup_df["Pré-LVEF, %"] if "Pré-LVEF, %" in subgroup_df.columns else _nan_f
         )
     ]
     subgroup_df["Renal function group"] = [

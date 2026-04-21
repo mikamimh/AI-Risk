@@ -472,7 +472,7 @@ def build_sts_input_from_row(row: dict) -> dict:
     d["heartfailtmg"] = _map_heart_failure(g("heart_failure", "HF"))
 
     # LVEF
-    lvef = _safe_float(g("lvef_pre_pct", "LVEF, %"))
+    lvef = _safe_float(g("lvef_pre_pct", "Pré-LVEF, %"))
     d["hdef"] = str(lvef) if lvef is not None else ""
 
     # Labs
@@ -493,7 +493,8 @@ def build_sts_input_from_row(row: dict) -> dict:
     d["hypertn"] = "Yes" if str(g("hypertension", "Hypertension") or "").strip() == "Yes" else ""
     d["dialysis"] = "Yes" if str(g("dialysis_pre", "Dialysis") or "").strip() == "Yes" else ""
     d["pvd"] = "Yes" if str(g("peripheral_vascular_disease", "PVD") or "").strip() == "Yes" else ""
-    d["cva"] = "Yes" if str(g("stroke_history", "CVA") or "").strip() == "Yes" else ""
+    _cva_val = str(g("stroke_history", "CVA") or "").strip()
+    d["cva"] = "Yes" if _cva_val and _cva_val not in ("No", "None", "", "nan") else ""
     d["infendo"] = "Yes" if str(g("infective_endocarditis_pre", "IE") or "").strip() == "Yes" else ""
     d["chrlungd"] = _map_copd(g("copd", "Chronic Lung Disease"))
     d["immsupp"] = ""
@@ -578,7 +579,8 @@ def build_sts_input_from_row(row: dict) -> dict:
     d["tobaccouse"] = ""
     d["alcohol"] = ""
     d["ivdrugab"] = ""
-    d["pneumonia"] = ""
+    _pneum_val = str(g("pneumonia_pre", "Pneumonia") or "").strip()
+    d["pneumonia"] = "Yes" if _pneum_val and _pneum_val not in ("No", "None", "", "nan") else ""
     d["hmo2"] = ""
     d["slpapn"] = ""
 

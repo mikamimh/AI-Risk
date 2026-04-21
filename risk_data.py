@@ -53,6 +53,8 @@ NONE_IS_VALID_COLUMNS = {
 
 LITERAL_NONE_IS_VALID_COLUMNS = NONE_IS_VALID_COLUMNS | {
     "Arrhythmia Recent",
+    "Arrhythmia Remote",
+    "HF",
 }
 
 # Binary history variables where a blank cell in the source data means the
@@ -69,8 +71,6 @@ LITERAL_NONE_IS_VALID_COLUMNS = NONE_IS_VALID_COLUMNS | {
 #   Anticoagulation=Yes; blank = N/A, not zero days.
 BLANK_MEANS_NO_COLUMNS: frozenset = frozenset({
     "Previous surgery",
-    "HF",
-    "Arrhythmia Remote",
     "Family Hx of CAD",
     "Anticoagulation/ Antiaggregation",
 })
@@ -166,6 +166,160 @@ def _normalize_arrhythmia_recent_column(df: pd.DataFrame) -> pd.DataFrame:
         return df
     out = df.copy()
     out["Arrhythmia Recent"] = out["Arrhythmia Recent"].map(normalize_arrhythmia_recent_value)
+    return out
+
+
+ARRHYTHMIA_REMOTE_CANONICAL_VALUES: Dict[str, str] = {
+    "none": "None",
+    "no": "None",
+    "no remote arrhythmia": "None",
+    "sem arritmia remota": "None",
+    "atrial fibrillation": "Atrial Fibrillation",
+    "af": "Atrial Fibrillation",
+    "fa": "Atrial Fibrillation",
+    "atrial flutter": "Atrial Flutter",
+    "flutter": "Atrial Flutter",
+    "v tach / v fib": "V. Tach / V. Fib",
+    "vt/vf": "V. Tach / V. Fib",
+    "ventricular tachycardia": "V. Tach / V. Fib",
+    "ventricular fibrillation": "V. Tach / V. Fib",
+    "third degree block": "3rd Degree Block",
+    "3rd degree block": "3rd Degree Block",
+    "3 degree block": "3rd Degree Block",
+}
+
+
+def normalize_arrhythmia_remote_value(value: object) -> object:
+    """Canonicalize exact Arrhythmia Remote labels without filling blanks."""
+    if pd.isna(value):
+        return value
+    text = str(value).strip()
+    lower = text.lower()
+    if lower in MISSING_TOKENS and lower != "none":
+        return np.nan
+    return ARRHYTHMIA_REMOTE_CANONICAL_VALUES.get(lower, value)
+
+
+def _normalize_arrhythmia_remote_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Canonicalize Arrhythmia Remote before missing-token normalization."""
+    if "Arrhythmia Remote" not in df.columns:
+        return df
+    out = df.copy()
+    out["Arrhythmia Remote"] = out["Arrhythmia Remote"].map(normalize_arrhythmia_remote_value)
+    return out
+
+
+HF_CANONICAL_VALUES: Dict[str, str] = {
+    "none": "None",
+    "no": "None",
+    "nenhuma": "None",
+    "nao": "None",
+    "não": "None",
+    "acute": "Acute",
+    "aguda": "Acute",
+    "chronic": "Chronic",
+    "cronica": "Chronic",
+    "crônica": "Chronic",
+    "both": "Both",
+    "ambas": "Both",
+    "both acute and chronic": "Both",
+    "yes": "Both",
+    "sim": "Both",
+}
+
+
+def normalize_hf_value(value: object) -> object:
+    """Canonicalize HF categorical labels."""
+    if pd.isna(value):
+        return value
+    text = str(value).strip()
+    lower = text.lower()
+    if lower in MISSING_TOKENS and lower != "none":
+        return np.nan
+    return HF_CANONICAL_VALUES.get(lower, value)
+
+
+def _normalize_hf_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "HF" not in df.columns:
+        return df
+    out = df.copy()
+    out["HF"] = out["HF"].map(normalize_hf_value)
+    return out
+
+
+CVA_CANONICAL_VALUES: Dict[str, str] = {
+    "no": "No",
+    "nao": "No",
+    "não": "No",
+    "yes": "≤ 30 days",
+    "sim": "≤ 30 days",
+    "le 30 days": "≤ 30 days",
+    "≤ 30 days": "≤ 30 days",
+    "< 30 days": "≤ 30 days",
+    "30 days or less": "≤ 30 days",
+    "ge 30 days": "≥ 30 days",
+    "≥ 30 days": "≥ 30 days",
+    "> 30 days": "≥ 30 days",
+    "more than 30 days": "≥ 30 days",
+    "timing unk": "Timing unk",
+    "timing unknown": "Timing unk",
+    "unknown timing": "Timing unk",
+    "tia": "TIA",
+    "transient ischemic attack": "TIA",
+    "other cvd": "Other CVD",
+    "other cerebrovascular disease": "Other CVD",
+    "outra dvd": "Other CVD",
+}
+
+
+def normalize_cva_value(value: object) -> object:
+    """Canonicalize CVA categorical labels; legacy 'Yes' maps to '≤ 30 days'."""
+    if pd.isna(value):
+        return value
+    text = str(value).strip()
+    lower = text.lower()
+    if lower in MISSING_TOKENS:
+        return np.nan
+    return CVA_CANONICAL_VALUES.get(lower, value)
+
+
+def _normalize_cva_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "CVA" not in df.columns:
+        return df
+    out = df.copy()
+    out["CVA"] = out["CVA"].map(normalize_cva_value)
+    return out
+
+
+PNEUMONIA_CANONICAL_VALUES: Dict[str, str] = {
+    "no": "No",
+    "nao": "No",
+    "não": "No",
+    "yes": "Under treatment",
+    "sim": "Under treatment",
+    "under treatment": "Under treatment",
+    "em tratamento": "Under treatment",
+    "treated": "Treated",
+    "tratada": "Treated",
+}
+
+
+def normalize_pneumonia_value(value: object) -> object:
+    """Canonicalize Pneumonia categorical labels; legacy 'Yes' maps to 'Under treatment'."""
+    if pd.isna(value):
+        return value
+    text = str(value).strip()
+    lower = text.lower()
+    if lower in MISSING_TOKENS:
+        return np.nan
+    return PNEUMONIA_CANONICAL_VALUES.get(lower, value)
+
+
+def _normalize_pneumonia_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "Pneumonia" not in df.columns:
+        return df
+    out = df.copy()
+    out["Pneumonia"] = out["Pneumonia"].map(normalize_pneumonia_value)
     return out
 
 
@@ -288,8 +442,8 @@ FLAT_ALIAS_TO_APP_COLUMNS = {
     "nyha_pre": "Preoperative NYHA",
     "preoperative_nyha": "Preoperative NYHA",
     "ccs4": "CCS4",
-    "pre_lvef_pct": "LVEF, %",
-    "lvef_pre_pct": "LVEF, %",
+    "pre_lvef_pct": "Pré-LVEF, %",
+    "lvef_pre_pct": "Pré-LVEF, %",
     "hf_class_by_ef": "Classification of Heart Failure According to Ejection Fraction",
     "previous_surgery": "Previous surgery",
     "preoperative_medications": "Preoperative Medications",
@@ -307,7 +461,6 @@ FLAT_ALIAS_TO_APP_COLUMNS = {
     "alcohol_use": "Alcohol",
     "alcohol": "Alcohol",
     "smoking_pack_years": "Smoking (Pack-year)",
-    "ex_smoker_pack_years": "Ex-Smoker (Pack-year)",
     "smoking": "_smoking_status_csv",
     "smoking_status": "_smoking_status_csv",
     "cancer_le_5_years": "Cancer ≤ 5 yrs",
@@ -342,7 +495,7 @@ FLAT_ALIAS_TO_APP_COLUMNS = {
     "inr": "INR",
     "ptt": "PTT",
     "exam_date": "Exam date",
-    "lvef_pct": "LVEF, %",
+    "lvef_pct": "Pré-LVEF, %",
     "aortic_stenosis": "Aortic Stenosis",
     "aortic_stenosis_pre": "Aortic Stenosis",
     "aortic_mean_gradient_mmhg": "Aortic Mean gradient (mmHg)",
@@ -415,7 +568,6 @@ FLAT_PREOP_ALLOWED_COLUMNS = {
     "Coronary Symptom",
     "Preoperative NYHA",
     "CCS4",
-    "LVEF, %",
     "Pré-LVEF, %",
     "Classification of Heart Failure According to Ejection Fraction",
     "Previous surgery",
@@ -429,7 +581,6 @@ FLAT_PREOP_ALLOWED_COLUMNS = {
     "PVD",
     "Alcohol",
     "Smoking (Pack-year)",
-    "Ex-Smoker (Pack-year)",
     "Cancer ≤ 5 yrs",
     "Family Hx of CAD",
     "Anticoagulation/ Antiaggregation",
@@ -595,7 +746,7 @@ def parse_number(
 # parsing errors (orders-of-magnitude off), NOT to reject physiological
 # outliers. A value that is merely abnormal must still pass.
 _CLINICAL_PLAUSIBILITY_RANGES: Dict[str, Tuple[float, float]] = {
-    "LVEF, %": (1.0, 100.0),
+    "Pré-LVEF, %": (1.0, 100.0),
     "Hematocrit (%)": (1.0, 100.0),
     "Creatinine (mg/dL)": (0.05, 50.0),
     "PSAP": (0.0, 250.0),
@@ -2230,6 +2381,10 @@ def normalize_external_dataset(
 
     df, column_mapping = canonicalize_external_columns(df)
     df = _normalize_arrhythmia_recent_column(df)
+    df = _normalize_arrhythmia_remote_column(df)
+    df = _normalize_hf_column(df)
+    df = _normalize_cva_column(df)
+    df = _normalize_pneumonia_column(df)
     df = _normalize_suspension_anticoagulation_days_column(df)
     df, token_summary = normalize_external_tokens(df)
     df, unit_summary = normalize_external_units(df)
@@ -2344,16 +2499,14 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
 
     data = _normalize_flat_columns(df)
 
-    # Expand simplified smoking status into the two pack-year columns
+    # Expand simplified smoking status into the canonical status column
     if "_smoking_status_csv" in data.columns:
         _status = data["_smoking_status_csv"].astype(str).str.strip().str.lower()
         if "Smoking (Pack-year)" not in data.columns:
             data["Smoking (Pack-year)"] = _status.map(
-                lambda v: "30" if v == "current" else "Never"
-            )
-        if "Ex-Smoker (Pack-year)" not in data.columns:
-            data["Ex-Smoker (Pack-year)"] = _status.map(
-                lambda v: "20" if v in {"former", "ex-smoker"} else "Never"
+                lambda v: "Current" if v == "current"
+                else "Former" if v in {"former", "ex-smoker"}
+                else "Never"
             )
         data.drop(columns=["_smoking_status_csv"], inplace=True)
 
@@ -2410,6 +2563,10 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
     # ── Unified normalization ──
     data = _normalize_coronary_symptom_column(data)
     data = _normalize_arrhythmia_recent_column(data)
+    data = _normalize_arrhythmia_remote_column(data)
+    data = _normalize_hf_column(data)
+    data = _normalize_cva_column(data)
+    data = _normalize_pneumonia_column(data)
     data = _normalize_suspension_anticoagulation_days_column(data)
     data = _impute_blank_as_none(data)
     data, ingestion_report = normalize_dataframe(data, source_label="flat")
@@ -2560,6 +2717,10 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
     # ── Unified normalization ──
     pre_post = _normalize_coronary_symptom_column(pre_post)
     pre_post = _normalize_arrhythmia_recent_column(pre_post)
+    pre_post = _normalize_arrhythmia_remote_column(pre_post)
+    pre_post = _normalize_hf_column(pre_post)
+    pre_post = _normalize_cva_column(pre_post)
+    pre_post = _normalize_pneumonia_column(pre_post)
     pre_post = _normalize_suspension_anticoagulation_days_column(pre_post)
     pre_post = _impute_blank_as_none(pre_post)
     pre_post, ingestion_report = normalize_dataframe(pre_post, source_label="master")

@@ -199,7 +199,7 @@ def format_metadata_for_display(metadata: dict, language: str = "English") -> pd
 
 # Variables with highest clinical relevance for risk prediction
 HIGH_RELEVANCE_VARIABLES = {
-    "Age (years)", "Sex", "LVEF, %", "Creatinine (mg/dL)", "Cr clearance, ml/min *",
+    "Age (years)", "Sex", "Pré-LVEF, %", "Creatinine (mg/dL)", "Cr clearance, ml/min *",
     "Surgery", "Surgical Priority", "Diabetes", "Dialysis", "Previous surgery",
     "Preoperative NYHA", "Hematocrit (%)",
 }
@@ -481,7 +481,7 @@ def generate_individual_report(
         ("Sex", _tr("Sex", "Sexo")),
         ("Surgery", _tr("Surgery", "Cirurgia")),
         ("Surgical Priority", _tr("Priority", "Prioridade")),
-        ("LVEF, %", "LVEF"),
+        ("Pré-LVEF, %", "LVEF"),
         ("Creatinine (mg/dL)", _tr("Creatinine", "Creatinina")),
         ("Cr clearance, ml/min *", _tr("Cr clearance", "Clearance de Cr")),
         ("Diabetes", "Diabetes"),
