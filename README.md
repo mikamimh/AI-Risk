@@ -76,6 +76,23 @@ Large exports in Comparison, Temporal Validation, and Subgroups are generated la
 
 The same inference core (`ai_risk_inference.py`) is used by all three scoring contexts — individual prediction, batch new-patient prediction, and temporal validation — so the probability computed is identical regardless of how a patient reaches the model.
 
+### Official baseline — v13 (2026-04-21)
+
+**Bundle version:** `2026-04-21-v13-none-semantics` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 61
+
+| Model | AUC | AUPRC | Brier |
+|:--|--:|--:|--:|
+| **RandomForest** *(selected)* | **0.7452** | **0.3401** | **0.1149** |
+| XGBoost | 0.7374 | 0.3320 | 0.1191 |
+| CatBoost | 0.7366 | 0.3066 | 0.1178 |
+| LightGBM | 0.7295 | 0.3702 | 0.1168 |
+| StackingEnsemble | 0.7199 | 0.2859 | 0.1301 |
+| LogisticRegression | 0.7173 | 0.2875 | 0.1254 |
+
+**RandomForest calibration:** intercept = 0.034, slope = 1.013 · **Youden threshold:** 0.094 · **@8% threshold:** Sensitivity 0.912, Specificity 0.350, PPV 0.198, NPV 0.957
+
+**What changed from v12 (2026-03-29):** Semantic corrections — `None` is now a valid clinical value (absence of disease/history) in `Previous surgery`, `HF`, `Arrhythmia Remote`, and `Aortic Stenosis`; blank cells in those columns are correctly canonicalized rather than treated as missing. Explicit `NEVER_FEATURE_COLUMNS` policy (79 columns across four categories). `procedure_group` removed from training and inference (ablation-confirmed: consistently hurts performance at current cohort size). Numeric performance change from v12: AUC −0.0002, AUPRC +0.0001, Brier 0.0000 — indistinguishable from CV noise. Bundle adopted for methodological correctness, not numeric gain.
+
 ### EuroSCORE II
 
 - Calculated locally using the published logistic regression formula with 18 risk factors and 27 coefficients
