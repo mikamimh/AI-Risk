@@ -1514,6 +1514,85 @@ def audit_surgery_coverage(surgery_series: "pd.Series") -> dict:
     }
 
 
+_PREV_SURG_YEAR_PAT = re.compile(r"\(\s*\d{4}\s*\)")
+_PREV_SURG_REPEAT_PAT = re.compile(r"\(\s*x\s*(\d+)\s*\)", re.IGNORECASE)
+
+
+def parse_previous_surgery(text: object) -> dict:
+    """Parse a Previous surgery free-text value into structured audit fields.
+
+    Grammar conventions observed in the dataset:
+        ;      → separates distinct surgical episodes (different operating times)
+        +      → same-time combined procedures within one episode
+        (YYYY) → year annotation for an episode
+        (xN)   → repetition marker: procedure was performed N times
+
+    "No", blank, or any MISSING_TOKEN → no prior surgery.
+
+    Returns
+    -------
+    dict with keys:
+        any               : bool — True if any prior surgery is documented
+        count_est         : int  — estimated episode count (;-segments, xN expanded)
+        has_combined      : bool — True if '+' joins procedures in an episode
+        has_repeat_marker : bool — True if (xN) pattern is present
+        has_year_marker   : bool — True if (YYYY) pattern is present
+    """
+    _default = {
+        "any": False, "count_est": 0,
+        "has_combined": False, "has_repeat_marker": False, "has_year_marker": False,
+    }
+    if pd.isna(text):
+        return _default
+    txt = str(text).strip()
+    if not txt or txt.lower() in MISSING_TOKENS or txt.lower() == "no":
+        return _default
+
+    has_year_marker = bool(_PREV_SURG_YEAR_PAT.search(txt))
+    has_repeat_marker = bool(_PREV_SURG_REPEAT_PAT.search(txt))
+    has_combined = "+" in txt
+
+    episodes = [ep.strip() for ep in txt.split(";") if ep.strip()]
+    count_est = 0
+    for ep in episodes:
+        m = _PREV_SURG_REPEAT_PAT.search(ep)
+        if m:
+            count_est += int(m.group(1))
+        else:
+            count_est += 1
+
+    return {
+        "any": True,
+        "count_est": count_est,
+        "has_combined": has_combined,
+        "has_repeat_marker": has_repeat_marker,
+        "has_year_marker": has_year_marker,
+    }
+
+
+_PREV_SURG_AUDIT_COLS = [
+    "previous_surgery_any",
+    "previous_surgery_count_est",
+    "previous_surgery_has_combined",
+    "previous_surgery_has_repeat_marker",
+    "previous_surgery_has_year_marker",
+]
+
+
+def _add_previous_surgery_audit_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive 5 audit-only columns from Previous surgery. Not model features."""
+    if "Previous surgery" not in df.columns:
+        return df
+    out = df.copy()
+    parsed = out["Previous surgery"].map(parse_previous_surgery)
+    out["previous_surgery_any"] = parsed.map(lambda d: d["any"])
+    out["previous_surgery_count_est"] = parsed.map(lambda d: d["count_est"])
+    out["previous_surgery_has_combined"] = parsed.map(lambda d: d["has_combined"])
+    out["previous_surgery_has_repeat_marker"] = parsed.map(lambda d: d["has_repeat_marker"])
+    out["previous_surgery_has_year_marker"] = parsed.map(lambda d: d["has_year_marker"])
+    return out
+
+
 def split_surgery_procedures(text: object) -> List[str]:
     s = _norm_text(text)
     if not s:
@@ -2967,6 +3046,7 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
     # Interpret blank as implicit "No" for binary history columns where the
     # source data convention is: present → documented; absent → left blank.
     data = _impute_blank_as_no(data)
+    data = _add_previous_surgery_audit_cols(data)
 
     exclude_cols = set(NEVER_FEATURE_COLUMNS)
     allowed_cols = (
@@ -3121,6 +3201,7 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
     # Interpret blank as implicit "No" for binary history columns where the
     # source data convention is: present → documented; absent → left blank.
     pre_post = _impute_blank_as_no(pre_post)
+    pre_post = _add_previous_surgery_audit_cols(pre_post)
 
     pre_cols_exclude = {
         "Name",

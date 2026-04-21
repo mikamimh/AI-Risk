@@ -672,6 +672,24 @@ def compute_data_quality_summary(
         "leaked_into_features": sorted(c for c in feature_columns if c in NEVER_FEATURE_COLUMNS),
     }
 
+    # Previous surgery structured audit (DQ only — columns are never model features)
+    from risk_data import _PREV_SURG_AUDIT_COLS
+    previous_surgery_audit: dict = {}
+    if all(c in df.columns for c in _PREV_SURG_AUDIT_COLS):
+        n = len(df)
+        n_any = int(df["previous_surgery_any"].sum())
+        previous_surgery_audit = {
+            "n_with_prior_surgery": n_any,
+            "pct_with_prior_surgery": round(n_any / n, 4) if n > 0 else 0.0,
+            "n_combined_episode": int(df["previous_surgery_has_combined"].sum()),
+            "n_repeat_marker": int(df["previous_surgery_has_repeat_marker"].sum()),
+            "n_year_marker": int(df["previous_surgery_has_year_marker"].sum()),
+            "mean_count_est_among_redo": (
+                float(df.loc[df["previous_surgery_any"], "previous_surgery_count_est"].mean())
+                if n_any > 0 else 0.0
+            ),
+        }
+
     return {
         "n_total": n_total,
         "n_events": n_events,
@@ -687,6 +705,7 @@ def compute_data_quality_summary(
         "procedure_group_dist": procedure_group_dist,
         "surgery_coverage": surgery_coverage,
         "never_feature_audit": never_feature_audit,
+        "previous_surgery_audit": previous_surgery_audit,
     }
 
 

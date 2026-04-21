@@ -5369,6 +5369,41 @@ elif _active_tab == 7:  # Data Quality
             ]
             st.dataframe(pd.DataFrame(_nf_rows), width="stretch", hide_index=True)
 
+    _ps_audit = _dq.get("previous_surgery_audit", {})
+    if _ps_audit:
+        with st.expander(tr("Previous surgery structured audit", "Auditoria estruturada de cirurgia prévia"), expanded=False):
+            st.caption(tr(
+                "Grammar-aware decomposition of the Previous surgery free-text field. "
+                "These columns are for auditing only — they are not model features.",
+                "Decomposição gramatical do campo de texto livre Cirurgia Prévia. "
+                "Estas colunas são apenas para auditoria — não são features do modelo.",
+            ))
+            _n_any = _ps_audit.get("n_with_prior_surgery", 0)
+            _pct_any = _ps_audit.get("pct_with_prior_surgery", 0.0)
+            _ps_rows = [
+                {
+                    tr("Field", "Campo"): tr("Patients with any prior surgery", "Pacientes com cirurgia prévia"),
+                    tr("Value", "Valor"): f"{_n_any} ({_pct_any:.1%})",
+                },
+                {
+                    tr("Field", "Campo"): tr("Episodes with combined procedures (+)", "Episódios com procedimentos combinados (+)"),
+                    tr("Value", "Valor"): str(_ps_audit.get("n_combined_episode", 0)),
+                },
+                {
+                    tr("Field", "Campo"): tr("Episodes with repeat marker (xN)", "Episódios com marcador de repetição (xN)"),
+                    tr("Value", "Valor"): str(_ps_audit.get("n_repeat_marker", 0)),
+                },
+                {
+                    tr("Field", "Campo"): tr("Episodes with year annotation (YYYY)", "Episódios com marcação de ano (YYYY)"),
+                    tr("Value", "Valor"): str(_ps_audit.get("n_year_marker", 0)),
+                },
+                {
+                    tr("Field", "Campo"): tr("Mean estimated episode count (redo only)", "Contagem média estimada de episódios (apenas redo)"),
+                    tr("Value", "Valor"): f"{_ps_audit.get('mean_count_est_among_redo', 0.0):.2f}",
+                },
+            ]
+            st.dataframe(pd.DataFrame(_ps_rows), width="stretch", hide_index=True)
+
     with st.expander(tr("Analysis audit trail", "Trilha de auditoria"), expanded=False):
         st.caption(tr(
             "Recent analysis events logged by the application.",
