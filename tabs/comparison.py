@@ -437,7 +437,7 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
 
     # ── Begin tab body ───────────────────────────────────────────────────
 
-    st.subheader(tr("Comparison", "Comparison"))
+    st.subheader(tr("Comparison", "Comparação"))
     st.caption(tr(
         "Primary analysis: head-to-head comparison between risk scores in the matched triple cohort. "
         "Supplementary sections cover candidate thresholds, DCA, pairwise analyses, and diagnostics.",

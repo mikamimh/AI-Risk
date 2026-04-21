@@ -229,7 +229,6 @@ def _csv_download_btn(df: pd.DataFrame, filename: str, label: str) -> None:
 
 
 @st.fragment
-@st.fragment
 def _txt_download_btn(text: str, filename: str, label: str) -> None:
     """Text download button isolated in a fragment."""
     st.download_button(label, data=text.encode("utf-8"), file_name=filename, mime="text/plain")
@@ -5074,7 +5073,7 @@ elif _active_tab == 6:  # Subgroups
         with st.expander(tr("Full metrics table (all columns)", "Tabela completa de métricas (todas as colunas)"), expanded=False):
             st.dataframe(_format_ppv_npv(subgroup_metrics), width="stretch", column_config=stats_table_column_config("subgroup"))
 
-        st.markdown(tr("**Exports**", "**Exports**"))
+        st.markdown(tr("**Exports**", "**Exportações**"))
         _sub_dl1, _sub_dl2, _sub_dl3 = st.columns(3)
         with _sub_dl1:
             _csv_download_btn(

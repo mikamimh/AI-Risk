@@ -3508,7 +3508,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         )
                     with _ex_c2:
                         _lazy_tv_export_button(
-                            tr("CSV predictions", "CSV predicoes"),
+                            tr("CSV predictions", "CSV predições"),
                             f"{_tv_export_base}_predictions.csv",
                             "text/csv",
                             "csv",
@@ -3516,7 +3516,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         )
                     with _ex_c3:
                         _lazy_tv_export_button(
-                            tr("PDF report", "Relatorio PDF"),
+                            tr("PDF report", "Relatório PDF"),
                             f"{_tv_export_base}_report.pdf",
                             "application/pdf",
                             "pdf",

@@ -14,30 +14,44 @@ The system reads structured clinical data from hospital electronic records, buil
 | **EuroSCORE II** | Published logistic equation (Nashef et al., 2012) | Computed locally from coefficients |
 | **STS Score** | STS Adult Cardiac Surgery Risk Calculator (Predicted Risk of Mortality) | Obtained via automated queries to the official web calculator |
 
-The app then compares the three scores statistically and provides explainability tools for research and clinical discussion.
+The app then compares the three scores statistically and provides explainability tools for research and clinical discussion. The current model is developed on a local single-center cohort; external generalizability is not assumed and should be evaluated with the Temporal Validation workflow before broader interpretation.
 
 ### Important: this is a research tool
 
-This application is designed to support academic research in risk stratification. It is **not** a clinical decision-support system and should not be used for autonomous clinical decision-making.
+This application is designed to support academic research in risk stratification and structured review of model outputs. It is **not** a clinical decision-support system and should not be used for autonomous clinical decision-making.
 
 ## Interface flow
 
-The app is organised as ten tabs in the following order:
+The app is organised visually as ten tabs in the following order:
 
 | # | Tab | Role |
 |:--|:--|:--|
 | 1 | **Overview** | Organised in five fixed snapshot blocks: **Cohort Snapshot** (n, event rate, surgery profile), **Model Snapshot** (model, version, threshold, calibration method), **Performance Snapshot** (leaderboard with calibrated OOF metrics and per-model Youden thresholds), **Operational Snapshot** (score availability), **Audit Snapshot** (eligibility flow and execution report) |
 | 2 | **Prediction** | Single-patient scoring: AI Risk, EuroSCORE II, and STS Score for one case with per-variable contributions; individual patient report export (Markdown / PDF / XLSX / CSV) covering scores, input completeness, clinical interpretation, risk factors, and methodological notes |
-| 3 | **Batch & Export** | (a) Training dataset export with all three scores and OOF predictions (XLSX/CSV). (b) New-patient batch prediction: upload a clinical file, receive AI Risk + EuroSCORE II + STS Score per row, download CSV/XLSX/Markdown/PDF |
-| 4 | **Comparison** | Head-to-head statistical comparison of AI Risk, EuroSCORE II, and STS Score. Layout: **Main Result** (triple cohort with 95% CI) → **Calibration at a Glance** → **Pairwise** (DeLong + bootstrap ΔAUC) → **Clinical Utility** (DCA + NRI/IDI) → **Export**. Two consolidated primary downloads: **Summary Report** (`_summary.pdf` — curated editorial PDF with main performance, calibration, and pairwise results) and **Full Package** (`_full.zip` — ZIP containing the summary PDF + full Markdown report + structured XLSX + flat CSV). An **Advanced / Raw exports** expander exposes individual format downloads for custom use. Structured XLSX includes numbered sheets (00_README, 01_EXECUTIVE_SUMMARY, 02_MAIN_METRICS, 03_THRESHOLD_PERF, 04_CALIBRATION, 05_PAIRWISE, 06_RECLASSIFICATION). |
-| 5 | **Temporal Validation** | Apply the frozen trained model to an independently uploaded patient cohort. Layout: **Locked Model** → **Cohort Integrity** (upload, chronological check, STS availability) → **Main Validation Result** (locked model + Calibration at a Glance) → **Supplementary** (common cohort, recalibration, case-level predictions, export). Exports: `ai_risk_temporal_{version}_{date}_summary.xlsx`, `_predictions.csv`, `_report.pdf`, `_report.md`. |
-| 6 | **Data Quality** | Missing-data audit, imputation tracking, valve-severity coverage |
-| 7 | **Models** | Plain-language guide to how each candidate algorithm works — how it behaves, its strengths and limitations, and when it typically fails |
-| 8 | **Subgroups** | Performance stratified by clinically relevant subgroups |
-| 9 | **Guide** | Methodological notes, variable mapping, EuroSCORE II approximations; Methods text download (.txt) |
-| 10 | **Dictionary** | Structured dictionary of every variable consumed by the app; CSV download |
+| 3 | **Batch** | Two workflows in one tab. **Research Export** exports the active research cohort with app-calculated AI Risk, EuroSCORE II, STS Score, classes, and OOF predictions (CSV/XLSX). **Batch Prediction** accepts new patient files, reports compatibility KPIs, computes AI Risk + EuroSCORE II and optional STS Score, shows a short preview plus full table in an expander, and exports CSV/XLSX/Markdown/PDF. |
+| 4 | **Comparison** | Head-to-head statistical comparison of AI Risk, EuroSCORE II, and STS Score. Layout: **Operational threshold** → **Main Result — Matched Triple Cohort** → **Calibration at a Glance** → **Threshold Comparison** → probability distributions/diagnostics → **Overall Comparison — Available Data** → **Supplementary Pairwise Comparisons** → **Supplementary Clinical Utility** → **Interpretation & Export**. |
+| 5 | **Temporal Validation** | Apply the frozen trained model to an independently uploaded cohort. Layout: **Locked Model** → **Cohort Integrity** (upload, chronological check, normalization, STS availability) → **Main Validation Result** → **Supplementary / Exploratory** (common cohort when available, recalibration, threshold analysis, case-level predictions) → exports. |
+| 6 | **Data Quality** | Exception-oriented quality panel: top metrics, issues block when missingness/readiness warnings exist, score availability, validation readiness, and long detailed tables inside expanders. |
+| 7 | **Models** | Plain-language guide to how each candidate algorithm works — how it behaves, its strengths and limitations, and when it typically fails. Also includes selected-model predictor/explainability views. |
+| 8 | **Subgroups** | Performance stratified by clinically relevant subgroups with controls, best-subgroup insight, compact table, full table expander, caution flags for small n/events, and CSV/PDF/XLSX exports. |
+| 9 | **Guide** | Methodological notes, variable mapping, EuroSCORE II approximations; Methods text download (.txt). |
+| 10 | **Dictionary** | Live data dictionary generated from the current ingestion code. Shows source/app variables, aliases, missing/blank rules, derived fields, active model usage, and exports CSV plus an XLSX workbook with `Dicionario`, `Aliases_CSV`, and `Regras_de_Leitura`. |
 
 **Model force-selection** is done via the sidebar selectbox (not in a dedicated tab). The sidebar also controls the display language (English / Portuguese).
+
+## Export surfaces
+
+Exports are intentionally grouped by use case:
+
+- **Prediction** exports one individual report in Markdown, PDF, XLSX, and CSV. The report includes the selected AI model probability, EuroSCORE II, STS Score when available, input completeness, imputation detail, clinical interpretation, and audit metadata.
+- **Batch — Research Export** exports the current analytical cohort as CSV/XLSX, including app-calculated scores, risk classes, and OOF predictions from all AI candidate models. The on-screen preview is short; the complete table is inside an expander and in the downloads.
+- **Batch — Batch Prediction** exports new-patient predictions as CSV/XLSX/Markdown/PDF. CSV/XLSX always include the full result table and all AI model prediction columns, even when the UI preview hides per-model columns.
+- **Comparison** has two primary on-demand buttons. **Summary Report** builds a curated PDF with main performance, Calibration at a Glance, threshold classification, and pairwise comparison. **Full Package** builds a ZIP containing `comparison_summary.pdf`, `comparison_full_report.pdf` when PDF support is available, `comparison_full_report.md`, `comparison_tables.xlsx`, `comparison_metrics.csv`, figure data CSVs, and PNG figures for ROC, calibration, and DCA when source data are available. The structured XLSX may include `00_README`, `01_EXECUTIVE_SUMMARY`, `02_MAIN_METRICS`, `03_THRESHOLD_PERF`, `04_CALIBRATION`, `05_PAIRWISE`, `06_RECLASSIFICATION`, `07_CLINICAL_UTILITY`, `08_OVERALL_COMPARE`, `09_ALLPAIRS_FULL`, `10_THRESHOLD_COMPARISON`, and figure-data sheets `11`-`13` depending on data availability.
+- **Temporal Validation** exports `ai_risk_temporal_{version}_{date}_summary.xlsx`, `_predictions.csv`, `_report.pdf`, and `_report.md`. The summary workbook includes cohort summary, performance, pairwise comparison, risk categories, calibration, case-level predictions, common-cohort results when applicable, normalization summary when applicable, and exploratory recalibration/threshold sheets when available.
+- **Subgroups** exports the current subgroup panel as CSV, a summary PDF, and a lazy-built consolidated XLSX (`subgroup_all_panels.xlsx`) with README, summary, compact subgroup metrics, full subgroup metrics, and caution flags.
+- **Dictionary** exports CSV plus `data_dictionary.xlsx` with the live `Dicionario`, accepted flat-file aliases, and current reading rules.
+
+Large exports in Comparison, Temporal Validation, and Subgroups are generated lazily: the first click prepares the file and replaces the same visual slot with the download button. Cached export bytes are invalidated when the relevant model/source/threshold context changes.
 
 ## How each score is computed
 
@@ -266,7 +280,7 @@ The normalization summary is surfaced in:
 
 | File | Role |
 |:--|:--|
-| `app.py` | Streamlit application (UI, tab routing, orchestration) |
+| `app.py` | Streamlit application shell: sidebar/source selection, train/retrain orchestration, shared UI helpers, tab routing, Overview, Prediction, Models, Subgroups, Data Quality, and Dictionary rendering |
 | `ai_risk_inference.py` | Frozen-model inference core shared by individual, batch, and temporal flows |
 | `risk_data.py` | Data loading, normalization, patient matching, feature engineering |
 | `modeling.py` | ML pipeline: preprocessing, training, candidate selection |
@@ -275,14 +289,16 @@ The normalization summary is surfaced in:
 | `sts_cache.py` | STS Score persistent disk cache: TTL, versioning, stale fallback, patient index, ExecutionRecord |
 | `observability.py` | Execution report: RunReport/RunStep data structures, builders, and Streamlit renderers |
 | `bundle_io.py` | Bundle serialization/deserialization (Streamlit module-reload safety) |
+| `tabs/` | Extracted Streamlit tab modules for Batch & Export, Comparison, and Temporal Validation; each receives shared state through `TabContext` |
 | `subgroups.py` | Subgroup assignment (surgery type, LVEF, renal function) and per-subgroup metrics |
 | `report_text.py` | Manuscript-ready Methods and Results text builders |
 | `explainability.py` | SHAP-based model explainability |
 | `stats_compare.py` | Statistical evaluation and model comparison |
 | `model_metadata.py` | Model versioning, audit trail, individual reports; re-exports from export_helpers and temporal_validation |
-| `export_helpers.py` | Statistical summary export. `build_comparison_xlsx()` produces a structured XLSX with numbered sheets (00_README → 06_RECLASSIFICATION). `build_statistical_summary()` generates Markdown with a **Calibration at a Glance** section and a primary-result narrative block. `build_comparison_summary_pdf()` produces a curated editorial PDF (main metrics, calibration, pairwise). `build_comparison_full_package()` returns a ZIP with summary PDF + full Markdown + structured XLSX + flat CSV. The PDF renderer does a full single-pass render of all Markdown elements (headers, tables, bullet lists, paragraphs, horizontal rules). Used by the Comparison tab, individual patient report, batch export, and temporal validation PDF downloads. |
-| `temporal_validation.py` | Temporal cohort helpers: year-quarter range, overlap check, locked-model display, Markdown summary |
-| `variable_dictionary.py` | Structured variable dictionary for documentation |
+| `export_helpers.py` | Statistical and report export helpers. Builds Comparison Summary PDF, Full PDF, Full Package ZIP, structured comparison XLSX with optional DCA/overall/all-pairs/threshold/figure-data sheets, Markdown/CSV/PDF report conversions, and PNG figure exports. Used by Comparison, Prediction, Batch, and Temporal Validation downloads. |
+| `temporal_validation.py` | Temporal validation helper functions: chronology checks, STS availability wording, locked-model display, common-cohort/exploratory summaries, and Markdown report sections |
+| `variable_dictionary.py` | Base clinical variable definitions |
+| `app_data_dictionary.py` | Live app-reading dictionary generated from ingestion constants, aliases, missing-value rules, plausibility ranges, derived variables, and active model features |
 | `config/` | Centralized configuration and hyperparameters |
 
 ## Execution reporting
@@ -379,10 +395,10 @@ When STS coverage is **partial**, STS-based metrics reflect only the eligible su
 | Artefact | Format | Filename suffix | Contents |
 |---|---|---|---|
 | Full report | PDF / Markdown | `_report.pdf` / `_report.md` | Primary results + STS accounting + common cohort + exploratory appendix |
-| Summary tables | XLSX (multi-sheet) | `_summary.xlsx` | Performance, pairwise, calibration, risk categories, common cohort, exploratory recalibration and thresholds |
+| Summary tables | XLSX (multi-sheet) | `_summary.xlsx` | `cohort_summary`, `performance`, `pairwise_comparison`, `risk_categories`, `calibration`, `case_level_predictions`, plus `common_cohort`, `Normalization_Summary`, `Exploratory_Recalibration`, and `Exploratory_Thresholds` when available |
 | Case-level predictions | CSV | `_predictions.csv` | Per-patient scores and risk classes |
-| STS eligibility log | CSV | (inline in XLSX) | One row per patient with eligibility status and reason |
-| STS patient audit | CSV | (inline in XLSX) | Per-eligible-patient traceability: cache vs. live query, query success, parse success, failure stage/reason |
+| STS eligibility log | XLSX | `sts_eligibility.xlsx` | Separate download shown in STS eligibility/detail sections when the eligibility table is available |
+| STS patient audit | XLSX | `sts_patient_audit.xlsx` | Separate download shown with result details when per-patient STS audit records are available |
 
 ### Auditability
 

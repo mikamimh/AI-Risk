@@ -54,7 +54,7 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
 
     # ── Begin original tab body (verbatim) ───────────────────────────────
 
-    st.subheader(tr("Batch & Export", "Batch & Export"))
+    st.subheader(tr("Batch & Export", "Lote e Exportação"))
     st.caption(tr(
         "Research exports for the current cohort and batch prediction for new patient files.",
         "Exports de pesquisa da coorte atual e predição em lote para arquivos de novos pacientes.",
@@ -81,7 +81,7 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
     _top4.metric(tr("STS available", "STS disponível"), f"{_n_sts_current}", border=True)
 
     st.divider()
-    st.markdown(tr("### Research Export", "### Research Export"))
+    st.markdown(tr("### Research Export", "### Exportação de Pesquisa"))
     st.caption(tr(
         "Export the active research cohort with app-calculated AI Risk, EuroSCORE II, STS Score, risk classes, and optional OOF predictions from all AI models.",
         "Exporte a coorte de pesquisa ativa com AI Risk, EuroSCORE II, STS Score, classes de risco e predições OOF opcionais de todos os modelos de IA.",
