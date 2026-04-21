@@ -42,6 +42,10 @@ MISSING_TOKENS = {
     "não informado",
 }
 
+# Pandas treats the literal string "None" as NA by default.  That is unsafe for
+# clinical categorical fields where "None" means absence of disease/condition.
+PANDAS_PRESERVE_NONE_READ_KWARGS = {"keep_default_na": False}
+
 NONE_IS_VALID_COLUMNS = {
     "Aortic Stenosis", "Aortic Regurgitation",
     "Mitral Stenosis", "Mitral Regurgitation",
@@ -49,12 +53,16 @@ NONE_IS_VALID_COLUMNS = {
     "aortic_stenosis_pre", "aortic_regurgitation_pre",
     "mitral_stenosis_pre", "mitral_regurgitation_pre",
     "tricuspid_regurgitation_pre",
+    "aortic_stenosis_post", "aortic_regurgitation_post",
 }
 
 LITERAL_NONE_IS_VALID_COLUMNS = NONE_IS_VALID_COLUMNS | {
     "Arrhythmia Recent",
     "Arrhythmia Remote",
+    "Aortic Root Abscess",
     "HF",
+    "Preoperative Medications",
+    "Previous surgery",
 }
 
 # Binary history variables where a blank cell in the source data means the
@@ -70,7 +78,6 @@ LITERAL_NONE_IS_VALID_COLUMNS = NONE_IS_VALID_COLUMNS | {
 #   "Suspension of Anticoagulation (day)" — numeric, conditional on
 #   Anticoagulation=Yes; blank = N/A, not zero days.
 BLANK_MEANS_NO_COLUMNS: frozenset = frozenset({
-    "Previous surgery",
     "Family Hx of CAD",
     "Anticoagulation/ Antiaggregation",
 })
@@ -78,6 +85,9 @@ BLANK_MEANS_NO_COLUMNS: frozenset = frozenset({
 
 BLANK_MEANS_NONE_COLUMNS: frozenset = frozenset({
     "Aortic Stenosis",
+    "Arrhythmia Remote",
+    "HF",
+    "Previous surgery",
 })
 
 CORONARY_SYMPTOM_CANONICAL_VALUES: Dict[str, str] = {
@@ -295,6 +305,54 @@ def _normalize_hf_column(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+NONE_ABSENCE_CANONICAL_VALUES: Dict[str, str] = {
+    "none": "None",
+    "no": "None",
+    "nao": "None",
+    "nÃ£o": "None",
+    "yes": "Yes",
+    "sim": "Yes",
+}
+
+
+def normalize_previous_surgery_value(value: object) -> object:
+    """Canonicalize explicit no-prior-surgery labels without touching redo text."""
+    if pd.isna(value):
+        return value
+    text = str(value).strip()
+    lower = text.lower()
+    if lower in MISSING_TOKENS and lower != "none":
+        return np.nan
+    return NONE_ABSENCE_CANONICAL_VALUES.get(lower, value)
+
+
+def _normalize_previous_surgery_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "Previous surgery" not in df.columns:
+        return df
+    out = df.copy()
+    out["Previous surgery"] = out["Previous surgery"].map(normalize_previous_surgery_value)
+    return out
+
+
+def normalize_aortic_root_abscess_value(value: object) -> object:
+    """Canonicalize absent aortic-root abscess as the dataset's ``None`` label."""
+    if pd.isna(value):
+        return value
+    text = str(value).strip()
+    lower = text.lower()
+    if lower in MISSING_TOKENS and lower != "none":
+        return np.nan
+    return NONE_ABSENCE_CANONICAL_VALUES.get(lower, value)
+
+
+def _normalize_aortic_root_abscess_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "Aortic Root Abscess" not in df.columns:
+        return df
+    out = df.copy()
+    out["Aortic Root Abscess"] = out["Aortic Root Abscess"].map(normalize_aortic_root_abscess_value)
+    return out
+
+
 CVA_CANONICAL_VALUES: Dict[str, str] = {
     "no": "No",
     "nao": "No",
@@ -443,7 +501,7 @@ def _impute_blank_as_no(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _impute_blank_as_none(df: pd.DataFrame) -> pd.DataFrame:
-    """Fill source blanks with 'None' only for explicitly listed severity fields.
+    """Fill source blanks with 'None' only for explicitly listed fields.
 
     This runs BEFORE normalize_dataframe() so that true blank cells become the
     valid clinical category "None", while textual unknown tokens (e.g.
@@ -1204,6 +1262,11 @@ def is_missing(value: object, column: str | None = None) -> bool:
     return txt_lower in MISSING_TOKENS
 
 
+def contextual_missing_mask(s: pd.Series, column: str | None = None) -> pd.Series:
+    """Return a missing-value mask using the dataset's column semantics."""
+    return s.apply(lambda v: is_missing(v, column=column))
+
+
 @dataclass
 class PostopTiming:
     """Structured representation of a postoperative timing value.
@@ -1893,7 +1956,16 @@ def _load_source_tables(source_path: str) -> Dict[str, pd.DataFrame]:
     ext = Path(source_path).suffix.lower()
     if ext in {".xlsx", ".xls"}:
         xls = pd.ExcelFile(source_path)
-        return {name: _strip_col_whitespace(pd.read_excel(source_path, sheet_name=name)) for name in xls.sheet_names}
+        return {
+            name: _strip_col_whitespace(
+                pd.read_excel(
+                    source_path,
+                    sheet_name=name,
+                    **PANDAS_PRESERVE_NONE_READ_KWARGS,
+                )
+            )
+            for name in xls.sheet_names
+        }
     if ext in {".db", ".sqlite", ".sqlite3"}:
         conn = sqlite3.connect(source_path)
         try:
@@ -1933,7 +2005,12 @@ def _read_csv_auto(path: str, nrows: int | None = None) -> pd.DataFrame:
     for enc in ("utf-8-sig", "cp1252", "latin-1"):
         try:
             return pd.read_csv(
-                path, sep=None, engine="python", nrows=nrows, encoding=enc
+                path,
+                sep=None,
+                engine="python",
+                nrows=nrows,
+                encoding=enc,
+                **PANDAS_PRESERVE_NONE_READ_KWARGS,
             )
         except UnicodeDecodeError as e:
             last_err = e
@@ -1961,7 +2038,12 @@ def _read_flat_excel(path: str, nrows: int | None = None) -> pd.DataFrame:
             "workbooks must include Preoperative, Pre-Echocardiogram, and "
             "Postoperative sheets."
         )
-    df = pd.read_excel(path, sheet_name=xls.sheet_names[0], nrows=nrows)
+    df = pd.read_excel(
+        path,
+        sheet_name=xls.sheet_names[0],
+        nrows=nrows,
+        **PANDAS_PRESERVE_NONE_READ_KWARGS,
+    )
     df.columns = [re.sub(r"\s+", " ", str(c)).strip() for c in df.columns]
     return df
 
@@ -2224,7 +2306,13 @@ def read_external_table_with_fallback(
     last_err: Exception | None = None
     for enc in _ENCODINGS:
         try:
-            df = pd.read_csv(path, sep=None, engine="python", encoding=enc)
+            df = pd.read_csv(
+                path,
+                sep=None,
+                engine="python",
+                encoding=enc,
+                **PANDAS_PRESERVE_NONE_READ_KWARGS,
+            )
             delim = _sniff_csv_delimiter(path, enc)
             meta = ExternalReadMeta(
                 encoding_used=enc,
@@ -2830,9 +2918,12 @@ def normalize_external_dataset(
     df = df_raw.copy()
 
     df, column_mapping = canonicalize_external_columns(df)
+    df = _impute_blank_as_none(df)
+    df = _normalize_previous_surgery_column(df)
     df = _normalize_arrhythmia_recent_column(df)
     df = _normalize_arrhythmia_remote_column(df)
     df = _normalize_hf_column(df)
+    df = _normalize_aortic_root_abscess_column(df)
     df = _normalize_cva_column(df)
     df = _normalize_pneumonia_column(df)
     df = _normalize_suspension_anticoagulation_days_column(df)
@@ -3034,13 +3125,15 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
 
     # ── Unified normalization ──
     data = _normalize_coronary_symptom_column(data)
+    data = _impute_blank_as_none(data)
+    data = _normalize_previous_surgery_column(data)
     data = _normalize_arrhythmia_recent_column(data)
     data = _normalize_arrhythmia_remote_column(data)
     data = _normalize_hf_column(data)
+    data = _normalize_aortic_root_abscess_column(data)
     data = _normalize_cva_column(data)
     data = _normalize_pneumonia_column(data)
     data = _normalize_suspension_anticoagulation_days_column(data)
-    data = _impute_blank_as_none(data)
     data, ingestion_report = normalize_dataframe(data, source_label="flat")
     data = add_missingness_indicators(data)
     # Interpret blank as implicit "No" for binary history columns where the
@@ -3058,6 +3151,10 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
         "Others informations", "Others",
         "Classification of Heart Failure According to Ejection Fraction",
         "Preoperative Medications",
+        # Semantically retained in the analytical dataframe/Data Quality, but
+        # not promoted into the active feature set without a dedicated ablation.
+        "Arrhythmia Recent",
+        "Aortic Root Abscess",
     }
     _engineered = {
         "cirurgia_combinada",
@@ -3070,12 +3167,13 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
         if col_name in _engineered:
             return False
         s = data[col_name]
-        # Count true missing: NaN + MISSING_TOKENS (e.g. "-", "nan", "unknown")
-        is_missing = s.isna() | s.astype(str).str.strip().str.lower().isin(MISSING_TOKENS)
-        if is_missing.sum() / len(s) > 0.95:
+        # Count true missing with column context: literal "None" is a valid
+        # clinical category for valve/HF/arrhythmia fields.
+        is_missing_mask = contextual_missing_mask(s, column=col_name)
+        if is_missing_mask.sum() / len(s) > 0.95:
             return True
         # Zero variance (only 1 unique non-missing value)
-        real_values = s[~is_missing]
+        real_values = s[~is_missing_mask]
         if real_values.nunique() <= 1:
             return True
         return False
@@ -3189,13 +3287,15 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
 
     # ── Unified normalization ──
     pre_post = _normalize_coronary_symptom_column(pre_post)
+    pre_post = _impute_blank_as_none(pre_post)
+    pre_post = _normalize_previous_surgery_column(pre_post)
     pre_post = _normalize_arrhythmia_recent_column(pre_post)
     pre_post = _normalize_arrhythmia_remote_column(pre_post)
     pre_post = _normalize_hf_column(pre_post)
+    pre_post = _normalize_aortic_root_abscess_column(pre_post)
     pre_post = _normalize_cva_column(pre_post)
     pre_post = _normalize_pneumonia_column(pre_post)
     pre_post = _normalize_suspension_anticoagulation_days_column(pre_post)
-    pre_post = _impute_blank_as_none(pre_post)
     pre_post, ingestion_report = normalize_dataframe(pre_post, source_label="master")
     pre_post = add_missingness_indicators(pre_post)
     # Interpret blank as implicit "No" for binary history columns where the
@@ -3228,15 +3328,19 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
         "Others informations", "Others",
         "Classification of Heart Failure According to Ejection Fraction",
         "Preoperative Medications",
+        # Semantically retained in the analytical dataframe/Data Quality, but
+        # not promoted into the active feature set without a dedicated ablation.
+        "Arrhythmia Recent",
+        "Aortic Root Abscess",
     }
     def _too_sparse_or_constant(col_name: str) -> bool:
         if col_name in engineered:
             return False
         s = pre_post[col_name]
-        is_missing = s.isna() | s.astype(str).str.strip().str.lower().isin(MISSING_TOKENS)
-        if is_missing.sum() / len(s) > 0.95:
+        is_missing_mask = contextual_missing_mask(s, column=col_name)
+        if is_missing_mask.sum() / len(s) > 0.95:
             return True
-        real_values = s[~is_missing]
+        real_values = s[~is_missing_mask]
         if real_values.nunique() <= 1:
             return True
         return False

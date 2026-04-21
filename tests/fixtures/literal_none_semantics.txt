@@ -1,0 +1,7 @@
+Name,Surgery,Death,HF,Aortic Regurgitation,Aortic Stenosis,Previous surgery,Preoperative Medications,Aortic Root Abscess
+P1,CABG,No,None,None,None,None,None,None
+P2,CABG,No,Acute,Mild,None,AVR,ACE Inhibitors/ARBs <= 48 hrs,Yes
+P3,CABG,No,None,Unknown,Unknown,Unknown,Unknown,Unknown
+P4,CABG,No,,None,,No,,No
+P5,CABG,Yes,Chronic,None,None,None,None,None
+P6,CABG,No,None,,None,None,,None

@@ -239,7 +239,7 @@ All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converg
 
 - **Numeric normalization** — Brazilian and English numeric conventions are both accepted. Strings like `"1,24%"`, `"1.24%"`, `"1,24"`, and `"1.24"` are normalised to the same float; trailing percent signs are stripped and the value is rescaled when appropriate.
 - **Valve severity** — valve variables accept the ordered set `None < Trivial < Mild < Moderate < Severe`. The literal value **"None" means *no disease*, not missing data** — it is treated as the lowest level of the ordinal scale, not as an NA.
-- **Aortic stenosis blank convention** — for the source `Aortic Stenosis` severity field only, a truly blank cell is normalised to `"None"` because this local echo field records positive stenosis grades explicitly while blank denotes no aortic stenosis. Textual unknown tokens such as `"Unknown"`, `"-"`, or `"N/A"` remain missing. This rule is not applied globally to echo/lab fields or to other valve fields.
+- **None-as-absence clinical categories** — a narrow set of source fields uses the literal value `"None"` as a real clinical absence category rather than unavailable information. This includes valve severities, `HF`, `Arrhythmia Recent`, `Arrhythmia Remote`, `Previous surgery`, `Preoperative Medications`, and `Aortic Root Abscess`. Textual unknown tokens such as `"Unknown"`, `"-"`, or `"N/A"` remain missing. A smaller subset also treats a true blank cell as `"None"` because absence is documented implicitly: `Aortic Stenosis`, `HF`, `Arrhythmia Remote`, and `Previous surgery`. This rule is not applied globally to echo/lab fields or to other valve fields.
 - **Coronary presentation convention** — `Coronary Symptom` is treated as a single coronary-presentation field because it feeds both the local model and established score mappings. It may contain no symptoms, angina presentations, and ACS/MI labels (`Non-STEMI`, `STEMI`). The literal value `"None"` is canonicalized to `"No coronary symptoms"` before generic missing-token handling. True blanks and textual unknown tokens remain missing.
 - **Recent arrhythmia convention** — `Arrhythmia Recent` is a categorical recent-arrhythmia field. The literal value `"None"` is a valid clinical category meaning no recent arrhythmia and is not treated as missing. `"No"` is canonicalized to `"None"` for compatibility with older UI/source entries. True blanks and textual unknown tokens remain missing.
 - **Suspension of anticoagulation days** — `Suspension of Anticoagulation (day)` is a conditional numeric field. Blank, not-informed, and not-applicable values remain missing and are never filled with `0`. Simple recoverable text such as `"> 5"`, `"5 days"`, or `"2d"` is parsed to the numeric day value; ambiguous free text remains missing.
@@ -248,13 +248,10 @@ All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converg
 
   | Variable | Rationale |
   |:--|:--|
-  | `Previous surgery` | Prior cardiac surgery is always charted when present. |
-  | `HF` | Heart failure is assessed in every pre-op evaluation; blank = no HF. |
-  | `Arrhythmia Remote` | Past arrhythmia is documented when present; blank = no known remote arrhythmia. |
   | `Family Hx of CAD` | Family history of CAD is documented when positive; blank = negative. |
   | `Anticoagulation/ Antiaggregation` | Critical for surgical planning — always documented if in use; blank = not on treatment. |
 
-  **Explicitly excluded from this rule:** `Suspension of Anticoagulation (day)` — this is a numeric conditional field (applicable only when `Anticoagulation=Yes`); blank means N/A or not documented, not zero days. `Arrhythmia Recent` is also excluded because `"None"` is a valid categorical value and blank remains missing.
+  **Explicitly excluded from this rule:** `Suspension of Anticoagulation (day)` — this is a numeric conditional field (applicable only when `Anticoagulation=Yes`); blank means N/A or not documented, not zero days. `HF`, `Arrhythmia Remote`, and `Previous surgery` are also excluded from the binary `"No"` fill because their valid absence label is the categorical value `"None"`. `Arrhythmia Recent`, `Preoperative Medications`, and `Aortic Root Abscess` preserve literal `"None"` as clinical absence, but a blank cell remains missing.
 
 - **Column exclusion** — columns with **>95% missing** are dropped before modelling so that degenerate columns never reach the preprocessor or the leaderboard.
 - **Patient matching** — patient name and procedure date are used exclusively for cross-sheet matching and are never passed to the model as predictors.

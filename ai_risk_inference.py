@@ -24,11 +24,17 @@ from modeling import clean_features
 from model_metadata import assess_input_completeness
 from risk_data import (
     BLANK_MEANS_NO_COLUMNS,
+    BLANK_MEANS_NONE_COLUMNS,
     MISSING_TOKENS,
     add_missingness_indicators,
     is_combined_surgery,
+    is_missing,
+    normalize_aortic_root_abscess_value,
+    normalize_arrhythmia_remote_value,
     normalize_arrhythmia_recent_value,
     normalize_coronary_symptom_value,
+    normalize_hf_value,
+    normalize_previous_surgery_value,
     parse_suspension_anticoagulation_days,
     procedure_weight,
     thoracic_aorta_surgery,
@@ -92,6 +98,14 @@ def _build_input_row(feature_columns, form: Dict[str, object]) -> pd.DataFrame:
         row["Coronary Symptom"] = normalize_coronary_symptom_value(row["Coronary Symptom"])
     if "Arrhythmia Recent" in row:
         row["Arrhythmia Recent"] = normalize_arrhythmia_recent_value(row["Arrhythmia Recent"])
+    if "Arrhythmia Remote" in row:
+        row["Arrhythmia Remote"] = normalize_arrhythmia_remote_value(row["Arrhythmia Remote"])
+    if "HF" in row:
+        row["HF"] = normalize_hf_value(row["HF"])
+    if "Previous surgery" in row:
+        row["Previous surgery"] = normalize_previous_surgery_value(row["Previous surgery"])
+    if "Aortic Root Abscess" in row:
+        row["Aortic Root Abscess"] = normalize_aortic_root_abscess_value(row["Aortic Root Abscess"])
     surg = form.get("Surgery", "")
     row["cirurgia_combinada"] = is_combined_surgery(surg)
     row["peso_procedimento"] = procedure_weight(surg)
@@ -104,13 +118,7 @@ def _build_input_row(feature_columns, form: Dict[str, object]) -> pd.DataFrame:
         )
 
     defaults = {col: "No" for col in BLANK_MEANS_NO_COLUMNS}
-    defaults.update({
-        "Aortic Stenosis": "None",
-        "Aortic Regurgitation": "None",
-        "Mitral Stenosis": "None",
-        "Mitral Regurgitation": "None",
-        "Tricuspid Regurgitation": "None",
-    })
+    defaults.update({col: "None" for col in BLANK_MEANS_NONE_COLUMNS})
     # Apply defaults to the dict before constructing the DataFrame so that
     # columns receiving string defaults are not first typed as float64 (NaN),
     # which would trigger a pandas FutureWarning on mixed-type assignment.
@@ -124,6 +132,12 @@ def _build_input_row(feature_columns, form: Dict[str, object]) -> pd.DataFrame:
                 and (_cur is None or (isinstance(_cur, float) and pd.isna(_cur)) or str(_cur).strip() == "")
             ):
                 row[c] = v
+
+    for c, v in list(row.items()):
+        if c in BLANK_MEANS_NO_COLUMNS:
+            continue
+        if is_missing(v, column=c):
+            row[c] = np.nan
 
     out = pd.DataFrame([row])
     out = add_missingness_indicators(out)

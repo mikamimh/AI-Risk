@@ -24,7 +24,11 @@ from ai_risk_inference import (
 from euroscore import euroscore_from_inputs
 from export_helpers import statistical_summary_to_pdf
 from model_metadata import log_analysis
-from risk_data import FLAT_ALIAS_TO_APP_COLUMNS, MISSINGNESS_INDICATOR_COLUMNS
+from risk_data import (
+    FLAT_ALIAS_TO_APP_COLUMNS,
+    MISSINGNESS_INDICATOR_COLUMNS,
+    PANDAS_PRESERVE_NONE_READ_KWARGS,
+)
 from stats_compare import class_risk
 from sts_calculator import calculate_sts_batch
 
@@ -179,12 +183,23 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
         try:
             if batch_file.name.endswith(".csv"):
                 try:
-                    new_df = pd.read_csv(batch_file, sep=None, engine="python")
+                    new_df = pd.read_csv(
+                        batch_file,
+                        sep=None,
+                        engine="python",
+                        **PANDAS_PRESERVE_NONE_READ_KWARGS,
+                    )
                 except pd.errors.ParserError:
                     batch_file.seek(0)
-                    new_df = pd.read_csv(batch_file, sep=None, engine="python", on_bad_lines="skip")
+                    new_df = pd.read_csv(
+                        batch_file,
+                        sep=None,
+                        engine="python",
+                        on_bad_lines="skip",
+                        **PANDAS_PRESERVE_NONE_READ_KWARGS,
+                    )
             else:
-                new_df = pd.read_excel(batch_file)
+                new_df = pd.read_excel(batch_file, **PANDAS_PRESERVE_NONE_READ_KWARGS)
             # Rename snake_case columns to model feature names
             _rename_map = {c: FLAT_ALIAS_TO_APP_COLUMNS[c] for c in new_df.columns if c in FLAT_ALIAS_TO_APP_COLUMNS}
             if _rename_map:

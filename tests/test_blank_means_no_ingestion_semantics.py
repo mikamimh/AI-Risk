@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -5,8 +7,13 @@ from ai_risk_inference import _build_input_row
 import risk_data
 from risk_data import (
     BLANK_MEANS_NO_COLUMNS,
+    BLANK_MEANS_NONE_COLUMNS,
+    _read_csv_auto,
+    contextual_missing_mask,
+    normalize_aortic_root_abscess_value,
     normalize_arrhythmia_recent_value,
     normalize_coronary_symptom_value,
+    normalize_previous_surgery_value,
     parse_suspension_anticoagulation_days,
     prepare_flat_dataset,
 )
@@ -20,7 +27,6 @@ def test_row_inference_applies_blank_means_no_only_to_explicit_history_columns()
 
     for col in BLANK_MEANS_NO_COLUMNS:
         assert row.at[0, col] == "No"
-    assert row.at[0, "Previous surgery"] == "No"
     assert row.at[0, "Hypertension"] != "No"
 
 
@@ -45,10 +51,56 @@ def test_row_inference_preserves_arrhythmia_recent_none_as_valid_value():
     assert row.at[0, "Arrhythmia Recent"] == "None"
 
 
+def test_row_inference_canonicalizes_previous_surgery_absence_as_none():
+    row = _build_input_row(["Previous surgery"], {"Previous surgery": "No"})
+
+    assert row.at[0, "Previous surgery"] == "None"
+
+
+def test_row_inference_canonicalizes_aortic_root_abscess_absence_as_none():
+    row = _build_input_row(["Aortic Root Abscess"], {"Aortic Root Abscess": "No"})
+
+    assert row.at[0, "Aortic Root Abscess"] == "None"
+
+
+def test_row_inference_canonicalizes_hf_and_arrhythmia_remote_absence():
+    row = _build_input_row(
+        ["HF", "Arrhythmia Remote"],
+        {"HF": "No", "Arrhythmia Remote": ""},
+    )
+
+    assert row.at[0, "HF"] == "None"
+    assert row.at[0, "Arrhythmia Remote"] == "None"
+
+
 def test_row_inference_keeps_arrhythmia_recent_blank_missing():
     row = _build_input_row(["Arrhythmia Recent"], {"Arrhythmia Recent": ""})
 
     assert pd.isna(row.at[0, "Arrhythmia Recent"])
+
+
+def test_row_inference_does_not_assume_blank_means_none_for_all_valves():
+    row = _build_input_row(
+        ["Aortic Stenosis", "Aortic Regurgitation"],
+        {"Aortic Stenosis": "", "Aortic Regurgitation": ""},
+    )
+
+    assert row.at[0, "Aortic Stenosis"] == "None"
+    assert pd.isna(row.at[0, "Aortic Regurgitation"])
+
+
+def test_contextual_missing_mask_preserves_literal_none_only_where_valid():
+    values = pd.Series(["None", "Unknown", "", "Mild"])
+
+    valve_mask = contextual_missing_mask(values, column="Aortic Regurgitation")
+    post_valve_mask = contextual_missing_mask(values, column="aortic_regurgitation_post")
+    meds_mask = contextual_missing_mask(values, column="Preoperative Medications")
+    generic_mask = contextual_missing_mask(values, column="Hypertension")
+
+    assert list(valve_mask) == [False, True, True, False]
+    assert list(post_valve_mask) == [False, True, True, False]
+    assert list(meds_mask) == [False, True, True, False]
+    assert list(generic_mask) == [True, True, True, False]
 
 
 @pytest.mark.parametrize(
@@ -64,6 +116,41 @@ def test_row_inference_keeps_arrhythmia_recent_blank_missing():
 )
 def test_coronary_symptom_canonicalizer_is_narrow(raw, expected):
     assert normalize_coronary_symptom_value(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("None", "None"),
+        ("No", "None"),
+        ("AVR", "AVR"),
+        ("Unknown", pd.NA),
+    ],
+)
+def test_previous_surgery_canonicalizer_preserves_absence_without_erasing_redo_text(raw, expected):
+    result = normalize_previous_surgery_value(raw)
+    if pd.isna(expected):
+        assert pd.isna(result)
+    else:
+        assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("None", "None"),
+        ("No", "None"),
+        ("YES", "Yes"),
+        ("Mitral-aortic junction", "Mitral-aortic junction"),
+        ("Unknown", pd.NA),
+    ],
+)
+def test_aortic_root_abscess_canonicalizer_preserves_none_absence(raw, expected):
+    result = normalize_aortic_root_abscess_value(raw)
+    if pd.isna(expected):
+        assert pd.isna(result)
+    else:
+        assert result == expected
 
 
 @pytest.mark.parametrize(
@@ -153,6 +240,8 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
                 "Coronary Symptom": "",
                 "Aortic Stenosis": "",
                 "Aortic Regurgitation": "",
+                "Preoperative Medications": "",
+                "Aortic Root Abscess": "",
             },
             {
                 "Name": "P2",
@@ -169,6 +258,8 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
                 "Coronary Symptom": "Stable Angina",
                 "Aortic Stenosis": "None",
                 "Aortic Regurgitation": "Mild",
+                "Preoperative Medications": "None",
+                "Aortic Root Abscess": "None",
             },
             {
                 "Name": "P3",
@@ -185,6 +276,8 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
                 "Coronary Symptom": "Unknown",
                 "Aortic Stenosis": "Unknown",
                 "Aortic Regurgitation": "",
+                "Preoperative Medications": "Unknown",
+                "Aortic Root Abscess": "Unknown",
             },
             {
                 "Name": "P4",
@@ -201,6 +294,8 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
                 "Coronary Symptom": "None",
                 "Aortic Stenosis": "None",
                 "Aortic Regurgitation": "",
+                "Preoperative Medications": "ACE Inhibitors/ARBs <= 48 hrs",
+                "Aortic Root Abscess": "No",
             },
         ]
     )
@@ -212,13 +307,58 @@ def test_flat_dataset_path_preserves_narrow_blank_means_no_semantics(monkeypatch
     for col in BLANK_MEANS_NO_COLUMNS:
         assert data.at["P1", col] == "No"
     assert pd.isna(data.at["P1", "Arrhythmia Recent"])
+    assert data.at["P1", "Arrhythmia Remote"] == "None"
+    assert data.at["P1", "HF"] == "None"
+    assert data.at["P1", "Previous surgery"] == "None"
     assert pd.isna(data.at["P1", "Suspension of Anticoagulation (day)"])
     assert pd.isna(data.at["P1", "Creatinine (mg/dL)"])
     assert pd.isna(data.at["P1", "Coronary Symptom"])
     assert data.at["P1", "Aortic Stenosis"] == "None"
     assert pd.isna(data.at["P1", "Aortic Regurgitation"])
+    assert pd.isna(data.at["P1", "Preoperative Medications"])
+    assert pd.isna(data.at["P1", "Aortic Root Abscess"])
+    assert data.at["P2", "Preoperative Medications"] == "None"
+    assert data.at["P2", "Aortic Root Abscess"] == "None"
     assert pd.isna(data.at["P3", "Coronary Symptom"])
     assert pd.isna(data.at["P3", "Aortic Stenosis"])
+    assert pd.isna(data.at["P3", "Preoperative Medications"])
+    assert pd.isna(data.at["P3", "Aortic Root Abscess"])
     assert data.at["P3", "Arrhythmia Recent"] == "None"
+    assert data.at["P3", "HF"] == "None"
+    assert data.at["P3", "Previous surgery"] == "None"
     assert data.at["P4", "Coronary Symptom"] == "No coronary symptoms"
     assert data.at["P4", "Arrhythmia Recent"] == "None"
+    assert data.at["P4", "Aortic Root Abscess"] == "None"
+
+
+def test_flat_csv_reader_preserves_literal_none_for_clinical_categories(monkeypatch):
+    source = Path(__file__).parent / "fixtures" / "literal_none_semantics.txt"
+    raw = _read_csv_auto(str(source))
+
+    assert raw.at[0, "HF"] == "None"
+    assert raw.at[0, "Aortic Regurgitation"] == "None"
+    assert raw.at[0, "Previous surgery"] == "None"
+    assert raw.at[0, "Preoperative Medications"] == "None"
+    assert raw.at[0, "Aortic Root Abscess"] == "None"
+
+    monkeypatch.setattr(risk_data, "_read_csv_auto", lambda _path: raw.copy())
+    prepared = prepare_flat_dataset("synthetic.csv")
+    data = prepared.data.set_index("Name")
+
+    assert data.at["P1", "HF"] == "None"
+    assert data.at["P1", "Aortic Regurgitation"] == "None"
+    assert data.at["P1", "Previous surgery"] == "None"
+    assert data.at["P1", "Preoperative Medications"] == "None"
+    assert data.at["P1", "Aortic Root Abscess"] == "None"
+    assert pd.isna(data.at["P3", "Aortic Regurgitation"])
+    assert pd.isna(data.at["P3", "Previous surgery"])
+    assert pd.isna(data.at["P3", "Preoperative Medications"])
+    assert pd.isna(data.at["P3", "Aortic Root Abscess"])
+    assert data.at["P4", "HF"] == "None"
+    assert data.at["P4", "Previous surgery"] == "None"
+    assert pd.isna(data.at["P4", "Preoperative Medications"])
+    assert data.at["P4", "Aortic Root Abscess"] == "None"
+    assert pd.isna(data.at["P6", "Aortic Regurgitation"])
+    assert "Aortic Regurgitation" in prepared.feature_columns
+    assert "HF" in prepared.feature_columns
+    assert {"Aortic Stenosis", "Arrhythmia Remote", "HF", "Previous surgery"} <= set(BLANK_MEANS_NONE_COLUMNS)
