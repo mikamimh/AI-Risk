@@ -3464,6 +3464,10 @@ if _active_tab == 0:  # Overview
         "Cohort composition and descriptive surgical profile for the active dataset.",
         "Composição da coorte e perfil cirúrgico descritivo da base ativa.",
     ))
+    st.caption(tr(
+        "Training data are drawn exclusively from this institution. Performance on external cohorts has not been assessed.",
+        "Os dados de treinamento são exclusivamente desta instituição. O desempenho em coortes externas não foi avaliado.",
+    ))
 
     # ── Surgery profile (descriptive cohort breakdown) ──
     st.markdown(tr("**Surgery profile**", "**Perfil cirúrgico**"))
@@ -3633,6 +3637,37 @@ if _active_tab == 0:  # Overview
                 "Os modelos são comparados por desempenho OOF calibrado via validação cruzada. O limiar de Youden por modelo mostrado aqui é uma referência complementar — não é o limiar operacional padrão do app.",
             )
         )
+        if np.isfinite(_overview_event_rate) and _overview_event_rate > 0:
+            st.caption(tr(
+                f"Event rate in this cohort: {_overview_event_rate*100:.1f}%. "
+                "When events are uncommon, AUPRC is a more sensitive discriminator than AUC-ROC: "
+                "a random classifier's AUPRC baseline equals the prevalence, so gains above that baseline carry greater weight.",
+                f"Taxa de eventos nesta coorte: {_overview_event_rate*100:.1f}%. "
+                "Quando os eventos são pouco frequentes, a AUPRC é um discriminador mais sensível do que a AUC-ROC: "
+                "a AUPRC de um classificador aleatório equivale à prevalência, portanto ganhos acima dessa linha de base têm maior relevância.",
+            ))
+
+    if forced_model != best_model_name:
+        _sel_rationale_en = (
+            f"The active model (**{forced_model}**) was selected manually. "
+            f"The best cross-validated performance during training was observed for **{best_model_name}**. "
+            "Model selection weighs discrimination (AUC, AUPRC), calibration (Brier), and net clinical benefit jointly — not AUC alone."
+        )
+        _sel_rationale_pt = (
+            f"O modelo ativo (**{forced_model}**) foi selecionado manualmente. "
+            f"O melhor desempenho cross-validado no treinamento foi observado em **{best_model_name}**. "
+            "A seleção considera discriminação (AUC, AUPRC), calibração (Brier) e benefício clínico líquido em conjunto — não apenas a AUC."
+        )
+    else:
+        _sel_rationale_en = (
+            f"**{best_model_name}** was selected as the active model based on the best overall cross-validated performance, "
+            "weighing discrimination (AUC, AUPRC), calibration (Brier), and net clinical benefit jointly — not AUC alone."
+        )
+        _sel_rationale_pt = (
+            f"**{best_model_name}** foi selecionado como modelo ativo com base no melhor desempenho global na validação cruzada, "
+            "considerando discriminação (AUC, AUPRC), calibração (Brier) e benefício clínico líquido em conjunto — não apenas a AUC."
+        )
+    st.caption(tr(_sel_rationale_en, _sel_rationale_pt))
 
     # ── 4. Operational Snapshot ─────────────────────────────────────────
     st.divider()
@@ -4703,8 +4738,36 @@ elif _active_tab == 5:  # Model Guide
         )
     )
 
-    st.markdown(tr("**Model explanation table**", "**Tabela explicativa do modelo**"))
+    # ── Top predictors summary ──────────────────────────────────────────
     w, w_kind = model_weight_table(artifacts, prepared, forced_model, top_n=20)
+    if not w.empty and w_kind in ("importance", "coefficient"):
+        _name_col = w.columns[0]
+        _top3_names = w.head(3)[_name_col].tolist()
+        _top3_str = ", ".join(f"**{n}**" for n in _top3_names)
+        if w_kind == "importance":
+            _top_narrative_en = (
+                f"The three variables with the greatest relative importance for this model are {_top3_str}. "
+                "These rankings reflect contribution to model performance, not direct clinical effect size."
+            )
+            _top_narrative_pt = (
+                f"As três variáveis com maior importância relativa neste modelo são {_top3_str}. "
+                "Esses rankings refletem contribuição ao desempenho do modelo, não efeito clínico direto."
+            )
+        else:
+            _top_narrative_en = (
+                f"The three variables with the largest absolute coefficients in this model are {_top3_str}. "
+                "Positive coefficients suggest higher risk; negative suggest lower risk."
+            )
+            _top_narrative_pt = (
+                f"As três variáveis com maiores coeficientes absolutos neste modelo são {_top3_str}. "
+                "Coeficientes positivos sugerem maior risco; negativos sugerem menor risco."
+            )
+        st.markdown(tr("**Top predictors**", "**Principais preditores**"))
+        st.caption(tr(_top_narrative_en, _top_narrative_pt))
+        st.dataframe(w.head(5), width="stretch", column_config=model_table_column_config(w_kind))
+        st.divider()
+
+    st.markdown(tr("**Model explanation table**", "**Tabela explicativa do modelo**"))
     if w_kind == "coefficient":
         st.caption(
             tr(
