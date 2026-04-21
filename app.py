@@ -121,7 +121,12 @@ from model_metadata import (
     is_surrogate_timeline,        # surrogate-year detection for temporal-validation UI
     build_surrogate_timeline_note,
 )
-from variable_dictionary import get_dictionary_dataframe, get_dictionary_by_domain
+from app_data_dictionary import (
+    build_dictionary_xlsx_bytes,
+    get_app_reading_dictionary_dataframe,
+    get_reading_aliases_dataframe,
+    get_reading_rules_dataframe,
+)
 from ai_risk_inference import (
     _get_numeric_columns_from_pipeline,
     _safe_select_features,
@@ -3891,7 +3896,7 @@ elif _active_tab == 1:  # Individual Prediction
             dlp = st.selectbox(tr("Dyslipidemia", "Dislipidemia"), yn_options, index=0, help=hp("Presence of dyslipidemia or lipid-lowering treatment.", "Presença de dislipidemia ou uso de tratamento redutor de lipídios."))
             diabetes_pt = st.selectbox(tr("Diabetes", "Diabetes"), [tr("No", "Não"), "Oral", tr("Insulin", "Insulina"), tr("Diet", "Dieta"), tr("No Control Method", "Sem método de controle")], index=0, help=hp("Diabetes treatment category. Insulin usually indicates more severe metabolic disease in risk models.", "Categoria de tratamento do diabetes. Uso de insulina costuma indicar doença metabólica mais grave nos modelos de risco."))
         with cx2:
-            cva = st.selectbox(tr("Cerebrovascular disease (CVA)", "Doença cerebrovascular (CVA)"), [tr("No", "Não"), tr("≤ 30 days", "≤ 30 dias"), tr("≥ 30 days", "≥ 30 dias"), tr("Timing unk", "Timing desconhecido"), "TIA", tr("Other CVD", "Outra DCV")], index=0, help=hp("History of stroke or cerebrovascular disease. Specify timing when known.", "História de AVC ou doença cerebrovascular. Especifique o timing quando conhecido."))
+            cva = st.selectbox(tr("Cerebrovascular disease (CVA)", "Doença cerebrovascular (CVA)"), [tr("No", "Não"), "<= 30 days", ">= 30 days", tr("Timing unk", "Timing desconhecido"), "TIA", tr("Other CVD", "Outra DCV")], index=0, help=hp("History of stroke or cerebrovascular disease. Specify timing when known.", "História de AVC ou doença cerebrovascular. Especifique o timing quando conhecido."))
             pvd2 = st.selectbox(tr("Peripheral vascular disease (PVD)", "Doença vascular periférica (PVD)"), yn_options, index=0, key="pvd_comorb", help=hp("Peripheral arterial disease. In EuroSCORE II it is used as an approximation of extracardiac arteriopathy.", "Doença arterial periférica. No EuroSCORE II é usada como aproximação de extracardiac arteriopathy."))
             cancer5 = st.selectbox(tr("Cancer <= 5 years", "Câncer <= 5 anos"), yn_options, index=0, help=hp("History of cancer diagnosed or treated within the last 5 years.", "História de câncer diagnosticado ou tratado nos últimos 5 anos."))
             dialysis = st.selectbox(tr("Dialysis", "Diálise"), yn_options, index=0, help=hp("Indicates established dialysis therapy. Strong marker of severe renal dysfunction.", "Indica terapia dialítica estabelecida. Marcador forte de disfunção renal grave."))
@@ -5260,19 +5265,21 @@ elif _active_tab == 7:  # Data Quality
 elif _active_tab == 8:  # Variable Dictionary
     st.subheader(tr("Variable Dictionary", "Dicionário de Variáveis"))
     st.caption(tr(
-        "Formal reference table with clinical definitions, origins, units, and model usage for all variables.",
-        "Tabela de referência formal com definições clínicas, origens, unidades e uso no modelo para todas as variáveis.",
+        "Live reference table generated from the current ingestion code: source columns, accepted aliases, missing-value rules, derived fields, and active model usage.",
+        "Tabela de referencia viva gerada a partir do codigo atual de leitura: colunas de origem, aliases aceitos, regras de ausentes, variaveis derivadas e uso no modelo ativo.",
     ))
 
-    _dict_df = get_dictionary_dataframe(
+    _dict_df = get_app_reading_dictionary_dataframe(
         language,
         model_feature_columns=getattr(artifacts, "feature_columns", None),
     )
-    _domain_col = "Domínio" if language != "English" else "Domain"
+    _alias_df = get_reading_aliases_dataframe(language)
+    _rules_df = get_reading_rules_dataframe(language)
+    _domain_col = "Dominio" if language != "English" else "Domain"
 
     _dict_filter = st.multiselect(
         tr("Filter by domain", "Filtrar por domínio"),
-        _dict_df[_domain_col].unique().tolist(),
+        sorted(_dict_df[_domain_col].dropna().unique().tolist()),
         default=[],
     )
     if _dict_filter:
@@ -5280,8 +5287,26 @@ elif _active_tab == 8:  # Variable Dictionary
     else:
         _dict_display = _dict_df
 
-    st.dataframe(_dict_display, width="stretch")
-    _csv_download_btn(_dict_df, "variable_dictionary.csv", tr("Download dictionary (CSV)", "Baixar dicionário (CSV)"))
+    st.dataframe(_dict_display, width="stretch", hide_index=True)
+
+    _dict_xlsx = build_dictionary_xlsx_bytes(_dict_df, _alias_df, _rules_df)
+    _dl_cols = st.columns([1, 1, 4])
+    with _dl_cols[0]:
+        _bytes_download_btn(
+            _dict_xlsx,
+            "data_dictionary.xlsx",
+            tr("Download XLSX", "Baixar XLSX"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_live_data_dictionary_xlsx",
+        )
+    with _dl_cols[1]:
+        _csv_download_btn(_dict_df, "data_dictionary.csv", tr("Download CSV", "Baixar CSV"))
+
+    with st.expander(tr("Reading rules used by the app", "Regras de leitura usadas pelo app"), expanded=False):
+        st.dataframe(_rules_df, width="stretch", hide_index=True)
+
+    with st.expander(tr("Accepted flat-file aliases", "Aliases aceitos em arquivos planos"), expanded=False):
+        st.dataframe(_alias_df, width="stretch", hide_index=True)
 
 elif _active_tab == 9:  # Temporal Validation
     # Delegated to tabs/temporal_validation.py.  Every dependency the tab

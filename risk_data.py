@@ -149,17 +149,6 @@ ARRHYTHMIA_RECENT_CANONICAL_VALUES: Dict[str, str] = {
 }
 
 
-def normalize_arrhythmia_recent_value(value: object) -> object:
-    """Canonicalize exact Arrhythmia Recent labels without filling blanks."""
-    if pd.isna(value):
-        return value
-    text = str(value).strip()
-    lower = text.lower()
-    if lower in MISSING_TOKENS and lower != "none":
-        return np.nan
-    return ARRHYTHMIA_RECENT_CANONICAL_VALUES.get(lower, value)
-
-
 def _normalize_arrhythmia_recent_column(df: pd.DataFrame) -> pd.DataFrame:
     """Canonicalize Arrhythmia Recent before missing-token normalization."""
     if "Arrhythmia Recent" not in df.columns:
@@ -169,16 +158,22 @@ def _normalize_arrhythmia_recent_column(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-ARRHYTHMIA_REMOTE_CANONICAL_VALUES: Dict[str, str] = {
+# Severity order for multi-value resolution (highest index = most severe)
+_ARRHYTHMIA_SEVERITY = ["None", "Atrial Flutter", "Atrial Fibrillation", "3rd Degree Block", "V. Tach / V. Fib"]
+
+_ARRHYTHMIA_CANONICAL_MAP: Dict[str, str] = {
     "none": "None",
     "no": "None",
     "no remote arrhythmia": "None",
+    "no recent arrhythmia": "None",
     "sem arritmia remota": "None",
+    "sem arritmia recente": "None",
     "atrial fibrillation": "Atrial Fibrillation",
     "af": "Atrial Fibrillation",
     "fa": "Atrial Fibrillation",
     "atrial flutter": "Atrial Flutter",
     "flutter": "Atrial Flutter",
+    "v. tach / v. fib": "V. Tach / V. Fib",
     "v tach / v fib": "V. Tach / V. Fib",
     "vt/vf": "V. Tach / V. Fib",
     "ventricular tachycardia": "V. Tach / V. Fib",
@@ -186,22 +181,64 @@ ARRHYTHMIA_REMOTE_CANONICAL_VALUES: Dict[str, str] = {
     "third degree block": "3rd Degree Block",
     "3rd degree block": "3rd Degree Block",
     "3 degree block": "3rd Degree Block",
+    # Encoding-corrupted variants: superscript "rd" → "??" via latin-1
+    "3?? degree block": "3rd Degree Block",
+    "3? degree block": "3rd Degree Block",
 }
 
+# Keep old name pointing to shared map for backwards compat
+ARRHYTHMIA_REMOTE_CANONICAL_VALUES = _ARRHYTHMIA_CANONICAL_MAP
+ARRHYTHMIA_RECENT_CANONICAL_VALUES = _ARRHYTHMIA_CANONICAL_MAP
 
-def normalize_arrhythmia_remote_value(value: object) -> object:
-    """Canonicalize exact Arrhythmia Remote labels without filling blanks."""
+
+def _canonicalize_single_arrhythmia(token: str) -> str:
+    """Canonicalize one arrhythmia token; unknown tokens returned as-is."""
+    lower = token.strip().lower()
+    if lower in MISSING_TOKENS and lower != "none":
+        return ""
+    # Regex fallback: any '3' followed by non-alpha chars + 'degree block'
+    import re as _re
+    if _re.match(r"3\W{0,4}degree\s+block", lower):
+        return "3rd Degree Block"
+    return _ARRHYTHMIA_CANONICAL_MAP.get(lower, token.strip())
+
+
+def _resolve_arrhythmia(value: object) -> object:
+    """Canonicalize an arrhythmia field that may contain comma-separated values.
+
+    Multi-value entries (e.g. 'Atrial Fibrillation, Atrial Flutter') are
+    resolved to the single most severe canonical category.
+    """
     if pd.isna(value):
         return value
     text = str(value).strip()
-    lower = text.lower()
-    if lower in MISSING_TOKENS and lower != "none":
+    if not text or text.lower() in MISSING_TOKENS and text.lower() != "none":
         return np.nan
-    return ARRHYTHMIA_REMOTE_CANONICAL_VALUES.get(lower, value)
+
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    canonical_parts = [_canonicalize_single_arrhythmia(p) for p in parts]
+    # Drop empty (missing tokens) and "None" unless everything is None
+    non_none = [c for c in canonical_parts if c and c != "None"]
+    if not non_none:
+        return "None"
+    # Return the most severe
+    def _severity(c: str) -> int:
+        try:
+            return _ARRHYTHMIA_SEVERITY.index(c)
+        except ValueError:
+            return len(_ARRHYTHMIA_SEVERITY)  # unknown → treat as most severe
+    return max(non_none, key=_severity)
+
+
+def normalize_arrhythmia_remote_value(value: object) -> object:
+    return _resolve_arrhythmia(value)
+
+
+def normalize_arrhythmia_recent_value(value: object) -> object:
+    return _resolve_arrhythmia(value)
 
 
 def _normalize_arrhythmia_remote_column(df: pd.DataFrame) -> pd.DataFrame:
-    """Canonicalize Arrhythmia Remote before missing-token normalization."""
     if "Arrhythmia Remote" not in df.columns:
         return df
     out = df.copy()
@@ -251,16 +288,22 @@ CVA_CANONICAL_VALUES: Dict[str, str] = {
     "no": "No",
     "nao": "No",
     "não": "No",
-    "yes": "≤ 30 days",
-    "sim": "≤ 30 days",
-    "le 30 days": "≤ 30 days",
-    "≤ 30 days": "≤ 30 days",
-    "< 30 days": "≤ 30 days",
-    "30 days or less": "≤ 30 days",
-    "ge 30 days": "≥ 30 days",
-    "≥ 30 days": "≥ 30 days",
-    "> 30 days": "≥ 30 days",
-    "more than 30 days": "≥ 30 days",
+    # <= 30 days — ASCII canonical + Unicode + encoding-corrupted variants
+    "<= 30 days": "<= 30 days",
+    "≤ 30 days": "<= 30 days",
+    "? 30 days": "<= 30 days",   # ≤ corrupted by latin-1 read
+    "le 30 days": "<= 30 days",
+    "< 30 days": "<= 30 days",
+    "30 days or less": "<= 30 days",
+    "yes": "<= 30 days",          # legacy binary Yes → most conservative assumption
+    "sim": "<= 30 days",
+    # >= 30 days — ASCII canonical + Unicode variants
+    ">= 30 days": ">= 30 days",
+    "≥ 30 days": ">= 30 days",
+    "ge 30 days": ">= 30 days",
+    "> 30 days": ">= 30 days",
+    "more than 30 days": ">= 30 days",
+    # Other categories
     "timing unk": "Timing unk",
     "timing unknown": "Timing unk",
     "unknown timing": "Timing unk",
