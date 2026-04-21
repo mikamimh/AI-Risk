@@ -196,6 +196,17 @@ def _canonicalize_single_arrhythmia(token: str) -> str:
     lower = token.strip().lower()
     if lower in MISSING_TOKENS and lower != "none":
         return ""
+    # Excel preserves superscript ordinal markers such as "3ʳᵈ"; CSV exports
+    # may corrupt them to "3??". Normalize both to the same canonical token.
+    lower = lower.translate(str.maketrans({
+        "ʳ": "r",
+        "ᵈ": "d",
+        "ᵗ": "t",
+        "ʰ": "h",
+        "ˢ": "s",
+        "ⁿ": "n",
+        "ᵒ": "o",
+    }))
     # Regex fallback: any '3' followed by non-alpha chars + 'degree block'
     import re as _re
     if _re.match(r"3\W{0,4}degree\s+block", lower):
@@ -2583,15 +2594,34 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
             raise ValueError("Flat dataset must include a 'morte_30d' column or a 'Death' column that can be converted into the outcome.")
 
     def _parse_pct_score(series: pd.Series) -> pd.Series:
-        """Parse score values like '0,91%', '1.23%', '2,06' → float (as %)."""
-        cleaned = (
-            series.astype(str)
-            .str.strip()
-            .str.rstrip("%")
-            .str.strip()
-            .str.replace(",", ".", regex=False)
+        """Parse score values like '0,91%', '1.23%', '2,06' -> float (as %).
+
+        Excel stores cells formatted as percentages as fractions (6.46% ->
+        0.0646). CSV exports usually contain the visible percentage-point
+        value (6.46). Normalize both representations to percentage points.
+        """
+        raw = series.copy()
+        numeric_mask = raw.map(
+            lambda v: isinstance(v, (int, float, np.integer, np.floating))
+            and not isinstance(v, bool)
         )
-        result = pd.to_numeric(cleaned, errors="coerce")
+
+        result = pd.Series(np.nan, index=series.index, dtype=float)
+        if numeric_mask.any():
+            result.loc[numeric_mask] = pd.to_numeric(raw.loc[numeric_mask], errors="coerce")
+            numeric_vals = result.loc[numeric_mask].dropna()
+            if not numeric_vals.empty and numeric_vals.between(0, 1).mean() >= 0.9:
+                result.loc[numeric_mask] = result.loc[numeric_mask] * 100.0
+
+        if (~numeric_mask).any():
+            cleaned = (
+                raw.loc[~numeric_mask].astype(str)
+                .str.strip()
+                .str.rstrip("%")
+                .str.strip()
+                .str.replace(",", ".", regex=False)
+            )
+            result.loc[~numeric_mask] = pd.to_numeric(cleaned, errors="coerce")
         return result
 
     if "euroscore_sheet" not in data.columns:

@@ -212,6 +212,8 @@ Format selection rule:
 
 For flat Excel, the app reads cell values, not visual formatting. Symbols stored as text (for example `<=`, `>=`, `≤`, `≥`, `³`, `μ`, accented text) are preserved better than in many CSV exports; icons, colors, conditional-formatting arrows, and inserted images are not interpreted as data.
 
+Because XLSX preserves symbols more faithfully, training metrics may differ slightly from a CSV export of the same spreadsheet when the CSV encoding has collapsed distinct values into ambiguous text. For example, `≤ 30 days` and `≥ 30 days` can both become `? 30 days` in a lossy CSV export; in XLSX they remain distinct and are modeled as distinct categories.
+
 **Accepted `Death` / `morte_30d` column values** — the canonical timing-based format is preferred, but boolean-style labels are also accepted as a fallback:
 
 | Value(s) | Interpretation |
