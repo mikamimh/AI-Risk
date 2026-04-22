@@ -71,6 +71,7 @@ def build_model_metadata(
     training_source_file: str = None,
     calibration_method: str = "sigmoid",
     training_data: pd.DataFrame = None,
+    model_version: str = None,
 ) -> dict:
     """Build structured metadata about the current model bundle.
 
@@ -79,6 +80,10 @@ def build_model_metadata(
         training_source_file: filename used when the bundle was trained.
         training_data: prepared DataFrame — used to extract temporal range
             from ``surgery_year`` and ``surgery_quarter`` columns.
+        model_version: explicit version string (preferred — should be the
+            ``model_version`` carried by the loaded bundle's ``bundle_info``).
+            Falls back to :data:`AppConfig.MODEL_VERSION` only when the caller
+            cannot supply a bundle-sourced value (e.g. legacy code paths).
     """
     current_analysis_file = Path(xlsx_path).name
 
@@ -94,7 +99,7 @@ def build_model_metadata(
     event_rate = float(prepared_info.get("positive_rate", 0))
 
     return {
-        "model_version": AppConfig.MODEL_VERSION,
+        "model_version": model_version or AppConfig.MODEL_VERSION,
         "bundle_saved_at": bundle_saved_at or "Unknown",
         "training_source_file": training_source_file or current_analysis_file,
         "current_analysis_file": current_analysis_file,

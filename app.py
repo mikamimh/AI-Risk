@@ -547,7 +547,10 @@ from bundle_io import (
     serialize_bundle as _serialize_bundle,
     deserialize_bundle as _deserialize_bundle,
     normalize_payload as _normalize_payload,
+    bundle_metadata_from_payload as _bundle_metadata_from_payload,
+    assert_bundle_metadata_consistency as _assert_bundle_metadata_consistency,
     BundleSchemaError as _BundleSchemaError,
+    BundleVersionMismatch as _BundleVersionMismatch,
     BUNDLE_SCHEMA_VERSION as _BUNDLE_SCHEMA_VERSION,
 )
 
@@ -1136,12 +1139,9 @@ def load_train_bundle(xlsx_path: str, force_retrain: bool = False, progress_call
             payload = joblib.load(MODEL_CACHE_FILE)
             if payload.get("signature") == sig:
                 payload = _normalize_payload(payload)
-                bundle_info = {
-                    "saved_at": payload.get("saved_at", "Unknown"),
-                    "training_source": payload.get("training_source", Path(xlsx_path).name),
-                    "schema_version": payload["bundle_schema_version"],
-                    "loaded_schema_version": payload["_loaded_schema_version"],
-                }
+                bundle_info = _bundle_metadata_from_payload(
+                    payload, fallback_training_source=Path(xlsx_path).name
+                )
                 return _deserialize_bundle(payload["bundle"]), "Cache local", bundle_info
         except (_BundleSchemaError, Exception):
             pass
@@ -1157,18 +1157,30 @@ def load_train_bundle(xlsx_path: str, force_retrain: bool = False, progress_call
         "training_source": Path(xlsx_path).name,
     }
     joblib.dump(payload, MODEL_CACHE_FILE)
-    return bundle, "Recalculado", {
-        "saved_at": saved_at,
-        "training_source": Path(xlsx_path).name,
-        "schema_version": _BUNDLE_SCHEMA_VERSION,
-        "loaded_schema_version": _BUNDLE_SCHEMA_VERSION,
-    }
+    bundle_info = _bundle_metadata_from_payload(
+        payload, fallback_training_source=Path(xlsx_path).name
+    )
+    # The freshly computed bundle exposes ``best_model_name`` directly on the
+    # in-memory artifacts; ``bundle_metadata_from_payload`` only sees the
+    # serialized dict, so re-stamp the active model name from the live object
+    # to keep the canonical source-of-truth invariant intact.
+    _live_arts = bundle.get("artifacts") if isinstance(bundle, dict) else None
+    if _live_arts is not None and getattr(_live_arts, "best_model_name", None):
+        bundle_info["active_model_name"] = _live_arts.best_model_name
+    return bundle, "Recalculado", bundle_info
 
 
 @st.cache_resource(show_spinner=False)
 def load_cached_bundle_only(xlsx_path: str, _model_version: str = MODEL_VERSION) -> tuple[Dict[str, object] | None, str, dict]:
     sig = _bundle_signature(xlsx_path)
-    empty_info = {"saved_at": "Unknown", "training_source": "Unknown"}
+    empty_info = {
+        "saved_at": "Unknown",
+        "training_source": "Unknown",
+        "model_version": MODEL_VERSION,
+        "active_model_name": None,
+        "dataset_fingerprint": None,
+        "bundle_fingerprint": None,
+    }
     if not MODEL_CACHE_FILE.exists():
         return None, "Sem treino salvo", empty_info
 
@@ -1187,12 +1199,9 @@ def load_cached_bundle_only(xlsx_path: str, _model_version: str = MODEL_VERSION)
         return None, "Cache corrompido", empty_info
 
     raw = payload["bundle"]  # normalize_payload guarantees this is a dict
-    bundle_info = {
-        "saved_at": payload.get("saved_at", "Unknown"),
-        "training_source": payload.get("training_source", Path(xlsx_path).name),
-        "schema_version": payload["bundle_schema_version"],
-        "loaded_schema_version": payload["_loaded_schema_version"],
-    }
+    bundle_info = _bundle_metadata_from_payload(
+        payload, fallback_training_source=Path(xlsx_path).name
+    )
     return _deserialize_bundle(raw), "Cache local", bundle_info
 
 
@@ -3241,6 +3250,35 @@ if _retrained_bundle is not None:
 else:
     bundle, cache_status, bundle_info = load_cached_bundle_only(xlsx_path)
 
+# ---------------------------------------------------------------------------
+# Bundle-version invariant check
+# ---------------------------------------------------------------------------
+# Exports treat ``bundle_info`` as the canonical record of which model
+# generated their numbers.  If the loaded bundle's ``model_version`` does
+# not match the current ``AppConfig.MODEL_VERSION`` (or if its active
+# model name disagrees with the artifacts), surface that loudly here so
+# nothing downstream silently writes a stale version into a CSV/PDF.
+if bundle is not None:
+    try:
+        _assert_bundle_metadata_consistency(
+            bundle_info,
+            artifacts_best_model_name=getattr(bundle.get("artifacts"), "best_model_name", None),
+        )
+    except _BundleVersionMismatch as _bv_err:
+        st.error(
+            tr(
+                f"Bundle metadata inconsistency: {_bv_err}",
+                f"Inconsistência de metadados do bundle: {_bv_err}",
+            )
+        )
+        st.info(
+            tr(
+                "Click 'Train/Retrain models' in the sidebar to regenerate the bundle for the current configuration.",
+                "Clique em 'Treinar / retreinar modelos' na barra lateral para regenerar o bundle com a configuração atual.",
+            )
+        )
+        st.stop()
+
 _status_color = "green" if "local" in cache_status.lower() or "cache" in cache_status.lower() else "orange"
 st.sidebar.markdown(
     f"<small style='color:gray'>{tr('Status', 'Status')}: "
@@ -3366,7 +3404,9 @@ _tab_ctx = TabContext(
     bundle_info=bundle_info,
     xlsx_path=xlsx_path,
     default_threshold=_default_threshold,
-    model_version=MODEL_VERSION,
+    # Source of truth: prefer the bundle's own version (so a future drift
+    # would not silently relabel exports with the current config string).
+    model_version=bundle_info.get("model_version") or MODEL_VERSION,
     has_sts=HAS_STS,
     csv_download_btn=_csv_download_btn,
     txt_download_btn=_txt_download_btn,
@@ -3621,6 +3661,7 @@ if _active_tab == 0:  # Overview
         training_source_file=bundle_info.get("training_source"),
         calibration_method=getattr(artifacts, "calibration_method", "sigmoid"),
         training_data=prepared.data,
+        model_version=bundle_info.get("model_version"),
     )
     with st.expander(tr("Model version details", "Detalhes da versão do modelo"), expanded=False):
         st.dataframe(format_metadata_for_display(_model_meta, language), width="stretch")
@@ -4508,7 +4549,7 @@ elif _active_tab == 1:  # Individual Prediction
             euro_prob=euro_prob,
             sts_prob=sts_prob,
             risk_class=class_risk(ia_prob),
-            model_version=MODEL_VERSION,
+            model_version=bundle_info.get("model_version") or MODEL_VERSION,
             model_name=forced_model,
             completeness=_completeness,
             pos_factors=pos_factors,
@@ -4557,7 +4598,7 @@ elif _active_tab == 1:  # Individual Prediction
         log_analysis(
             analysis_type="individual_prediction",
             source_file="manual_form",
-            model_version=MODEL_VERSION,
+            model_version=bundle_info.get("model_version") or MODEL_VERSION,
             n_patients=1,
             n_imputed=_completeness["n_imputed"],
             completeness_level=_completeness["level"],
@@ -5177,6 +5218,7 @@ elif _active_tab == 7:  # Data Quality
         training_source_file=bundle_info.get("training_source"),
         calibration_method=getattr(artifacts, "calibration_method", "sigmoid"),
         training_data=prepared.data,
+        model_version=bundle_info.get("model_version"),
     )
     _val_checks = check_validation_readiness(_model_meta_dq, language)
 

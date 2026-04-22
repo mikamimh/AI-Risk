@@ -12,6 +12,8 @@ Provides:
 - build_comparison_summary_pdf    — curated editorial PDF (main metrics, calibration, pairwise)
 - build_comparison_full_pdf       — comprehensive PDF (all sections: exec summary, DCA, NRI/IDI, appendix)
 - build_comparison_full_package   — ZIP bytes (summary PDF + full PDF + full MD + XLSX + CSV)
+- build_export_manifest           — single source-of-truth manifest dict for any export
+- manifest_to_md_lines            — render a manifest as Markdown header lines
 - statistical_summary_to_dataframes — Markdown → dict of DataFrames
 - statistical_summary_to_xlsx       — Markdown → XLSX bytes (legacy, flat layout)
 - statistical_summary_to_csv        — Markdown → CSV string
@@ -19,12 +21,100 @@ Provides:
 """
 
 import io
+import json
 import re
-from datetime import datetime
-from typing import Dict, List
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# Export manifest — the canonical metadata block embedded in every export
+# ---------------------------------------------------------------------------
+# Every artifact written to disk (CSV, XLSX, PDF, MD, ZIP) MUST be able to
+# answer four questions without ambiguity:
+#   1. which model_version produced these numbers
+#   2. which active_model_name was scored
+#   3. which threshold (mode + value) was applied
+#   4. which dataset and bundle produced them
+#
+# The manifest below answers all four with a single dict, so callers cannot
+# accidentally mix sources — every export reads from the same builder.
+
+def build_export_manifest(
+    *,
+    export_kind: str,
+    model_version: str,
+    active_model_name: Optional[str],
+    threshold_mode: str,
+    threshold_value: float,
+    dataset_fingerprint: Optional[str] = None,
+    bundle_fingerprint: Optional[str] = None,
+    bundle_saved_at: Optional[str] = None,
+    training_source: Optional[str] = None,
+    current_analysis_file: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return the canonical manifest dict for an export.
+
+    The fields are deliberately flat and JSON-serialisable so the same dict
+    can be embedded in a ZIP entry, written into a Markdown header, or
+    rendered into a PDF/XLSX cover sheet.
+
+    Args:
+        export_kind: short identifier (e.g. ``"comparison"``, ``"temporal_validation"``,
+            ``"batch_prediction"``, ``"individual_report"``).
+        threshold_mode: e.g. ``"clinical_fixed"``, ``"youden"``, ``"locked"``.
+        threshold_value: the numeric probability threshold actually used.
+        dataset_fingerprint / bundle_fingerprint: opaque identifiers from
+            ``bundle_metadata_from_payload`` — pass through unchanged.
+    """
+    manifest = {
+        "export_kind": export_kind,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "model_version": model_version,
+        "active_model_name": active_model_name,
+        "threshold_mode": threshold_mode,
+        "threshold_value": float(threshold_value),
+        "dataset_fingerprint": dataset_fingerprint,
+        "bundle_fingerprint": bundle_fingerprint,
+        "bundle_saved_at": bundle_saved_at,
+        "training_source": training_source,
+        "current_analysis_file": current_analysis_file,
+    }
+    if extra:
+        manifest["extra"] = dict(extra)
+    return manifest
+
+
+def manifest_to_json_bytes(manifest: Dict[str, Any]) -> bytes:
+    """Serialise a manifest to UTF-8 JSON bytes for ZIP embedding."""
+    return json.dumps(manifest, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+
+
+def manifest_to_md_lines(manifest: Dict[str, Any], language: str = "English") -> List[str]:
+    """Render the manifest as Markdown header lines for inline embedding.
+
+    Returned list has no trailing blank line — callers append as needed.
+    """
+    def _tr(en: str, pt: str) -> str:
+        return en if language == "English" else pt
+
+    lines = [
+        f"**{_tr('Model version', 'Versão do modelo')}:** {manifest.get('model_version', 'N/A')}",
+        f"**{_tr('Active model', 'Modelo ativo')}:** {manifest.get('active_model_name') or _tr('N/A', 'N/A')}",
+        f"**{_tr('Threshold', 'Limiar')}:** {manifest.get('threshold_value', 0):.0%} ({manifest.get('threshold_mode', '?')})",
+        f"**{_tr('Generated', 'Gerado em')}:** {str(manifest.get('generated_at', '') or '')[:19].replace('T', ' ')}",
+    ]
+    if manifest.get("training_source"):
+        lines.append(f"**{_tr('Training source', 'Fonte do treino')}:** {manifest['training_source']}")
+    if manifest.get("current_analysis_file"):
+        lines.append(f"**{_tr('Current analysis file', 'Arquivo de análise atual')}:** {manifest['current_analysis_file']}")
+    if manifest.get("bundle_fingerprint"):
+        lines.append(f"**{_tr('Bundle fingerprint', 'Fingerprint do bundle')}:** `{manifest['bundle_fingerprint']}`")
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -1365,6 +1455,7 @@ def build_comparison_full_package(
     roc_plot_df: pd.DataFrame = None,
     calibration_plot_df: pd.DataFrame = None,
     dca_plot_df: pd.DataFrame = None,
+    manifest: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """Build a Full Package ZIP for the Comparison tab.
 
@@ -1457,6 +1548,11 @@ def build_comparison_full_package(
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # Manifest is the canonical metadata block — written first so any
+        # consumer extracting the ZIP sees the version/threshold/model
+        # answer up-front and never has to infer it from filenames.
+        if manifest is not None:
+            zf.writestr("manifest.json", manifest_to_json_bytes(manifest))
         if summary_pdf:
             zf.writestr("comparison_summary.pdf", summary_pdf)
         if full_pdf:

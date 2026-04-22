@@ -159,6 +159,125 @@ def bundle_signature(xlsx_path: str) -> Dict[str, object]:
     }
 
 
+def bundle_metadata_from_payload(
+    payload: Dict[str, object],
+    fallback_training_source: str = "Unknown",
+) -> Dict[str, object]:
+    """Return the canonical ``bundle_info`` dict for a loaded payload.
+
+    This is the **single source of truth** for export-time metadata.  Callers
+    must always read ``model_version`` and ``active_model_name`` from this
+    dict (not from ``AppConfig.MODEL_VERSION`` directly), so an export can
+    never drift from the bundle that produced its data.
+
+    Fields:
+      * ``model_version``      — taken from the persisted ``signature``;
+                                  falls back to the current ``MODEL_VERSION``
+                                  only when no signature is present (legacy /
+                                  in-memory payloads).
+      * ``active_model_name``  — the bundle's ``best_model_name`` (the model
+                                  that was actually trained and selected).
+                                  ``None`` when the inner bundle is not
+                                  deserialized — callers populate this from
+                                  ``artifacts.best_model_name`` after deserialize.
+      * ``saved_at``           — ISO timestamp from disk.
+      * ``training_source``    — filename used at training time.
+      * ``schema_version``     — current bundle schema version.
+      * ``loaded_schema_version`` — what was actually read from disk (≤ current).
+      * ``dataset_fingerprint`` — composite of (xlsx_path, mtime_ns, size)
+                                  from the signature; ``None`` when absent.
+      * ``bundle_fingerprint`` — short hash of the signature block, suitable
+                                  for embedding in audit logs / manifests.
+    """
+    sig = payload.get("signature") if isinstance(payload, dict) else None
+    sig = sig if isinstance(sig, dict) else {}
+
+    inner = payload.get("bundle") if isinstance(payload, dict) else None
+    inner_artifacts = (
+        inner.get("artifacts") if isinstance(inner, dict) else None
+    ) or {}
+    active_model_name = None
+    if isinstance(inner_artifacts, dict):
+        active_model_name = inner_artifacts.get("best_model_name")
+
+    dataset_fp = None
+    if sig.get("xlsx_path") and "xlsx_mtime_ns" in sig and "xlsx_size" in sig:
+        dataset_fp = (
+            f"{sig.get('xlsx_path')}|"
+            f"mtime_ns={sig.get('xlsx_mtime_ns')}|"
+            f"size={sig.get('xlsx_size')}"
+        )
+
+    bundle_fp = None
+    if sig:
+        import hashlib
+        bundle_fp = hashlib.sha1(
+            "|".join(
+                f"{k}={sig.get(k)}"
+                for k in ("xlsx_path", "xlsx_mtime_ns", "xlsx_size", "model_version")
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+
+    return {
+        "model_version": sig.get("model_version") or MODEL_VERSION,
+        "active_model_name": active_model_name,
+        "saved_at": payload.get("saved_at", "Unknown") if isinstance(payload, dict) else "Unknown",
+        "training_source": payload.get("training_source", fallback_training_source) if isinstance(payload, dict) else fallback_training_source,
+        "schema_version": payload.get("bundle_schema_version", BUNDLE_SCHEMA_VERSION) if isinstance(payload, dict) else BUNDLE_SCHEMA_VERSION,
+        "loaded_schema_version": payload.get("_loaded_schema_version", LEGACY_BUNDLE_SCHEMA_VERSION) if isinstance(payload, dict) else LEGACY_BUNDLE_SCHEMA_VERSION,
+        "dataset_fingerprint": dataset_fp,
+        "bundle_fingerprint": bundle_fp,
+    }
+
+
+class BundleVersionMismatch(RuntimeError):
+    """Raised when an export's bundle metadata diverges from the current config.
+
+    The export layer treats the loaded bundle as the source of truth: a
+    divergence here means the cached bundle was loaded but the on-disk
+    config was bumped without retraining.  Failing loudly is preferable to
+    silently emitting a CSV/PDF whose ``model_version`` line lies about
+    what model produced the numbers.
+    """
+
+
+def assert_bundle_metadata_consistency(
+    bundle_info: Dict[str, object],
+    artifacts_best_model_name: str | None = None,
+) -> None:
+    """Fail fast if ``bundle_info`` disagrees with the current config or with
+    the deserialized artifacts.  Called by the export entry points so a
+    divergence can never silently be persisted to disk.
+
+    The check is intentionally narrow:
+
+    * ``bundle_info["model_version"]`` must equal :data:`MODEL_VERSION`
+      (the current ``AppConfig.MODEL_VERSION``).  If they differ, the
+      cache contract that protects exports has been broken — bail.
+    * If both ``bundle_info["active_model_name"]`` and the artifacts'
+      ``best_model_name`` are present, they must match.  Divergence means
+      the metadata block has been mutated independently of the model that
+      actually scored the patients.
+
+    No methodology, threshold, or scientific behavior is touched here.
+    """
+    bi_version = bundle_info.get("model_version") if isinstance(bundle_info, dict) else None
+    if bi_version and bi_version != MODEL_VERSION:
+        raise BundleVersionMismatch(
+            f"Bundle version mismatch: loaded bundle is '{bi_version}' "
+            f"but AppConfig.MODEL_VERSION is '{MODEL_VERSION}'. "
+            f"Retrain the bundle (sidebar → 'Train/Retrain models') before exporting."
+        )
+
+    bi_model = bundle_info.get("active_model_name") if isinstance(bundle_info, dict) else None
+    if bi_model and artifacts_best_model_name and bi_model != artifacts_best_model_name:
+        raise BundleVersionMismatch(
+            f"Active-model mismatch: bundle_info reports '{bi_model}' "
+            f"but artifacts carry '{artifacts_best_model_name}'. "
+            f"Refusing to export to avoid recording the wrong model."
+        )
+
+
 def serialize_bundle(bundle: Dict[str, object]) -> Dict[str, object]:
     """Convert dataclasses to plain dicts for pickle compatibility.
 

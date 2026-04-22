@@ -9,6 +9,7 @@ variables in ``app.py``.
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -36,6 +37,7 @@ from export_helpers import (
     build_comparison_full_pdf,
     build_comparison_summary_pdf,
     build_comparison_xlsx,
+    build_export_manifest,
     build_statistical_summary,
     statistical_summary_to_csv,
     statistical_summary_to_pdf,
@@ -339,6 +341,7 @@ def _cached_full_package(
     roc_plot_df: pd.DataFrame,
     calibration_plot_df: pd.DataFrame,
     dca_plot_df: pd.DataFrame,
+    manifest: dict | None = None,
 ) -> bytes:
     return build_comparison_full_package(
         triple_ci=triple_ci,
@@ -358,6 +361,7 @@ def _cached_full_package(
         roc_plot_df=roc_plot_df,
         calibration_plot_df=calibration_plot_df,
         dca_plot_df=dca_plot_df,
+        manifest=manifest,
     )
 
 
@@ -1304,6 +1308,28 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     _export_date_tag = _dt.datetime.now().strftime("%Y%m%d")
     _export_base = f"ai_risk_comparison_{MODEL_VERSION}_{_export_date_tag}"
 
+    # Canonical manifest — single source of truth for every export emitted
+    # by this tab.  Built once here so the ZIP, the cached helpers, and any
+    # future export entry point all read from the same dict.
+    _bi = ctx.bundle_info if isinstance(ctx.bundle_info, dict) else {}
+    _comparison_manifest = build_export_manifest(
+        export_kind="comparison",
+        model_version=MODEL_VERSION,
+        active_model_name=_bi.get("active_model_name") or forced_model,
+        threshold_mode=("youden" if _use_youden else "clinical_fixed"),
+        threshold_value=float(decision_threshold),
+        dataset_fingerprint=_bi.get("dataset_fingerprint"),
+        bundle_fingerprint=_bi.get("bundle_fingerprint"),
+        bundle_saved_at=_bi.get("saved_at"),
+        training_source=_bi.get("training_source"),
+        current_analysis_file=Path(ctx.xlsx_path).name if ctx.xlsx_path else None,
+        extra={
+            "n_triple": int(len(triple)) if 'triple' in locals() else 0,
+            "default_threshold": float(_default_threshold),
+            "language": language,
+        },
+    )
+
     _calib_df_for_export = calib_df if 'calib_df' in locals() else pd.DataFrame()
     _formal_df_for_export = formal_df if 'formal_df' in locals() else pd.DataFrame()
     _delong_df_for_export = delong_df if 'delong_df' in locals() else pd.DataFrame()
@@ -1447,6 +1473,7 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
                 roc_plot_df=_roc_plot_for_export,
                 calibration_plot_df=_calibration_plot_for_export,
                 dca_plot_df=_dca_plot_for_export,
+                manifest=_comparison_manifest,
             ),
         )
         st.caption(tr(

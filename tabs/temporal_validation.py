@@ -319,6 +319,12 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
     bundle_info = ctx.bundle_info
     xlsx_path = ctx.xlsx_path
 
+    # Bundle-sourced version (falls back to module constant only when the
+    # bundle predates the metadata-as-source-of-truth contract).  Shadows the
+    # module-level ``MODEL_VERSION`` for the rest of the function so the
+    # filename, MD/PDF headers, and audit log all reference the same value.
+    MODEL_VERSION = ctx.model_version  # noqa: F811 — intentional shadow
+
     _update_phase = ctx.update_phase
     _sts_score_patient_ids = ctx.sts_score_patient_ids
 
@@ -353,6 +359,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
         training_source_file=bundle_info.get("training_source"),
         calibration_method=getattr(artifacts, "calibration_method", "sigmoid"),
         training_data=prepared.data,
+        model_version=MODEL_VERSION,
     )
     _tv_locked_threshold_default = _tv_meta.get("locked_threshold", 0.08)
 
