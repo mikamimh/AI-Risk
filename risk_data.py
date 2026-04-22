@@ -1983,6 +1983,30 @@ def _normalize_flat_columns(df: pd.DataFrame) -> pd.DataFrame:
     return renamed
 
 
+_UNNAMED_INDEX_COL_RE = re.compile(r"^Unnamed:\s*\d+$")
+
+
+def _drop_unnamed_index_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop pandas-style ghost index columns (``Unnamed: 0``, ``Unnamed: 1``...).
+
+    These appear when a user uploads a CSV/XLSX that was previously written
+    with the default ``to_csv()`` / ``to_excel()`` (i.e. with ``index=True``).
+    On the next read pandas materialises the ghost index as an unnamed
+    column, which then propagates verbatim into every downstream export.
+    Stripping at the read boundary means *no* downstream caller has to
+    defend against it.
+
+    The drop is strictly bounded to columns whose name matches
+    ``^Unnamed:\\s*\\d+$`` — real data columns are never touched.
+    """
+    if df is None or df.empty:
+        return df
+    ghost_cols = [c for c in df.columns if isinstance(c, str) and _UNNAMED_INDEX_COL_RE.match(c)]
+    if ghost_cols:
+        df = df.drop(columns=ghost_cols)
+    return df
+
+
 def _read_csv_auto(path: str, nrows: int | None = None) -> pd.DataFrame:
     """Read a CSV with automatic separator sniffing and encoding fallback.
 
@@ -2004,14 +2028,14 @@ def _read_csv_auto(path: str, nrows: int | None = None) -> pd.DataFrame:
     last_err: Exception | None = None
     for enc in ("utf-8-sig", "cp1252", "latin-1"):
         try:
-            return pd.read_csv(
+            return _drop_unnamed_index_columns(pd.read_csv(
                 path,
                 sep=None,
                 engine="python",
                 nrows=nrows,
                 encoding=enc,
                 **PANDAS_PRESERVE_NONE_READ_KWARGS,
-            )
+            ))
         except UnicodeDecodeError as e:
             last_err = e
             continue
@@ -2045,6 +2069,7 @@ def _read_flat_excel(path: str, nrows: int | None = None) -> pd.DataFrame:
         **PANDAS_PRESERVE_NONE_READ_KWARGS,
     )
     df.columns = [re.sub(r"\s+", " ", str(c)).strip() for c in df.columns]
+    df = _drop_unnamed_index_columns(df)
     return df
 
 
@@ -2306,13 +2331,13 @@ def read_external_table_with_fallback(
     last_err: Exception | None = None
     for enc in _ENCODINGS:
         try:
-            df = pd.read_csv(
+            df = _drop_unnamed_index_columns(pd.read_csv(
                 path,
                 sep=None,
                 engine="python",
                 encoding=enc,
                 **PANDAS_PRESERVE_NONE_READ_KWARGS,
-            )
+            ))
             delim = _sniff_csv_delimiter(path, enc)
             meta = ExternalReadMeta(
                 encoding_used=enc,

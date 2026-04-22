@@ -100,13 +100,20 @@ from temporal_validation import (
     CHRONO_STATE_UNKNOWN,
 )
 from ai_risk_inference import apply_frozen_model_to_temporal_cohort
+from export_helpers import build_export_manifest
 
 if TYPE_CHECKING:
     from tabs import TabContext
 
 
 # Convenience constants mirroring those app.py used via AppConfig.
-MODEL_VERSION = AppConfig.MODEL_VERSION
+# NOTE: ``MODEL_VERSION`` is intentionally NOT imported here.  The previous
+# module-level binding (``MODEL_VERSION = AppConfig.MODEL_VERSION``) created
+# a second source of truth that could silently drift from the loaded
+# bundle's signature.  ``render()`` now reads it from
+# ``ctx.model_version`` (which comes from ``bundle_info``), and any code
+# outside ``render()`` that accidentally references ``MODEL_VERSION`` will
+# fail at import time — by design.
 TEMP_DATA_DIR = AppConfig.TEMP_DATA_DIR
 
 _TV_MODEL_COLORS = {
@@ -319,11 +326,11 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
     bundle_info = ctx.bundle_info
     xlsx_path = ctx.xlsx_path
 
-    # Bundle-sourced version (falls back to module constant only when the
-    # bundle predates the metadata-as-source-of-truth contract).  Shadows the
-    # module-level ``MODEL_VERSION`` for the rest of the function so the
-    # filename, MD/PDF headers, and audit log all reference the same value.
-    MODEL_VERSION = ctx.model_version  # noqa: F811 — intentional shadow
+    # Bundle-sourced version — single source of truth for filename, MD/PDF
+    # headers, manifest, and audit log within this tab.  No module-level
+    # ``MODEL_VERSION`` exists in this file by design (see header note),
+    # so this is a fresh local binding, not a shadow.
+    MODEL_VERSION = ctx.model_version
 
     _update_phase = ctx.update_phase
     _sts_score_patient_ids = ctx.sts_score_patient_ids
@@ -3423,6 +3430,31 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _expl_recal_sum, _expl_thresh_sum = _build_tv_exploratory_summaries()
                         _tv_xlsx_buf = BytesIO()
                         with pd.ExcelWriter(_tv_xlsx_buf, engine="openpyxl") as _tv_writer:
+                            # Manifest sheet — written first so the auditor sees
+                            # the bundle/version/threshold provenance as the
+                            # opening tab of the workbook.
+                            _tv_manifest = build_export_manifest(
+                                export_kind="temporal_validation",
+                                model_version=MODEL_VERSION,
+                                active_model_name=bundle_info.get("active_model_name") or forced_model,
+                                threshold_mode=("youden" if _tv_use_youden else "clinical_fixed"),
+                                threshold_value=float(_tv_locked_threshold),
+                                dataset_fingerprint=bundle_info.get("dataset_fingerprint"),
+                                bundle_fingerprint=bundle_info.get("bundle_fingerprint"),
+                                bundle_saved_at=bundle_info.get("saved_at"),
+                                training_source=bundle_info.get("training_source"),
+                                current_analysis_file=getattr(_tv_file, "name", None),
+                                extra={
+                                    "n_total": _tv_cohort_summary.get("n_total"),
+                                    "n_events": _tv_events,
+                                    "language": language,
+                                },
+                            )
+                            pd.DataFrame(
+                                [{"Property": k, "Value": v} for k, v in _tv_manifest.items() if k != "extra"]
+                                + [{"Property": f"extra.{k}", "Value": v} for k, v in (_tv_manifest.get("extra") or {}).items()]
+                            ).to_excel(_tv_writer, sheet_name="manifest", index=False)
+
                             _cs_export = pd.DataFrame([
                                 {"Property": k, "Value": v} for k, v in _tv_cohort_summary.items()
                             ])

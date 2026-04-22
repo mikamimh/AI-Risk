@@ -200,14 +200,28 @@ def bundle_metadata_from_payload(
     if isinstance(inner_artifacts, dict):
         active_model_name = inner_artifacts.get("best_model_name")
 
+    # Dataset fingerprint MUST NOT carry the absolute on-disk path — that
+    # leaks the local environment (e.g. ``C:\Users\<name>\...``) into every
+    # exported manifest.  We keep the basename for human auditability and a
+    # short SHA1 of the full path for uniqueness, but the full path itself
+    # never leaves the process.
     dataset_fp = None
     if sig.get("xlsx_path") and "xlsx_mtime_ns" in sig and "xlsx_size" in sig:
+        import hashlib
+        _full_path = str(sig.get("xlsx_path"))
+        _basename = Path(_full_path).name
+        _path_hash = hashlib.sha1(_full_path.encode("utf-8")).hexdigest()[:8]
         dataset_fp = (
-            f"{sig.get('xlsx_path')}|"
+            f"{_basename}|"
+            f"path_sha1={_path_hash}|"
             f"mtime_ns={sig.get('xlsx_mtime_ns')}|"
             f"size={sig.get('xlsx_size')}"
         )
 
+    # Bundle fingerprint hashes the path internally (not exposed) so two
+    # bundles trained from different absolute paths but identical
+    # content/version still produce different fingerprints when reloaded
+    # from different locations.  The hash output does not leak the path.
     bundle_fp = None
     if sig:
         import hashlib

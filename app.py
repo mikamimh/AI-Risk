@@ -3641,7 +3641,7 @@ if _active_tab == 0:  # Overview
     ))
     _ms1, _ms2, _ms3, _ms4 = st.columns(4)
     _ms1.metric(tr("Selected model", "Modelo selecionado"), forced_model, border=True)
-    _ms2.metric(tr("Model version", "Versão do modelo"), MODEL_VERSION, border=True)
+    _ms2.metric(tr("Model version", "Versão do modelo"), bundle_info.get("model_version") or MODEL_VERSION, border=True)
     _ms3.metric(tr("Decision threshold", "Limiar de decisão"), f"{_default_threshold:.0%}", border=True)
     _ms4.metric(
         tr("Calibration method", "Método de calibração"),

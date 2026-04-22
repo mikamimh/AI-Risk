@@ -22,12 +22,13 @@ from ai_risk_inference import (
     _run_ai_risk_inference_row,
 )
 from euroscore import euroscore_from_inputs
-from export_helpers import statistical_summary_to_pdf
+from export_helpers import build_export_manifest, statistical_summary_to_pdf
 from model_metadata import log_analysis
 from risk_data import (
     FLAT_ALIAS_TO_APP_COLUMNS,
     MISSINGNESS_INDICATOR_COLUMNS,
     PANDAS_PRESERVE_NONE_READ_KWARGS,
+    _drop_unnamed_index_columns,
 )
 from stats_compare import class_risk
 from sts_calculator import calculate_sts_batch
@@ -200,6 +201,7 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
                     )
             else:
                 new_df = pd.read_excel(batch_file, **PANDAS_PRESERVE_NONE_READ_KWARGS)
+            new_df = _drop_unnamed_index_columns(new_df)
             # Rename snake_case columns to model feature names
             _rename_map = {c: FLAT_ALIAS_TO_APP_COLUMNS[c] for c in new_df.columns if c in FLAT_ALIAS_TO_APP_COLUMNS}
             if _rename_map:
@@ -563,8 +565,27 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
                 with _dl1:
                     _csv_download_btn(result_df, "ia_risk_batch_predictions.csv", tr("CSV", "CSV"))
                 with _dl2:
+                    _bi = ctx.bundle_info or {}
+                    _batch_manifest = build_export_manifest(
+                        export_kind="batch_prediction",
+                        model_version=MODEL_VERSION,
+                        active_model_name=_bi.get("active_model_name") or forced_model,
+                        threshold_mode="clinical_fixed",
+                        threshold_value=float(_default_threshold),
+                        dataset_fingerprint=_bi.get("dataset_fingerprint"),
+                        bundle_fingerprint=_bi.get("bundle_fingerprint"),
+                        bundle_saved_at=_bi.get("saved_at"),
+                        training_source=_bi.get("training_source"),
+                        current_analysis_file=batch_file.name,
+                        extra={"n_patients": len(result_df), "language": language},
+                    )
                     _xlsx_buf = BytesIO()
-                    result_df.to_excel(_xlsx_buf, index=False, engine="openpyxl")
+                    with pd.ExcelWriter(_xlsx_buf, engine="openpyxl") as _bx_writer:
+                        pd.DataFrame(
+                            [{"Property": k, "Value": v} for k, v in _batch_manifest.items() if k != "extra"]
+                            + [{"Property": f"extra.{k}", "Value": v} for k, v in (_batch_manifest.get("extra") or {}).items()]
+                        ).to_excel(_bx_writer, sheet_name="manifest", index=False)
+                        result_df.to_excel(_bx_writer, sheet_name="predictions", index=False)
                     _bytes_download_btn(
                         _xlsx_buf.getvalue(),
                         "ia_risk_batch_predictions.xlsx",
