@@ -274,6 +274,19 @@ def build_statistical_summary(
     if not reclass_df.empty:
         lines.append(f"## {_tr('Reclassification (NRI/IDI)', 'Reclassificação (NRI/IDI)')}")
         lines.append("")
+        lines.append(_tr(
+            "_Convention: 'A vs B' means A is the candidate model and B is the reference. "
+            "NRI > 0 indicates A reclassifies better than B; NRI < 0 indicates A reclassifies worse. "
+            "95% CI and p-values from paired bootstrap (2000 resamples). "
+            "When p = 0.0000 the true p-value is below the bootstrap resolution limit (< 1/n_boot); "
+            "the display shows '< 0.0005' in that case._",
+            "_Convenção: 'A vs B' indica que A é o modelo candidato e B é o de referência. "
+            "NRI > 0 indica que A reclassifica melhor que B; NRI < 0, pior. "
+            "IC 95% e p-valores por bootstrap pareado (2000 reamostras). "
+            "Quando p = 0.0000, o p verdadeiro está abaixo do limite de resolução do bootstrap (< 1/n_boot); "
+            "o relatório mostra '< 0.0005' nesses casos._",
+        ))
+        lines.append("")
         comp_col = [c for c in reclass_df.columns if "Comparison" in c or "Comparação" in c]
         comp_key = comp_col[0] if comp_col else "Comparison"
         _has_nri_ci = "NRI 95% CI" in reclass_df.columns
@@ -1383,10 +1396,18 @@ def _build_comparison_full_md(
         lines.append(_tr(
             "NRI: movement to more appropriate risk categories (<5% low, 5-15% intermediate, >15% high). "
             "IDI: average improvement in separation between events and non-events. "
-            "Both are complementary — do not use as sole evidence of superiority.",
+            "Both are complementary — do not use as sole evidence of superiority. "
+            "_Convention: 'A vs B' means A is the candidate and B is the reference; "
+            "NRI > 0 means A reclassifies better than B. "
+            "95% CI and p-values from paired bootstrap (2000 resamples). "
+            "When p = 0.0000 the true p-value is below the bootstrap resolution limit (< 1/n_boot)._",
             "NRI: movimento para categorias de risco mais apropriadas (<5% baixo, 5-15% intermediário, >15% alto). "
             "IDI: melhora média na separação entre eventos e não-eventos. "
-            "Ambas são complementares — não usar como única evidência de superioridade.",
+            "Ambas são complementares — não usar como única evidência de superioridade. "
+            "_Convenção: 'A vs B' indica que A é o candidato e B é a referência; "
+            "NRI > 0 significa que A reclassifica melhor que B. "
+            "IC 95% e p-valores por bootstrap pareado (2000 reamostras). "
+            "Quando p = 0.0000, o p verdadeiro está abaixo do limite de resolução (< 1/n_boot)._",
         ))
         lines.append("")
         comp_col = [c for c in reclass_df.columns if "Comparison" in c or "Comparação" in c]
