@@ -58,12 +58,14 @@ from sts_calculator import (
 from stats_compare import (
     calibration_bins_detail,
     calibration_data,
+    calibration_in_the_large,
     calibration_intercept_slope,
     class_risk,
     classification_metrics_at_threshold,
     decision_curve,
     evaluate_scores_temporal,
     hosmer_lemeshow_test,
+    integrated_calibration_index,
     pairwise_score_comparison,
     recalibrate_intercept_only,
     recalibrate_isotonic,
@@ -1080,10 +1082,14 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
                                 _cal = calibration_intercept_slope(_sub["morte_30d"].values, _sub[_sc].values)
                                 _hl  = hosmer_lemeshow_test(_sub["morte_30d"].values, _sub[_sc].values)
+                                _cil = calibration_in_the_large(_sub["morte_30d"].values, _sub[_sc].values)
+                                _ici = integrated_calibration_index(_sub["morte_30d"].values, _sub[_sc].values)
                                 _tv_calib_rows.append({
                                     "Score": _tv_rename.get(_sc, _sc),
                                     "Calibration_Intercept": _cal["Calibration intercept"],
                                     "Calibration_Slope":     _cal["Calibration slope"],
+                                    "CIL": _cil["CIL"],
+                                    "ICI": _ici,
                                     "HL_chi2": _hl["HL chi-square"],
                                     "HL_p":    _hl["HL p-value"],
                                 })
@@ -1801,10 +1807,14 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         if len(_sub) >= 10 and _sub["morte_30d"].nunique() >= 2:
                             _cal = calibration_intercept_slope(_sub["morte_30d"].values, _sub[_sc].values)
                             _hl = hosmer_lemeshow_test(_sub["morte_30d"].values, _sub[_sc].values)
+                            _cil = calibration_in_the_large(_sub["morte_30d"].values, _sub[_sc].values)
+                            _ici = integrated_calibration_index(_sub["morte_30d"].values, _sub[_sc].values)
                             _tv_calib_rows.append({
                                 "Score": _tv_rename.get(_sc, _sc),
                                 "Calibration_Intercept": _cal["Calibration intercept"],
                                 "Calibration_Slope": _cal["Calibration slope"],
+                                "CIL": _cil["CIL"],
+                                "ICI": _ici,
                                 "HL_chi2": _hl["HL chi-square"],
                                 "HL_p": _hl["HL p-value"],
                             })
@@ -2742,13 +2752,19 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     st.caption(_tv_sts_availability_note["suppressed_note"])
                             _tv_perf_display = _tv_perf.copy()
                             # Format for display
-                            for _fc in ["AUC", "AUPRC", "Brier", "Calibration_Intercept", "Calibration_Slope",
-                                        "Sensitivity", "Specificity", "PPV", "NPV"]:
+                            for _fc in ["AUC", "AUPRC", "AUPRC_baseline", "Brier",
+                                        "Calibration_Intercept", "Calibration_Slope",
+                                        "Sensitivity", "Specificity", "PPV", "NPV",
+                                        "CIL", "ICI"]:
                                 if _fc in _tv_perf_display.columns:
                                     _tv_perf_display[_fc] = _tv_perf_display[_fc].map(
                                         lambda v: f"{v:.3f}" if pd.notna(v) else "—"
                                     )
-                            for _fc in ["AUC_IC95_inf", "AUC_IC95_sup", "AUPRC_IC95_inf", "AUPRC_IC95_sup"]:
+                            for _fc in ["AUC_IC95_inf", "AUC_IC95_sup",
+                                        "AUPRC_IC95_inf", "AUPRC_IC95_sup",
+                                        "Calibration_Intercept_CI_low", "Calibration_Intercept_CI_high",
+                                        "Calibration_Slope_CI_low", "Calibration_Slope_CI_high",
+                                        "CIL_CI_low", "CIL_CI_high"]:
                                 if _fc in _tv_perf_display.columns:
                                     _tv_perf_display[_fc] = _tv_perf_display[_fc].map(
                                         lambda v: f"{v:.3f}" if pd.notna(v) else "—"
@@ -2757,7 +2773,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 _tv_perf_display["HL_p"] = _tv_perf_display["HL_p"].map(
                                     lambda v: f"{v:.4f}" if pd.notna(v) else "—"
                                 )
-                            st.dataframe(_tv_perf_display, width="stretch", hide_index=True)
+                            st.dataframe(_tv_perf_display, use_container_width=True, hide_index=True)
 
                     # ── Calibration at a Glance ──────────────────────────
                     st.markdown(tr("**Calibration at a Glance**", "**Calibração em Resumo**"))
@@ -2768,8 +2784,31 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             "Intercepto próximo de 0 e slope próximo de 1 indicam boa calibração. "
                             "p-valor de HL é apenas complementar — não interpretar isoladamente.",
                         ))
-                        _tv_cag_cols = [c for c in ["Score", "Calibration_Intercept", "Calibration_Slope", "HL_p"] if c in _tv_calib_df.columns]
-                        st.dataframe(_tv_calib_df[_tv_cag_cols], width="stretch", hide_index=True)
+                        _tv_cag_cols = [c for c in [
+                            "Score", "Calibration_Intercept", "Calibration_Slope",
+                            "CIL", "ICI", "HL_p",
+                        ] if c in _tv_calib_df.columns]
+                        _tv_calib_display = _tv_calib_df[_tv_cag_cols].copy()
+                        for _fc in ["Calibration_Intercept", "Calibration_Slope", "CIL", "ICI"]:
+                            if _fc in _tv_calib_display.columns:
+                                _tv_calib_display[_fc] = _tv_calib_display[_fc].map(
+                                    lambda v: f"{v:.3f}" if pd.notna(v) else "—"
+                                )
+                        if "HL_p" in _tv_calib_display.columns:
+                            _tv_calib_display["HL_p"] = _tv_calib_display["HL_p"].map(
+                                lambda v: f"{v:.4f}" if pd.notna(v) else "—"
+                            )
+                        st.dataframe(_tv_calib_display, use_container_width=True, hide_index=True)
+                        st.caption(tr(
+                            "ICI (Integrated Calibration Index): continuous calibration measure via isotonic "
+                            "regression — lower is better (0 = perfect calibration). "
+                            "CIL (Calibration-in-the-Large) = mean predicted − mean observed: "
+                            "positive values indicate the model overestimates risk on average.",
+                            "ICI (Índice Integrado de Calibração): medida contínua via regressão isotônica — "
+                            "menor é melhor (0 = calibração perfeita). "
+                            "CIL (Calibração Geral) = média predita − média observada: "
+                            "valores positivos indicam que o modelo superestima o risco em média.",
+                        ))
                     else:
                         st.caption(tr(
                             "Calibration summary not available for this cohort "
