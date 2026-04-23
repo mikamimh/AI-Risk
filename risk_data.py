@@ -1983,7 +1983,8 @@ def _load_source_tables(source_path: str) -> Dict[str, pd.DataFrame]:
 
     ext = Path(source_path).suffix.lower()
     if ext in {".xlsx", ".xls"}:
-        xls = pd.ExcelFile(source_path)
+        with pd.ExcelFile(source_path) as xls:
+            sheet_names = xls.sheet_names
         return {
             name: _strip_col_whitespace(
                 pd.read_excel(
@@ -1992,7 +1993,7 @@ def _load_source_tables(source_path: str) -> Dict[str, pd.DataFrame]:
                     **PANDAS_PRESERVE_NONE_READ_KWARGS,
                 )
             )
-            for name in xls.sheet_names
+            for name in sheet_names
         }
     if ext in {".db", ".sqlite", ".sqlite3"}:
         conn = sqlite3.connect(source_path)
@@ -2081,18 +2082,19 @@ def _read_flat_excel(path: str, nrows: int | None = None) -> pd.DataFrame:
     :func:`prepare_master_dataset`. This helper is for exported CSV-like Excel
     files, commonly saved with a default sheet name such as ``Planilha1``.
     """
-    xls = pd.ExcelFile(path)
-    if not xls.sheet_names:
-        raise ValueError("Excel workbook has no sheets")
-    if len(xls.sheet_names) > 1:
-        raise ValueError(
-            "Flat Excel files must contain exactly one sheet; multi-sheet "
-            "workbooks must include Preoperative, Pre-Echocardiogram, and "
-            "Postoperative sheets."
-        )
+    with pd.ExcelFile(path) as xls:
+        if not xls.sheet_names:
+            raise ValueError("Excel workbook has no sheets")
+        if len(xls.sheet_names) > 1:
+            raise ValueError(
+                "Flat Excel files must contain exactly one sheet; multi-sheet "
+                "workbooks must include Preoperative, Pre-Echocardiogram, and "
+                "Postoperative sheets."
+            )
+        sheet_name = xls.sheet_names[0]
     df = pd.read_excel(
         path,
-        sheet_name=xls.sheet_names[0],
+        sheet_name=sheet_name,
         nrows=nrows,
         **PANDAS_PRESERVE_NONE_READ_KWARGS,
     )
