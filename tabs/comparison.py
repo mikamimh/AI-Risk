@@ -327,8 +327,6 @@ def _cached_full_package(
     triple_ci: pd.DataFrame,
     calib_df: pd.DataFrame,
     formal_df: pd.DataFrame,
-    # Bump this string when export_helpers changes to invalidate stale cache.
-    _export_version: str = "2026-04-24-p-str",
     delong_df: pd.DataFrame,
     reclass_df: pd.DataFrame,
     threshold_metrics: pd.DataFrame,
@@ -344,6 +342,8 @@ def _cached_full_package(
     calibration_plot_df: pd.DataFrame,
     dca_plot_df: pd.DataFrame,
     manifest: dict | None = None,
+    # Bump to invalidate stale cache when export_helpers formatting changes.
+    _export_version: str = "2026-04-24-p-str",
 ) -> bytes:
     return build_comparison_full_package(
         triple_ci=triple_ci,
