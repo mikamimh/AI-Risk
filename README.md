@@ -97,11 +97,20 @@ The same inference core (`ai_risk_inference.py`) is used by all three scoring co
 
 ### Official baseline — v14 (2026-04-23)
 
-**Bundle version:** `[TO BE UPDATED AFTER RETRAIN]` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 62
+**Bundle version:** `2026-04-23-v14-statistical-robustness` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 62
 
-`[LEADERBOARD TO BE UPDATED AFTER RETRAIN WITH V2+V4]`
+| Model | AUC | AUPRC | Brier |
+|:--|--:|--:|--:|
+| **RandomForest** *(selected)* | **0.7474** | **0.3303** | **0.1155** |
+| LogisticRegression | 0.7343 | 0.3154 | 0.1249 |
+| StackingEnsemble | 0.7243 | 0.2976 | 0.1358 |
+| LightGBM | 0.7184 | 0.3213 | 0.1187 |
+| XGBoost | 0.7049 | 0.2855 | 0.1194 |
+| CatBoost | 0.6972 | 0.2940 | 0.1224 |
 
-**What changed from v13 (2026-04-21):** Statistical robustness refactor — variable semantic contract (`variable_contract.py`, 50+ variables with declared dtype, parse mode, blank semantics, and plausibility ranges); strict numeric parsing for critical clinical variables; binary direct encoding for 18 Yes/No variables (ablation-validated: ΔAUC +0.007); echo missingness indicator (`missing_echo_key`, ablation-validated: ΔBrier −0.0009); calibration slope guardrail (C: rejects slope < 0.40 or > 2.50); calibration-aware tiebreaker (slope closest to 1.0 when ΔAUC < 0.01); deterministic case_uid (SHA-256[:16]) for traceability; training manifest with dataset hash in bundle; XLSX preferred over CSV when both exist.
+**RandomForest calibration:** intercept = −0.006, slope = 0.999 · **Youden threshold:** 0.127 · **@8% threshold:** Sensitivity 0.941, Specificity 0.367, PPV 0.208, NPV 0.972
+
+**What changed from v13 (2026-04-21):** Statistical robustness refactor — variable semantic contract (`variable_contract.py`, 50+ variables with declared dtype, parse mode, blank semantics, and plausibility ranges); strict numeric parsing for critical clinical variables; binary direct encoding for 11 verified Yes/No variables (7 multi-category columns excluded to preserve clinical information: Diabetes, CVA, IE, Cancer, Anticoagulation, Pneumonia, Family Hx); echo missingness indicator (`missing_echo_key`, ablation-validated: ΔBrier −0.0009); calibration slope guardrail (C: rejects slope < 0.40 or > 2.50); calibration-aware tiebreaker (slope closest to 1.0 when ΔAUC < 0.01); deterministic case_uid (SHA-256[:16]) for traceability; training manifest with dataset hash in bundle; XLSX preferred over CSV when both exist. Numeric change from v13: AUC +0.002, Brier +0.001, calibration slope improved from 1.013 to 0.999 (near-perfect).
 
 <details>
 <summary>v13 baseline (2026-04-21) — superseded</summary>
