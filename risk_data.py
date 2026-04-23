@@ -1579,7 +1579,6 @@ def audit_surgery_coverage(surgery_series: "pd.Series") -> dict:
         top_unrecognized: list[tuple[str, int]] — top-10 raw Surgery values
                           that resolved to 'OTHER', by frequency
     """
-    import pandas as _pd
     total = len(surgery_series)
     groups = surgery_series.map(procedure_group)
     n_unknown = int((groups == "UNKNOWN").sum())
@@ -2286,7 +2285,7 @@ def normalize_dataframe(
                 required_failures.append(ColumnAction(
                     column=col,
                     action="required_missing",
-                    detail=f"Required column not found in data",
+                    detail="Required column not found in data",
                     count=0,
                 ))
 

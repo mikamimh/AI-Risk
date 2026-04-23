@@ -1,6 +1,6 @@
 import datetime
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import warnings
 
@@ -25,7 +25,6 @@ from config import AppConfig, get_model_params
 from risk_data import (
     parse_number as _rd_parse_number,
     is_missing as _rd_is_missing,
-    NONE_IS_VALID_COLUMNS,
 )
 from stats_compare import calibration_intercept_slope
 

@@ -21,7 +21,6 @@ import re
 import html as html_mod
 import logging
 import time
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import pandas as pd

@@ -19,7 +19,8 @@ Resultados de referencia (ablacao v1, baseline antigo):
   Cal slope     baseline=1.0281 binario=1.0468 (pior)
   Conclusao v1: INCONCLUSIVO (diferenca menor que ruido de CV)
 """
-import sys, warnings
+import sys
+import warnings
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss
@@ -28,7 +29,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 sys.path.insert(0, ".")
-from risk_data import prepare_master_dataset, MISSING_TOKENS, normalize_previous_surgery_value
+from risk_data import prepare_master_dataset, MISSING_TOKENS
 from modeling import train_and_select_model
 from stats_compare import calibration_intercept_slope, classification_metrics_at_threshold
 
@@ -157,7 +158,8 @@ def print_v1_comparison(results):
         print("  (nao foi possivel comparar)")
         return
     for k, lab in zip(keys, labels):
-        v2b  = r_b[k];  v2bi = r_bi[k]
+        v2b = r_b[k]
+        v2bi = r_bi[k]
         db   = v2b  - v1_b[k]
         dbi  = v2bi - v1_bi[k]
         print(f"{lab:<22}  {v1_b[k]:>12.4f}  {v2b:>12.4f}  {db:>+10.4f}  {v1_bi[k]:>12.4f}  {v2bi:>12.4f}  {dbi:>+10.4f}")

@@ -11,9 +11,8 @@ passed verbatim — tab modules never import from ``app.py``.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict
 
-import numpy as np
 import pandas as pd
 
 

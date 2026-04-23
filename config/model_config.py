@@ -121,16 +121,16 @@ PREPROCESSING_PARAMS = {
 
 def get_model_params(model_name: str) -> Dict[str, Any]:
     """Get hyperparameters for a specific model.
-    
+
     Args:
         model_name: Name of the model (e.g., "XGBoost", "RandomForest")
-    
+
     Returns:
         Dictionary of model hyperparameters
-    
+
     Raises:
         ValueError: If model_name not found in MODEL_HYPERPARAMS
-    
+
     Example:
         >>> params = get_model_params("RandomForest")
         >>> rf = RandomForestClassifier(**params)
@@ -138,7 +138,7 @@ def get_model_params(model_name: str) -> Dict[str, Any]:
     if model_name not in MODEL_HYPERPARAMS:
         available = ", ".join(MODEL_HYPERPARAMS.keys())
         raise ValueError(f"Unknown model '{model_name}'. Available: {available}")
-    
+
     return MODEL_HYPERPARAMS[model_name].copy()
 
 

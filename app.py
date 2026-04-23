@@ -36,12 +36,12 @@ except Exception:
 import json
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 import re
 import shutil
 import sqlite3
 import time
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import joblib
@@ -51,76 +51,29 @@ import streamlit as st
 from sklearn.inspection import permutation_importance
 
 from config import AppConfig
-from euroscore import COEF as EURO_COEF
-from euroscore import EURO_CONST, euroscore_from_inputs, euroscore_from_row
-from explainability import ModelExplainer, show_explainability_ui
-from modeling import clean_features, train_and_select_model
+from euroscore import euroscore_from_row
+from modeling import clean_features
 from risk_data import (
     FLAT_ALIAS_TO_APP_COLUMNS,
     MISSINGNESS_INDICATOR_COLUMNS,
-    PreparedData,
     REQUIRED_SOURCE_TABLES,
-    is_combined_surgery,
-    normalize_arrhythmia_recent_value,
-    normalize_arrhythmia_remote_value,
-    normalize_cva_value,
-    normalize_hf_value,
-    normalize_pneumonia_value,
     parse_number,
     prepare_master_dataset,
-    procedure_weight,
     split_surgery_procedures,
-    thoracic_aorta_surgery,
 )
 from sts_calculator import (
     HAS_WEBSOCKETS as HAS_STS,
-    STS_LABELS,
-    STS_PER_PATIENT_TIMEOUT_S,
-    calculate_sts,
     calculate_sts_batch,
-    classify_sts_eligibility,
 )
 from stats_compare import (
-    bootstrap_auc_diff,
-    bootstrap_metrics_ci,
     calibration_data,
-    calibration_intercept_slope,
     class_risk,
-    classification_metrics_at_threshold,
-    compute_idi,
-    compute_nri,
-    decision_curve,
-    delong_roc_test,
-    evaluate_scores,
-    evaluate_scores_with_threshold,
-    evaluate_scores_with_ci,
-    evaluate_scores_temporal,
-    hosmer_lemeshow_test,
-    pairwise_score_comparison,
-    risk_category_table,
     roc_data,
 )
 from model_metadata import (
     build_model_metadata,
     format_metadata_for_display,
-    format_locked_model_for_display,
-    assess_input_completeness,
-    format_imputation_detail,
-    log_analysis,
-    read_audit_log,
-    generate_individual_report,
-    generate_clinical_explanation,
-    build_statistical_summary,
-    build_temporal_validation_summary,
-    statistical_summary_to_xlsx,
-    statistical_summary_to_csv,
     statistical_summary_to_pdf,
-    compute_data_quality_summary,
-    check_temporal_overlap,
-    check_validation_readiness,
-    export_model_bundle_metadata,
-    is_surrogate_timeline,        # surrogate-year detection for temporal-validation UI
-    build_surrogate_timeline_note,
 )
 from app_data_dictionary import (
     build_dictionary_xlsx_bytes,
@@ -129,13 +82,7 @@ from app_data_dictionary import (
     get_reading_rules_dataframe,
 )
 from ai_risk_inference import (
-    _get_numeric_columns_from_pipeline,
     _safe_select_features,
-    _build_input_row,
-    _align_input_to_training_schema,
-    _patient_identifier_from_row,
-    _run_ai_risk_inference_row,
-    apply_frozen_model_to_temporal_cohort,
 )
 from tabs import TabContext
 from tabs import comparison as _tab_comparison
@@ -2420,7 +2367,9 @@ def _make_line_chart_png(chart_df: pd.DataFrame, title: str, xlabel: str, ylabel
         ax.plot(chart_df.index, chart_df[col], label=col)
     if diagonal:
         ax.plot([0, 1], [0, 1], "k--", alpha=0.3)
-    ax.set_xlabel(xlabel); ax.set_ylabel(ylabel); ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
     ax.legend(fontsize=8)
     fig.tight_layout()
     png = _fig_to_png_bytes(fig)
@@ -2443,7 +2392,8 @@ def _make_boxplot_png(chart_df: pd.DataFrame, x_col: str, y_col: str, group_col:
         data = [subset[subset[x_col] == v][y_col].dropna().values for v in x_vals]
         bp = ax.boxplot(data, tick_labels=x_vals, patch_artist=True, showfliers=True)
         for patch in bp["boxes"]:
-            patch.set_facecolor("#4C78A8"); patch.set_alpha(0.6)
+            patch.set_facecolor("#4C78A8")
+            patch.set_alpha(0.6)
         ax.set_title(grp, fontsize=9)
         ax.set_ylabel(y_col if ax == axes[0] else "")
         ax.tick_params(axis="x", rotation=35, labelsize=7)
@@ -2823,7 +2773,7 @@ def _build_subgroup_summary_pdf_bytes(
     )
     md = f"""# {title}
 
-**Panel:** {subgroup_choice}  
+**Panel:** {subgroup_choice}
 **Decision threshold:** {threshold:.1%}
 
 ## Best Subgroup
@@ -3953,7 +3903,8 @@ elif _active_tab == 2:  # Statistical Comparison
     _tab_comparison.render(_tab_ctx)
 
 elif _active_tab == 3:  # Analysis Guide
-    render_analysis_guide(prepared, artifacts, len(triple) if 'triple' in locals() else None)
+    _triple = locals().get("triple")
+    render_analysis_guide(prepared, artifacts, len(_triple) if _triple is not None else None)
 
 elif _active_tab == 4:  # Batch & Export
     _tab_batch_export.render(_tab_ctx)

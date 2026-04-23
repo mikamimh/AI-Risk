@@ -3,7 +3,8 @@
 Standalone script — does NOT modify any production file.
 Run: python ablation_sparse_features.py
 """
-import sys, warnings
+import sys
+import warnings
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss
@@ -179,7 +180,7 @@ def run():
 
     # ── Ablation 2: remove KDIGO only ────────────────────────────────────────
     print("\n" + "=" * 60)
-    print(f"ABLATION 2 — remove KDIGO only")
+    print("ABLATION 2 — remove KDIGO only")
     print("=" * 60)
     fc_a2 = [c for c in fc_all if c not in a2_cols]
     res_a2, arts_a2 = run_variant("Ablation2", df, fc_a2, y)

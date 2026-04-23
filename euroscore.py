@@ -6,7 +6,7 @@ the 27 logistic regression coefficients published by Nashef et al. (2012).
 
 References:
     Nashef et al. European heart journal. 2012;33(16):1925-1933
-    
+
 Example:
     >>> from euroscore import euroscore_from_row
     >>> prob = euroscore_from_row(patient_series)
@@ -61,13 +61,13 @@ COEF = {
 
 def _yes(value: object) -> bool:
     """Check if value represents 'yes' / 'sim' / 'true'.
-    
+
     Args:
         value: String or boolean value
-    
+
     Returns:
         True if value represents affirmative, False otherwise
-    
+
     Accepts:
         'yes', 'sim', 'true', '1', 'treated', 'active', 'possible'
     """
@@ -78,15 +78,15 @@ def _yes(value: object) -> bool:
 
 def _age_x(age: float) -> float:
     """Transform age for EuroSCORE II logistic regression.
-    
+
     Ages ≤60 contribute 0. Ages >60 contribute linearly (age - 59).
-    
+
     Args:
         age: Patient age in years
-    
+
     Returns:
         Transformed age value for coefficient multiplication
-    
+
     Example:
         >>> _age_x(55)  # Returns 1.0 (baseline contribution, age ≤ 60)
         >>> _age_x(70)  # Returns 11.0 (age - 59)
@@ -100,13 +100,13 @@ def _age_x(age: float) -> float:
 
 def _lv_category(lvef: float) -> str:
     """Categorize left ventricular ejection fraction for EuroSCORE II.
-    
+
     Args:
         lvef: Left ventricular ejection fraction (%)
-    
+
     Returns:
         Category: 'very_poor' (≤20%), 'poor' (21-30%), 'moderate' (31-50%), 'good' (>50%)
-    
+
     Examples:
         >>> _lv_category(15)   # Returns 'very_poor'
         >>> _lv_category(25)   # Returns 'poor'
@@ -136,13 +136,13 @@ def _pap_category(psap: float) -> str:
 
 def _urgency_category(value: object) -> str:
     """Categorize surgical urgency for EuroSCORE II.
-    
+
     Args:
         value: Surgical priority field value
-    
+
     Returns:
         Category: 'salvage', 'emergency', 'urgent', or 'elective' (default)
-    
+
     Examples:
         >>> _urgency_category("Emergency")     # Returns 'emergency'
         >>> _urgency_category("salvage")       # Returns 'salvage'
@@ -179,32 +179,32 @@ def _creatinine_clearance_category(cc: float, dialysis: bool) -> str:
 
 def euroscore_from_row(row: pd.Series) -> float:
     """Calculate EuroSCORE II probability from patient clinical data.
-    
+
     Implements the published EuroSCORE II formula (Nashef et al. 2012) using
     27 preoperative variables mapped from the available dataset.
-    
+
     Args:
         row: Pandas Series with patient clinical data
-    
+
     Returns:
         Float (0-1): Predicted 30-day mortality probability
-    
+
     Raises:
         KeyError: If row doesn't contain expected column names
-    
+
     Expected columns:
         Age (years), Sex, Preoperative NYHA, CCS4, Diabetes, PVD, CVA,
         Chronic Lung Disease, Poor mobility, Previous surgery, Dialysis,
         Cr clearance ml/min, IE, Critical preoperative state, Pré-LVEF %,
         LVEF %, Coronary Symptom, PSAP, Surgery, Surgical Priority
-    
+
     Notes:
         - Missing values (NaN) treated conservatively (default to low risk)
         - Poor mobility only positive if CCS4 is also positive
         - LVEF checked in two columns (Pré-LVEF first, fallback to LVEF)
         - Procedure weight derived from comma-separated surgery list
         - Thoracic aorta surgery identified only for explicit aortic procedures
-    
+
     Example:
         >>> patient = pd.Series({
         ...     'Age (years)': 75,
@@ -217,7 +217,7 @@ def euroscore_from_row(row: pd.Series) -> float:
         ... })
         >>> risk = euroscore_from_row(patient)
         >>> print(f"EuroSCORE II: {risk:.1%}")  # e.g., 8.5%
-    
+
     References:
         Nashef SAM, et al. Eur J Cardiothorac Surg. 2012;41(4):734-744
     """
@@ -326,15 +326,15 @@ def euroscore_from_row(row: pd.Series) -> float:
 
 def euroscore_from_inputs(inputs: Dict[str, object]) -> float:
     """Calculate EuroSCORE II from dictionary of inputs.
-    
+
     Convenience wrapper around euroscore_from_row() that converts dict to Series.
-    
+
     Args:
         inputs: Dictionary with patient data (same keys as euroscore_from_row)
-    
+
     Returns:
         Float (0-1): Predicted 30-day mortality probability
-    
+
     Example:
         >>> inputs = {
         ...     'Age (years)': 65,

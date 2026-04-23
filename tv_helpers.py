@@ -148,8 +148,8 @@ def build_sts_availability_summary(
     else:
         status_label = _tr("UNAVAILABLE", "INDISPONÍVEL")
         banner_text = _tr(
-            f"STS availability: UNAVAILABLE. No eligible rows produced a usable final STS score.",
-            f"Disponibilidade do STS: INDISPONÍVEL. Nenhuma linha elegível produziu um escore STS final utilizável.",
+            "STS availability: UNAVAILABLE. No eligible rows produced a usable final STS score.",
+            "Disponibilidade do STS: INDISPONÍVEL. Nenhuma linha elegível produziu um escore STS final utilizável.",
         )
         execution_details_text = _tr(
             f"STS availability: unavailable ({n_score}/{n_eligible} eligible).",

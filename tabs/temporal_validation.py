@@ -27,20 +27,10 @@ from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import hashlib
-import threading
-import time
 
 import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib
-import matplotlib.pyplot as plt
-from sklearn.metrics import (
-    roc_auc_score,
-    average_precision_score,
-    precision_recall_curve,
-)
 
 from config import AppConfig
 from euroscore import euroscore_from_row
@@ -57,7 +47,6 @@ from sts_calculator import (
 )
 from stats_compare import (
     calibration_bins_detail,
-    calibration_data,
     calibration_in_the_large,
     calibration_intercept_slope,
     class_risk,
@@ -90,15 +79,11 @@ from model_metadata import (
     statistical_summary_to_pdf,
 )
 from tv_helpers import (
-    extract_year_quarter_range as _extract_year_quarter_range,
     chronological_state_label,
     classify_sts_availability,
     build_sts_availability_summary,
     STS_AVAILABILITY_PARTIAL,
     STS_AVAILABILITY_UNAVAILABLE,
-    CHRONO_STATE_NO_OVERLAP,
-    CHRONO_STATE_OVERLAP,
-    CHRONO_STATE_RETROGRADE,
     CHRONO_STATE_UNKNOWN,
 )
 from ai_risk_inference import apply_frozen_model_to_temporal_cohort
@@ -2145,8 +2130,10 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 st.dataframe(pd.DataFrame(_chunk_display_rows), width="stretch", hide_index=True)
 
                         # ── Endpoint health summary ───────────────────────────────────────
-                        if _tv_endpoint_health:
-                            _ehs = _tv_endpoint_health
+                        _ehs = dict(getattr(calculate_sts_batch, "endpoint_health_summary", {}))
+                        if not _ehs:
+                            _ehs = dict(st.session_state.get("_tv_result", {}).get("endpoint_health_summary", {}))
+                        if _ehs:
                             _ehs_c1, _ehs_c2, _ehs_c3, _ehs_c4 = st.columns(4)
                             _ehs_c1.metric(
                                 tr("Sent to endpoint",  "Enviados ao endpoint"),
@@ -2297,6 +2284,9 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                 _tv_exploratory_thresh_tables: dict = {}
                 _tv_n_not_supported: int = 0
                 _tv_n_uncertain: int = 0
+                _tv_endpoint_health: dict = dict(
+                    getattr(calculate_sts_batch, "endpoint_health_summary", {})
+                )
 
                 # ── Display results (runs on fresh compute OR valid session cache) ──
                 if _tv_run or _tv_has_cached:
@@ -3689,4 +3679,3 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 "sts_n_score": _tv_sts_n_score,
                             },
                         )
-

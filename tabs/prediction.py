@@ -45,7 +45,6 @@ from risk_data import (
 from stats_compare import class_risk
 from euroscore import euroscore_from_inputs
 from sts_calculator import (
-    HAS_WEBSOCKETS as HAS_STS,
     STS_LABELS,
     calculate_sts,
 )
@@ -403,8 +402,7 @@ def render(ctx: "TabContext") -> None:
     model_options = artifacts.leaderboard["Modelo"].tolist()
 
     # Rebuild surgery_component_options (same logic as app.py)
-    from risk_data import procedure_weight, split_surgery_procedures
-    from config import AppConfig
+    from risk_data import split_surgery_procedures
     _procedure_item_map: dict = {}
     for _row in prepared.data["Surgery"].dropna().unique():
         for _part in split_surgery_procedures(str(_row)):

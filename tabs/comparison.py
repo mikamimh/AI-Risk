@@ -23,9 +23,7 @@ from stats_compare import (
     calibration_in_the_large,
     calibration_intercept_slope,
     classification_metrics_at_threshold,
-    compute_idi,
     compute_idi_with_ci,
-    compute_nri,
     compute_nri_with_ci,
     decision_curve,
     delong_roc_test,
@@ -38,14 +36,12 @@ from stats_compare import (
 )
 from export_helpers import (
     build_comparison_full_package,
-    build_comparison_full_pdf,
     build_comparison_summary_pdf,
     build_comparison_xlsx,
     build_export_manifest,
     build_statistical_summary,
     statistical_summary_to_csv,
     statistical_summary_to_pdf,
-    statistical_summary_to_xlsx,
 )
 
 if TYPE_CHECKING:

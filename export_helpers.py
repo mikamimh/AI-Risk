@@ -293,11 +293,15 @@ def build_statistical_summary(
         _hdr += " |"
         lines.append(_hdr)
         _sep = "|:--|:--|:--|:--"
-        if _has_nri_ci: _sep += "|:--"
-        if _has_nri_p: _sep += "|:--"
+        if _has_nri_ci:
+            _sep += "|:--"
+        if _has_nri_p:
+            _sep += "|:--"
         _sep += "|:--"
-        if _has_idi_ci: _sep += "|:--"
-        if _has_idi_p: _sep += "|:--"
+        if _has_idi_ci:
+            _sep += "|:--"
+        if _has_idi_p:
+            _sep += "|:--"
         _sep += "|"
         lines.append(_sep)
         for _, row in reclass_df.iterrows():
@@ -1399,11 +1403,15 @@ def _build_comparison_full_md(
             _hdr += " | IDI p"
         _hdr += " |"
         _sep = "|:--|:--|:--|:--"
-        if _has_nri_ci: _sep += "|:--"
-        if _has_nri_p: _sep += "|:--"
+        if _has_nri_ci:
+            _sep += "|:--"
+        if _has_nri_p:
+            _sep += "|:--"
         _sep += "|:--"
-        if _has_idi_ci: _sep += "|:--"
-        if _has_idi_p: _sep += "|:--"
+        if _has_idi_ci:
+            _sep += "|:--"
+        if _has_idi_p:
+            _sep += "|:--"
         _sep += "|"
         lines.append(_hdr)
         lines.append(_sep)
