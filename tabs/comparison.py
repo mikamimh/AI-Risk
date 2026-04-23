@@ -1212,8 +1212,16 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
         if not reclass_df.empty:
             best_nri = reclass_df.sort_values("NRI total", ascending=False).iloc[0]
             best_idi = reclass_df.sort_values("IDI", ascending=False).iloc[0]
-            _nri_p_str = f", p = {best_nri['NRI p']:.4f}" if pd.notna(best_nri["NRI p"]) else ""
-            _idi_p_str = f", p = {best_idi['IDI p']:.4f}" if pd.notna(best_idi["IDI p"]) else ""
+            def _fmt_p(v) -> str:
+                if not pd.notna(v):
+                    return ""
+                # p may be a pre-formatted string (e.g. "< 0.0005") or a float
+                try:
+                    return f", p = {float(v):.4f}"
+                except (TypeError, ValueError):
+                    return f", p = {v}"
+            _nri_p_str = _fmt_p(best_nri["NRI p"])
+            _idi_p_str = _fmt_p(best_idi["IDI p"])
             st.info(
                 tr(
                     f"The highest NRI was observed for {best_nri[_comp_col]} "
