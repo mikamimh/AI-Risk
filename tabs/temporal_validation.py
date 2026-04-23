@@ -497,6 +497,63 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                 _tv_c2.metric(tr("Events", "Eventos"), _tv_events)
                 _tv_c3.metric(tr("Event rate", "Taxa de eventos"), f"{_tv_rate:.1%}")
 
+                # ── 3a-bis. Cohort drift analysis ─────────────────────────
+                try:
+                    from stats_compare import compute_cohort_drift as _ccd
+                    _tv_drift = _ccd(
+                        df_train=prepared.data,
+                        df_temporal=_tv_data,
+                        y_col="morte_30d",
+                        feature_columns=artifacts.feature_columns,
+                    )
+                    with st.expander(
+                        tr("Cohort Drift Analysis", "Análise de Drift da Coorte"),
+                        expanded=False,
+                    ):
+                        _dc1, _dc2 = st.columns(2)
+                        _dc1.metric(
+                            tr("Prevalence (training)", "Prevalência (treino)"),
+                            f"{_tv_drift['prevalence_train']:.1%}",
+                        )
+                        _dc2.metric(
+                            tr("Prevalence (temporal)", "Prevalência (temporal)"),
+                            f"{_tv_drift['prevalence_temporal']:.1%}",
+                            delta=f"{_tv_drift['prevalence_delta']:+.1%}" if not np.isnan(_tv_drift.get('prevalence_delta', float('nan'))) else None,
+                        )
+                        st.markdown(tr(
+                            "**Top 10 variables with largest missingness shift:**",
+                            "**Top 10 variáveis com maior mudança de missingness:**",
+                        ))
+                        _miss_df = [
+                            {
+                                tr("Variable", "Variável"): r["variable"],
+                                tr("Missing (train)", "Missing (treino)"): f"{r['missing_train']:.1%}",
+                                tr("Missing (temporal)", "Missing (temporal)"): f"{r['missing_temporal']:.1%}",
+                                tr("Δ", "Δ"): f"{r['delta']:+.1%}" if r.get("delta") is not None and not np.isnan(r.get("delta", float("nan"))) else "—",
+                            }
+                            for r in _tv_drift["missingness_shift"][:10]
+                        ]
+                        if _miss_df:
+                            st.dataframe(pd.DataFrame(_miss_df), use_container_width=True, hide_index=True)
+                        st.markdown(tr(
+                            "**Top 10 numeric variables with largest relative shift (|Δmedian| / IQR_train):**",
+                            "**Top 10 variáveis numéricas com maior shift relativo (|Δmediana| / IQR_treino):**",
+                        ))
+                        _num_df = [
+                            {
+                                tr("Variable", "Variável"): r["variable"],
+                                tr("Median (train)", "Mediana (treino)"): f"{r['median_train']:.2f}",
+                                tr("Median (temporal)", "Mediana (temporal)"): f"{r['median_temporal']:.2f}",
+                                "IQR (train)": f"{r['p75_train'] - r['p25_train']:.2f}",
+                                tr("|Δ|/IQR", "|Δ|/IQR"): f"{r['rel_shift_over_iqr']:.2f}",
+                            }
+                            for r in _tv_drift["numeric_shift"][:10]
+                        ]
+                        if _num_df:
+                            st.dataframe(pd.DataFrame(_num_df), use_container_width=True, hide_index=True)
+                except Exception:
+                    pass
+
                 # ── 3b. External-dataset normalization summary ──
                 # Only for CSV/Parquet uploads (not multi-sheet XLSX).
                 # Cached per file-content hash so re-renders are instant.

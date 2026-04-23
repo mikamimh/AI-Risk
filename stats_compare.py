@@ -1108,3 +1108,80 @@ def recalibrate_isotonic(y: np.ndarray, p: np.ndarray) -> Dict:
         "cal_slope_before": cal_before["Calibration slope"],
         "cal_slope_after": cal_after["Calibration slope"],
     }
+
+
+def compute_cohort_drift(
+    df_train: pd.DataFrame,
+    df_temporal: pd.DataFrame,
+    y_col: str,
+    feature_columns: list,
+) -> "Dict[str, Any]":
+    """Compare training and temporal cohorts on key distributional properties.
+
+    Args:
+        df_train: Training cohort DataFrame.
+        df_temporal: Temporal validation cohort DataFrame.
+        y_col: Name of the binary outcome column.
+        feature_columns: List of feature column names to analyze.
+
+    Returns:
+        Dict with prevalence info, missingness_shift (sorted by |delta|),
+        and numeric_shift (sorted by |relative shift|).
+    """
+    result: Dict[str, Any] = {}
+
+    # Prevalence
+    prev_train = float(df_train[y_col].mean()) if y_col in df_train.columns else float("nan")
+    prev_temp = float(df_temporal[y_col].mean()) if y_col in df_temporal.columns else float("nan")
+    result["prevalence_train"] = prev_train
+    result["prevalence_temporal"] = prev_temp
+    result["prevalence_delta"] = (prev_temp - prev_train) if not (np.isnan(prev_train) or np.isnan(prev_temp)) else float("nan")
+
+    # Missingness shift
+    miss_rows = []
+    for col in feature_columns:
+        miss_train = float(df_train[col].isna().mean()) if col in df_train.columns else float("nan")
+        miss_temp = float(df_temporal[col].isna().mean()) if col in df_temporal.columns else float("nan")
+        delta = (miss_temp - miss_train) if not (np.isnan(miss_train) or np.isnan(miss_temp)) else float("nan")
+        miss_rows.append({
+            "variable": col,
+            "missing_train": miss_train,
+            "missing_temporal": miss_temp,
+            "delta": delta,
+        })
+    result["missingness_shift"] = sorted(
+        miss_rows,
+        key=lambda x: abs(x.get("delta", 0) or 0),
+        reverse=True,
+    )
+
+    # Numeric distribution shift (median, IQR)
+    num_rows = []
+    for col in feature_columns:
+        if col in df_train.columns and col in df_temporal.columns:
+            s_train = pd.to_numeric(df_train[col], errors="coerce")
+            s_temp = pd.to_numeric(df_temporal[col], errors="coerce")
+            if s_train.notna().sum() > 10 and s_temp.notna().sum() > 5:
+                p25_train = float(s_train.quantile(0.25))
+                p75_train = float(s_train.quantile(0.75))
+                iqr_train = p75_train - p25_train
+                median_train = float(s_train.median())
+                median_temp = float(s_temp.median())
+                rel_shift = abs(median_temp - median_train) / (iqr_train + 1e-8)
+                num_rows.append({
+                    "variable": col,
+                    "median_train": median_train,
+                    "median_temporal": median_temp,
+                    "p25_train": p25_train,
+                    "p75_train": p75_train,
+                    "p25_temporal": float(s_temp.quantile(0.25)),
+                    "p75_temporal": float(s_temp.quantile(0.75)),
+                    "rel_shift_over_iqr": rel_shift,
+                })
+    result["numeric_shift"] = sorted(
+        num_rows,
+        key=lambda x: x.get("rel_shift_over_iqr", 0),
+        reverse=True,
+    )
+
+    return result
