@@ -229,8 +229,7 @@ def euroscore_from_row(row: pd.Series) -> float:
     eca = _yes(row.get("PVD"))
 
     cpd = _yes(row.get("Chronic Lung Disease", np.nan))
-    # Poor mobility: not collected reliably in this dataset — treated as absent for all patients
-    poor_mobility = False
+    poor_mobility = _yes(row.get("Poor mobility", np.nan))
 
     prev_surg = row.get("Previous surgery")
     redo = pd.notna(prev_surg) and str(prev_surg).strip().lower() not in {"", "nan", "unknown", "no"}
