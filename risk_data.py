@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sts_calculator import STS_UNSUPPORTED_SURGERY_KEYWORDS
+from variable_contract import VARIABLE_CONTRACT
 
 
 MISSING_TOKENS = {
@@ -47,24 +48,31 @@ MISSING_TOKENS = {
 # clinical categorical fields where "None" means absence of disease/condition.
 PANDAS_PRESERVE_NONE_READ_KWARGS = {"keep_default_na": False}
 
-NONE_IS_VALID_COLUMNS = {
-    "Aortic Stenosis", "Aortic Regurgitation",
-    "Mitral Stenosis", "Mitral Regurgitation",
-    "Tricuspid Regurgitation",
+# Internal (flat-CSV / snake_case) column aliases that map to valve disease
+# fields — must be included in the NONE_IS_VALID sets alongside canonical names.
+_VALVE_ALIAS_NONE_VALID: frozenset = frozenset({
     "aortic_stenosis_pre", "aortic_regurgitation_pre",
     "mitral_stenosis_pre", "mitral_regurgitation_pre",
     "tricuspid_regurgitation_pre",
     "aortic_stenosis_post", "aortic_regurgitation_post",
-}
+})
 
-LITERAL_NONE_IS_VALID_COLUMNS = NONE_IS_VALID_COLUMNS | {
-    "Arrhythmia Recent",
-    "Arrhythmia Remote",
-    "Aortic Root Abscess",
-    "HF",
-    "Preoperative Medications",
-    "Previous surgery",
-}
+# Derived from VARIABLE_CONTRACT — columns where "None" participates in ordinal
+# TargetEncoder for valve severity (the canonical NONE_IS_VALID_COLUMNS set).
+NONE_IS_VALID_COLUMNS: frozenset = (
+    frozenset(
+        k for k, v in VARIABLE_CONTRACT.items()
+        if v.get("ordinal_encoding_none_valid")
+    )
+    | _VALVE_ALIAS_NONE_VALID
+)
+
+# Derived from VARIABLE_CONTRACT — all columns where the literal string "None"
+# is a valid category (superset of NONE_IS_VALID_COLUMNS).
+LITERAL_NONE_IS_VALID_COLUMNS: frozenset = (
+    frozenset(k for k, v in VARIABLE_CONTRACT.items() if v.get("none_is_valid"))
+    | _VALVE_ALIAS_NONE_VALID
+)
 
 # Binary history variables where a blank cell in the source data means the
 # condition is absent (implicit negative), NOT that the information is unknown.
@@ -72,24 +80,21 @@ LITERAL_NONE_IS_VALID_COLUMNS = NONE_IS_VALID_COLUMNS | {
 # if a historical flag is positive, it is always explicitly documented; blank
 # entries are used as shorthand for "No" by the data entry workflow.
 #
-# Populated by _impute_blank_as_no() AFTER normalize_dataframe() so that all
-# MISSING_TOKENS have already been standardised to NaN.
-#
+# Derived from VARIABLE_CONTRACT (dtype=binary, blank_semantics=absent).
 # Excluded from this set (intentionally):
 #   "Suspension of Anticoagulation (day)" — numeric, conditional on
 #   Anticoagulation=Yes; blank = N/A, not zero days.
-BLANK_MEANS_NO_COLUMNS: frozenset = frozenset({
-    "Family Hx of CAD",
-    "Anticoagulation/ Antiaggregation",
-})
+BLANK_MEANS_NO_COLUMNS: frozenset = frozenset(
+    k for k, v in VARIABLE_CONTRACT.items()
+    if v.get("blank_semantics") == "absent" and v.get("dtype") == "binary"
+)
 
-
-BLANK_MEANS_NONE_COLUMNS: frozenset = frozenset({
-    "Aortic Stenosis",
-    "Arrhythmia Remote",
-    "HF",
-    "Previous surgery",
-})
+# Columns where blank means "None" (the canonical absence-of-disease category).
+# Derived from VARIABLE_CONTRACT (none_is_valid=True, blank_semantics=absent).
+BLANK_MEANS_NONE_COLUMNS: frozenset = frozenset(
+    k for k, v in VARIABLE_CONTRACT.items()
+    if v.get("blank_semantics") == "absent" and v.get("none_is_valid")
+)
 
 CORONARY_SYMPTOM_CANONICAL_VALUES: Dict[str, str] = {
     "none": "No coronary symptoms",
@@ -1032,17 +1037,9 @@ def parse_number(
 # parsing errors (orders-of-magnitude off), NOT to reject physiological
 # outliers. A value that is merely abnormal must still pass.
 _CLINICAL_PLAUSIBILITY_RANGES: Dict[str, Tuple[float, float]] = {
-    "Pré-LVEF, %": (1.0, 100.0),
-    "Hematocrit (%)": (1.0, 100.0),
-    "Creatinine (mg/dL)": (0.05, 50.0),
-    "PSAP": (0.0, 250.0),
-    "Aortic Mean gradient (mmHg)": (0.0, 250.0),
-    "Mitral Mean gradient (mmHg)": (0.0, 100.0),
-    "AVA (cm\u00b2)": (0.01, 10.0),
-    "MVA (cm\u00b2)": (0.01, 15.0),
-    "Vena contracta": (0.0, 50.0),
-    "Vena contracta (mm)": (0.0, 50.0),
-    "TAPSE": (0.0, 60.0),
+    k: v["plausible_range"]
+    for k, v in VARIABLE_CONTRACT.items()
+    if "plausible_range" in v and v.get("dtype") == "numeric"
 }
 
 
