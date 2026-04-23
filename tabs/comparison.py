@@ -327,6 +327,8 @@ def _cached_full_package(
     triple_ci: pd.DataFrame,
     calib_df: pd.DataFrame,
     formal_df: pd.DataFrame,
+    # Bump this string when export_helpers changes to invalidate stale cache.
+    _export_version: str = "2026-04-24-p-str",
     delong_df: pd.DataFrame,
     reclass_df: pd.DataFrame,
     threshold_metrics: pd.DataFrame,
@@ -1540,6 +1542,7 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
                 calibration_plot_df=_calibration_plot_for_export,
                 dca_plot_df=_dca_plot_for_export,
                 manifest=_comparison_manifest,
+                _export_version="2026-04-24-p-str",
             ),
         )
         st.caption(tr(
