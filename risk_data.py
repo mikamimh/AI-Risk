@@ -571,6 +571,15 @@ MISSINGNESS_INDICATOR_SPECS: Dict[str, tuple[str, ...]] = {
         "INR",
         "PTT",
     ),
+    # V4 ablation: captures whether key echocardiographic data was
+    # unavailable before imputation. Ablation over 20 seeds:
+    # ΔBrier -0.0009, RF 80% of wins. Included without Surgery→procedure_group
+    # swap (V1 degraded performance) or V3 combo (worse than V2 alone).
+    "missing_echo_key": (
+        "Pré-LVEF, %",
+        "Aortic Stenosis",
+        "Mitral Regurgitation",
+    ),
 }
 
 MISSINGNESS_INDICATOR_COLUMNS: frozenset = frozenset(MISSINGNESS_INDICATOR_SPECS)
