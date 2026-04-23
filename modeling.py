@@ -1,5 +1,7 @@
-from dataclasses import dataclass
-from typing import Dict, List
+import datetime
+import hashlib
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 import warnings
 
 import numpy as np
@@ -333,6 +335,9 @@ class TrainedArtifacts:
     best_youden_threshold: float | None = None
     """Youden threshold for the best model.  Stored for optional use as
     an alternative decision threshold (the default remains 8 %)."""
+    training_manifest: Optional[Dict[str, Any]] = None
+    """Provenance record written at training time: dataset hash, row count,
+    event count, feature list, CV strategy, seed, and OOF metrics."""
 
 
 # ---------------------------------------------------------------------------
@@ -823,6 +828,34 @@ def train_and_select_model(
     # this string is no longer a single global value.
     _best_cal_method, _ = _calib_config_for(best_name) if best_name in _TREE_MODELS else ("none", 0)
 
+    # ── Training manifest ──────────────────────────────────────────────
+    _best_oof = oof_pred_cal.get(best_name, np.array([]))
+    _manifest: Dict[str, Any] = {
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "n_rows": int(len(X)),
+        "n_events": int(y.sum()),
+        "prevalence": float(y.mean()),
+        "n_features": len(non_empty_cols),
+        "feature_columns": list(non_empty_cols),
+        "cv_strategy": "StratifiedGroupKFold" if groups is not None else "StratifiedKFold",
+        "cv_splits": cv.n_splits,
+        "seed": AppConfig.RANDOM_SEED,
+        "best_model": best_name,
+        "calibration_method": _best_cal_method,
+        "oof_auc": float(roc_auc_score(y, _best_oof)) if len(_best_oof) == len(y) and len(np.unique(y)) > 1 else float("nan"),
+        "oof_auprc": float(average_precision_score(y, _best_oof)) if len(_best_oof) == len(y) and len(np.unique(y)) > 1 else float("nan"),
+        "oof_brier": float(brier_score_loss(y, _best_oof)) if len(_best_oof) == len(y) else float("nan"),
+        "model_version": AppConfig.MODEL_VERSION,
+        "dataset_hash": None,
+    }
+    try:
+        _data_bytes = pd.util.hash_pandas_object(
+            df[[c for c in non_empty_cols if c in df.columns] + [y_col]]
+        ).values.tobytes()
+        _manifest["dataset_hash"] = hashlib.sha256(_data_bytes).hexdigest()[:24]
+    except Exception:
+        pass
+
     return TrainedArtifacts(
         model=best_model,
         leaderboard=leaderboard,
@@ -834,4 +867,5 @@ def train_and_select_model(
         oof_raw=oof_pred_raw,                  # uncalibrated, for audit only
         youden_thresholds=youden_thresholds,
         best_youden_threshold=youden_thresholds.get(best_name),
+        training_manifest=_manifest,
     )
