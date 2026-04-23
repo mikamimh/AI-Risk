@@ -3652,6 +3652,20 @@ if _active_tab == 0:  # Overview
         f"Best training model: {best_model_name} · Last action: {bundle_source}",
         f"Melhor modelo no treino: {best_model_name} · Última ação: {bundle_source}",
     ))
+    _manifest = getattr(artifacts, "training_manifest", None)
+    if _manifest:
+        st.caption(tr(
+            f"Training provenance: {_manifest.get('n_rows', '?')} rows, "
+            f"{_manifest.get('n_events', '?')} events "
+            f"({_manifest.get('prevalence', 0):.1%} prevalence), "
+            f"{_manifest.get('n_features', '?')} features, "
+            f"generated {str(_manifest.get('generated_at', '?'))[:10]}",
+            f"Proveniência do treino: {_manifest.get('n_rows', '?')} linhas, "
+            f"{_manifest.get('n_events', '?')} eventos "
+            f"({_manifest.get('prevalence', 0):.1%} prevalência), "
+            f"{_manifest.get('n_features', '?')} features, "
+            f"gerado em {str(_manifest.get('generated_at', '?'))[:10]}",
+        ))
 
     # Model metadata panel
     _model_meta = build_model_metadata(
@@ -3665,6 +3679,11 @@ if _active_tab == 0:  # Overview
     )
     with st.expander(tr("Model version details", "Detalhes da versão do modelo"), expanded=False):
         st.dataframe(format_metadata_for_display(_model_meta, language), width="stretch")
+        if _manifest and _manifest.get("dataset_hash"):
+            st.caption(tr(
+                f"Dataset fingerprint: {_manifest['dataset_hash']}",
+                f"Fingerprint do dataset: {_manifest['dataset_hash']}",
+            ))
         col_meta1, col_meta2 = st.columns(2)
         with col_meta1:
             _meta_json = json.dumps(_model_meta, ensure_ascii=False, indent=2, default=str)
@@ -3690,6 +3709,14 @@ if _active_tab == 0:  # Overview
         )
     )
     st.dataframe(artifacts.leaderboard, width="stretch", column_config=general_table_column_config("leaderboard"))
+    _prevalence_rate = prepared.info.get("positive_rate", float("nan"))
+    if not __import__("math").isnan(_prevalence_rate):
+        st.caption(tr(
+            f"AUPRC baseline (random classifier) = {_prevalence_rate:.3f} (cohort prevalence). "
+            "A model's AUPRC should be interpreted relative to this baseline.",
+            f"AUPRC baseline (classificador aleatório) = {_prevalence_rate:.3f} (prevalência da coorte). "
+            "O AUPRC de um modelo deve ser interpretado relativo a esse baseline.",
+        ))
 
     with st.expander(tr("How to read the leaderboard", "Como ler o leaderboard"), expanded=False):
         st.caption(
