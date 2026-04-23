@@ -297,6 +297,48 @@ def _build_sts_patient_audit(
     return rows
 
 
+import hashlib as _hashlib
+
+
+def _hash_df_cols(df: pd.DataFrame, cols: list) -> str:
+    """Stable 16-char MD5 hash of specific DataFrame columns for cache keying."""
+    available = [c for c in cols if c in df.columns]
+    return _hashlib.md5(
+        pd.util.hash_pandas_object(df[available], index=False).values.tobytes()
+    ).hexdigest()[:16]
+
+
+@st.cache_data(show_spinner=False)
+def _cached_evaluate_scores_temporal(
+    data_hash: str,
+    score_cols: tuple,
+    threshold: float,
+    n_boot: int,
+    seed: int,
+    _df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Cached wrapper for evaluate_scores_temporal (2000-resample bootstrap)."""
+    return evaluate_scores_temporal(
+        _df, "morte_30d", list(score_cols), threshold,
+        n_boot=n_boot, seed=seed,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_pairwise_score_comparison(
+    data_hash: str,
+    pairs: tuple,
+    n_boot: int,
+    seed: int,
+    _df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Cached wrapper for pairwise_score_comparison (2000-resample bootstrap per pair)."""
+    return pairwise_score_comparison(
+        _df, "morte_30d", list(pairs),
+        n_boot=n_boot, seed=seed,
+    )
+
+
 def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; complexity matches original
     """Render the Temporal Validation tab (tab index 9)."""
     # ── Context aliases ─────────────────────────────────────────────────
@@ -1039,9 +1081,14 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             _tv_score_cols.append("sts_score")
                             _tv_rename["sts_score"] = _tv_sts_score_label
 
-                        _tv_perf = evaluate_scores_temporal(
-                            _tv_data, "morte_30d", _tv_score_cols, _tv_locked_threshold,
-                            n_boot=AppConfig.N_BOOTSTRAP_SAMPLES, seed=AppConfig.BOOTSTRAP_SEED,
+                        _tv_data_hash = _hash_df_cols(_tv_data, ["morte_30d"] + _tv_score_cols)
+                        _tv_perf = _cached_evaluate_scores_temporal(
+                            _tv_data_hash,
+                            tuple(_tv_score_cols),
+                            _tv_locked_threshold,
+                            AppConfig.N_BOOTSTRAP_SAMPLES,
+                            AppConfig.BOOTSTRAP_SEED,
+                            _df=_tv_data,
                         )
                         if not _tv_perf.empty:
                             _tv_perf["Score"] = _tv_perf["Score"].replace(_tv_rename)
@@ -1049,9 +1096,12 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _tv_pairs = [("ia_risk", "euroscore_calc")]
                         if _tv_sts_ok:
                             _tv_pairs += [("ia_risk", "sts_score"), ("sts_score", "euroscore_calc")]
-                        _tv_pairwise = pairwise_score_comparison(
-                            _tv_data, "morte_30d", _tv_pairs,
-                            n_boot=AppConfig.N_BOOTSTRAP_SAMPLES, seed=AppConfig.BOOTSTRAP_SEED,
+                        _tv_pairwise = _cached_pairwise_score_comparison(
+                            _tv_data_hash,
+                            tuple(_tv_pairs),
+                            AppConfig.N_BOOTSTRAP_SAMPLES,
+                            AppConfig.BOOTSTRAP_SEED,
+                            _df=_tv_data,
                         )
                         if not _tv_pairwise.empty:
                             for _old, _new in _tv_rename.items():
@@ -1760,9 +1810,14 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
 
                     # ── 6. Metrics ──
                     # 6.1 Performance table
-                    _tv_perf = evaluate_scores_temporal(
-                        _tv_data, "morte_30d", _tv_score_cols, _tv_locked_threshold,
-                        n_boot=AppConfig.N_BOOTSTRAP_SAMPLES, seed=AppConfig.BOOTSTRAP_SEED,
+                    _tv_data_hash = _hash_df_cols(_tv_data, ["morte_30d"] + _tv_score_cols)
+                    _tv_perf = _cached_evaluate_scores_temporal(
+                        _tv_data_hash,
+                        tuple(_tv_score_cols),
+                        _tv_locked_threshold,
+                        AppConfig.N_BOOTSTRAP_SAMPLES,
+                        AppConfig.BOOTSTRAP_SEED,
+                        _df=_tv_data,
                     )
                     if not _tv_perf.empty:
                         _tv_perf["Score"] = _tv_perf["Score"].replace(_tv_rename)
@@ -1772,9 +1827,12 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                     if _tv_sts_ok:
                         _tv_pairs.append(("ia_risk", "sts_score"))
                         _tv_pairs.append(("sts_score", "euroscore_calc"))
-                    _tv_pairwise = pairwise_score_comparison(
-                        _tv_data, "morte_30d", _tv_pairs,
-                        n_boot=AppConfig.N_BOOTSTRAP_SAMPLES, seed=AppConfig.BOOTSTRAP_SEED,
+                    _tv_pairwise = _cached_pairwise_score_comparison(
+                        _tv_data_hash,
+                        tuple(_tv_pairs),
+                        AppConfig.N_BOOTSTRAP_SAMPLES,
+                        AppConfig.BOOTSTRAP_SEED,
+                        _df=_tv_data,
                     )
                     if not _tv_pairwise.empty:
                         for _old, _new in _tv_rename.items():
