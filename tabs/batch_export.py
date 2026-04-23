@@ -100,6 +100,7 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
     )
 
     cols_show = [
+        "case_uid",
         "Name",
         "Surgery",
         "morte_30d",

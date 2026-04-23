@@ -3445,6 +3445,9 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         _tv_export_case_cols.append("sts_score")
                     if "class_sts" in _tv_data.columns and "class_sts" not in _tv_export_case_cols:
                         _tv_export_case_cols.append("class_sts")
+                    # case_uid is a metadata identifier (not a feature) — include in exports for traceability
+                    if "case_uid" in _tv_data.columns and "case_uid" not in _tv_export_case_cols:
+                        _tv_export_case_cols.insert(0, "case_uid")
 
                     _tv_case_df = _tv_data[_tv_case_cols].copy()
                     # Rename for display
