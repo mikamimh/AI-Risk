@@ -29,25 +29,33 @@ from risk_data import (
 )
 from stats_compare import calibration_intercept_slope
 
-# Binary clinical variables: Yes/No fields encoded as 0/1 numeric instead of
-# going through TargetEncoder. Reduces encoding noise on 1-bit variables and
-# improves stability across seeds (ablation V2: ΔAUC +0.007, ΔStd(AUC) -0.003
-# over 20 seeds × 6 variants).
+# Binary clinical variables: ONLY truly binary Yes/No columns, verified against
+# Dataset_2025.xlsx unique values (2026-04-23). Reduces encoding noise on
+# 1-bit variables by bypassing TargetEncoder.
+#
+# EXCLUDED (not binary — have clinically informative multi-level categories):
+#   Diabetes                    → No, Oral, Insulin, Diet Only, No Control Method
+#   CVA                         → No, TIA, ≤ 30 days, ≥ 30 days
+#   IE                          → No, Yes, Possible
+#   Cancer ≤ 5 yrs              → No, plus specific cancer types (Bowel, Breast, …)
+#   Anticoagulation/Antiagg.    → No, plus medication regimens (AAS, Clopidogrel, …)
+#   Pneumonia                   → No, Treated, Under treatment
+#   Family Hx of CAD            → blank-means-no semantics already handles it;
+#                                  kept categorical to preserve any borderline values
+#
+# Ablation note: the original V2 list included 18 columns and showed ΔAUC +0.007
+# over 20 seeds. The 7 non-binary columns caused information loss in production
+# (Diabetes insulin/oral distinction, CVA timing, cancer types all collapsed to
+# NaN), dropping AUC to 0.733. This corrected list contains only the 11 verified
+# strictly-binary columns.
 _BINARY_DIRECT_ENCODE_COLS: frozenset = frozenset({
-    "IE",
     "Left Main Stenosis ≥ 50%",
     "Proximal LAD Stenosis ≥ 70%",
     "CCS4",
     "Hypertension",
-    "Diabetes",
     "Dyslipidemia",
-    "CVA",
     "PVD",
     "Alcohol",
-    "Cancer ≤ 5 yrs",
-    "Family Hx of CAD",
-    "Anticoagulation/ Antiaggregation",
-    "Pneumonia",
     "Dialysis",
     "Chronic Lung Disease",
     "Critical preoperative state",

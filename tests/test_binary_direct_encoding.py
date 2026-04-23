@@ -18,12 +18,12 @@ def test_yes_no_converted_to_numeric():
 
 
 def test_portuguese_tokens_converted():
-    """Sim/Não → 1.0/0.0."""
+    """Sim/Não → 1.0/0.0 for a column in the binary set."""
     df = pd.DataFrame({
-        "Diabetes": ["Sim", "Não", "sim", "nao"],
+        "Hypertension": ["Sim", "Não", "sim", "nao"],
     })
-    result = clean_features(df)
-    assert list(result["Diabetes"]) == [1.0, 0.0, 1.0, 0.0]
+    result = _encode_binary_direct(df)
+    assert list(result["Hypertension"]) == [1.0, 0.0, 1.0, 0.0]
 
 
 def test_unknown_value_becomes_nan():
@@ -68,11 +68,36 @@ def test_all_binary_cols_covered():
     """All _BINARY_DIRECT_ENCODE_COLS are converted when present."""
     data = {col: ["Yes", "No"] for col in _BINARY_DIRECT_ENCODE_COLS}
     df = pd.DataFrame(data)
-    result = clean_features(df)
+    result = _encode_binary_direct(df)
     for col in _BINARY_DIRECT_ENCODE_COLS:
         assert pd.api.types.is_numeric_dtype(result[col]), f"{col} not numeric"
         assert result[col].iloc[0] == 1.0
         assert result[col].iloc[1] == 0.0
+
+
+def test_non_binary_columns_excluded():
+    """Columns with >2 clinical categories must NOT be in binary encode set."""
+    excluded = {
+        "Diabetes", "CVA", "IE", "Cancer ≤ 5 yrs",
+        "Anticoagulation/ Antiaggregation", "Pneumonia",
+        "Family Hx of CAD",
+    }
+    for col in excluded:
+        assert col not in _BINARY_DIRECT_ENCODE_COLS, (
+            f"{col} should NOT be in _BINARY_DIRECT_ENCODE_COLS — "
+            "it has multi-level clinical categories that must not be collapsed to NaN"
+        )
+
+
+def test_diabetes_insulin_preserved():
+    """Diabetes 'Insulin' must survive _encode_binary_direct as a string."""
+    df = pd.DataFrame({
+        "Diabetes": ["No", "Oral", "Insulin", "Diet Only"],
+        "Age (years)": [65, 70, 55, 80],
+    })
+    result = _encode_binary_direct(df)
+    # Diabetes not in binary set → unchanged string
+    assert list(result["Diabetes"]) == ["No", "Oral", "Insulin", "Diet Only"]
 
 
 def test_encode_binary_direct_missing_column_ignored():
