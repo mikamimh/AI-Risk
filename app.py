@@ -179,9 +179,21 @@ LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @st.cache_data(show_spinner=False)
+def _cached_prepare_master_dataset(xlsx_path: str, _mtime_ns: int):
+    """Cache prepare_master_dataset, keyed by path + file modification time.
+
+    The _mtime_ns parameter is not hashed by Streamlit (leading underscore)
+    but is passed as a cache-key argument so that file changes invalidate
+    the cache without requiring the expensive hash of the XLSX contents.
+    """
+    return prepare_master_dataset(xlsx_path)
+
+
+@st.cache_data(show_spinner=False)
 def _cached_eligibility_info(xlsx_path: str) -> dict:
     """Cache only the numeric data; language-dependent formatting happens outside the cache."""
-    prepared = prepare_master_dataset(xlsx_path)
+    _mtime = Path(xlsx_path).stat().st_mtime_ns if Path(xlsx_path).exists() else 0
+    prepared = _cached_prepare_master_dataset(xlsx_path, _mtime)
     return {k: v for k, v in prepared.info.items() if isinstance(v, (int, float, bool, str))}
 
 
@@ -394,7 +406,8 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
             progress_callback("loading_data", 0, 1, "")
         except Exception:
             pass
-    prepared = prepare_master_dataset(xlsx_path)
+    _mtime = Path(xlsx_path).stat().st_mtime_ns if Path(xlsx_path).exists() else 0
+    prepared = _cached_prepare_master_dataset(xlsx_path, _mtime)
 
     # Phase 3: ingestion + cohort eligibility steps. A required-column
     # failure is a hard stop; the report is attached to the raised error
