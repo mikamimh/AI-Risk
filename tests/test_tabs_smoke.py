@@ -150,6 +150,8 @@ def _make_minimal_ctx():
         plot_dca=_noop,
         build_methods_text=_noop,
         build_results_text=_noop,
+        fig_to_png_bytes=_noop,
+        chart_download_buttons=_noop,
     )
 
 
@@ -182,6 +184,7 @@ def test_tab_context_fields_complete():
         "plot_roc", "plot_calibration", "plot_boxplots",
         "plot_ia_model_boxplots", "plot_dca",
         "build_methods_text", "build_results_text",
+        "fig_to_png_bytes", "chart_download_buttons",
     ]
     for name in callable_fields:
         assert callable(getattr(ctx, name)), f"TabContext.{name} should be callable"
