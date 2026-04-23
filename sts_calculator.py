@@ -90,7 +90,19 @@ STS_CONSECUTIVE_FAILURE_BACKOFF_MAX_S: int = 30
 # This is the single canonical source of STS scope exclusion keywords — used by
 # both classify_sts_eligibility (runtime gate) and the external normalization
 # pipeline (apply_external_scope_rules via risk_data.py).
+# Keywords that mark a surgery as outside STS ACSD scope.
+# Used by classify_sts_eligibility() to reject rows BEFORE the web calculator
+# is queried.  Ordered from most-specific to least-specific so that the first
+# match produces the most informative reason string.
+#
+# Audit trail (2026-04-24, Dataset_2025.csv, n=454):
+#   - Original set: 64 not_supported, 368 supported, 22 uncertain
+#   - Extended set (added TV/structural/congenital/misc below):
+#       ~90 not_supported, ~342 supported, ~22 uncertain
+#   - 25 combined-procedure cases previously misclassified as "supported"
+#     (e.g. "CABG, ASD closure"; "MVR, TV Repair") are now correctly blocked.
 STS_UNSUPPORTED_SURGERY_KEYWORDS: frozenset = frozenset([
+    # Aortic / vascular — original set
     "DISSECTION",
     "ANEURISM",
     "ANEURYSM",
@@ -100,9 +112,35 @@ STS_UNSUPPORTED_SURGERY_KEYWORDS: frozenset = frozenset([
     "AORTIC REPAIR",
     "AORTIC RECONSTRUCTION",
     "AORTA REPAIR",
+    "TEVAR",
+    # Transplant / complex
     "ROSS",
     "HOMOGRAFT",
     "TRANSPLANT",
+    # Tricuspid — TV Repair/Replacement is not an STS ACSD primary procedure
+    # NOTE: "TVR" must precede shorter substrings; verify no false-positive in dataset
+    "TRICUSPID VALVE REPLACEMENT",
+    "TV REPAIR",
+    "TVR",
+    # Structural / congenital
+    "PFO CLOSURE",
+    "ASD CLOSURE",
+    "VSD CORRECTION",
+    "VSD",                      # broad fallback — keep after more-specific "VSD CORRECTION"
+    "ANOMALOUS AORTIC ORIGIN",
+    "ANOMALOUS",
+    "AV REPAIR",
+    # Arrhythmia devices
+    "PACEMAKER IMPLANTATION",
+    "PACEMAKER ELECTRODE EXTRACTION",
+    "LAAO",
+    # Ventricular / pericardial / tumour
+    "LEFT VENTRICULAR ANEURYSMECTOMY",
+    "VENTRICULAR ANEURYSMECTOMY",
+    "PERICARDIECTOMY",
+    "INTRACARDIAC TUMOR",
+    "INTRACARDIAC AND/OR PULMONARY ARTERY THROMBUS",
+    "PANUS",
 ])
 
 # Surgical-priority values that cannot be safely mapped to an STS urgency field.
@@ -399,10 +437,20 @@ def classify_sts_eligibility(row: dict) -> tuple:
     surgery = str(row.get("surgery_pre") or row.get("Surgery") or "").strip().upper()
     priority = str(row.get("surgical_priority") or row.get("Surgical Priority") or "").strip().upper()
 
-    # --- hard exclusions ---
-    for kw in STS_UNSUPPORTED_SURGERY_KEYWORDS:
+    # --- hard exclusions (check before supported-family detection) ---
+    # Sorted by specificity to produce informative reason strings; the loop
+    # tests substring membership, so more-specific terms come first.
+    _sorted_kws = sorted(STS_UNSUPPORTED_SURGERY_KEYWORDS, key=len, reverse=True)
+    for kw in _sorted_kws:
         if kw in surgery:
-            return ("not_supported", f"procedure outside STS ACSD scope: {surgery!r}")
+            # Distinguish: is the excluded component the whole procedure, or
+            # is it a non-supported add-on to an otherwise-covered base?
+            _base_only = surgery == kw
+            if _base_only:
+                _reason = f"procedure outside STS ACSD scope: {kw!r}"
+            else:
+                _reason = f"component outside STS ACSD scope: {kw!r} in {surgery!r}"
+            return ("not_supported", _reason)
 
     # --- priority edge cases ---
     if priority in _STS_UNMAPPABLE_PRIORITY:
