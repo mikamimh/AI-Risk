@@ -1000,16 +1000,31 @@ def _build_comparison_summary_md(
             )
         )
         lines.append("")
-        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | Brier | HL p |")
-        lines.append("|:--|:--|:--|:--|:--|")
+        _has_cil = "CIL" in calib_df.columns
+        _has_ici = "ICI" in calib_df.columns
+        _hdr = f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope"
+        if _has_cil:
+            _hdr += " | CIL"
+        if _has_ici:
+            _hdr += " | ICI"
+        _hdr += " | Brier | HL p |"
+        _sep = "|:--|:--|:--" + ("|:--" if _has_cil else "") + ("|:--" if _has_ici else "") + "|:--|:--|"
+        lines.append(_hdr)
+        lines.append(_sep)
         for _, row in calib_df.iterrows():
             brier_val = f"{row['Brier']:.4f}" if pd.notna(row.get('Brier')) else "-"
-            lines.append(
+            _r = (
                 f"| {row['Score']} | {row.get('Calibration intercept', np.nan):.4f} "
-                f"| {row.get('Calibration slope', np.nan):.4f} "
-                f"| {brier_val} "
-                f"| {row.get('HL p-value', np.nan):.4f} |"
+                f"| {row.get('Calibration slope', np.nan):.4f}"
             )
+            if _has_cil:
+                _cil = f"{row['CIL']:.4f}" if pd.notna(row.get('CIL')) else "-"
+                _r += f" | {_cil}"
+            if _has_ici:
+                _ici = f"{row['ICI']:.4f}" if pd.notna(row.get('ICI')) else "-"
+                _r += f" | {_ici}"
+            _r += f" | {brier_val} | {row.get('HL p-value', np.nan):.4f} |"
+            lines.append(_r)
         lines.append("")
 
     # Threshold classification
@@ -1195,31 +1210,65 @@ def _build_comparison_full_md(
             "Brier mede acurácia probabilística (menor é melhor). p-valor de HL é apenas complementar.",
         ))
         lines.append("")
-        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | Brier | HL p |")
-        lines.append("|:--|:--|:--|:--|:--|")
+        _has_cil = "CIL" in calib_df.columns
+        _has_ici = "ICI" in calib_df.columns
+        _hdr = f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope"
+        if _has_cil:
+            _hdr += " | CIL"
+        if _has_ici:
+            _hdr += " | ICI"
+        _hdr += " | Brier | HL p |"
+        _sep = "|:--|:--|:--" + ("|:--" if _has_cil else "") + ("|:--" if _has_ici else "") + "|:--|:--|"
+        lines.append(_hdr)
+        lines.append(_sep)
         for _, row in calib_df.iterrows():
             brier_val = f"{row['Brier']:.4f}" if pd.notna(row.get('Brier')) else "-"
-            lines.append(
+            _r = (
                 f"| {row['Score']} | {row.get('Calibration intercept', np.nan):.4f} "
-                f"| {row.get('Calibration slope', np.nan):.4f} | {brier_val} "
-                f"| {row.get('HL p-value', np.nan):.4f} |"
+                f"| {row.get('Calibration slope', np.nan):.4f}"
             )
+            if _has_cil:
+                _cil = f"{row['CIL']:.4f}" if pd.notna(row.get('CIL')) else "-"
+                _r += f" | {_cil}"
+            if _has_ici:
+                _ici = f"{row['ICI']:.4f}" if pd.notna(row.get('ICI')) else "-"
+                _r += f" | {_ici}"
+            _r += f" | {brier_val} | {row.get('HL p-value', np.nan):.4f} |"
+            lines.append(_r)
         lines.append("")
 
     # ── Section 5: Full calibration table ────────────────────────────────
     if not calib_df.empty:
         lines.append(f"## {_tr('Calibration (Full)', 'Calibração (Completa)')}")
         lines.append("")
-        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | HL chi2 | HL p | Brier |")
-        lines.append("|:--|:--|:--|:--|:--|:--|")
+        _has_cil = "CIL" in calib_df.columns
+        _has_ici = "ICI" in calib_df.columns
+        _hdr = f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope"
+        if _has_cil:
+            _hdr += " | CIL"
+        if _has_ici:
+            _hdr += " | ICI"
+        _hdr += " | HL chi2 | HL p | Brier |"
+        _sep = "|:--|:--|:--" + ("|:--" if _has_cil else "") + ("|:--" if _has_ici else "") + "|:--|:--|:--|"
+        lines.append(_hdr)
+        lines.append(_sep)
         for _, row in calib_df.iterrows():
             brier_val = f"{row['Brier']:.4f}" if pd.notna(row.get('Brier')) else "-"
-            lines.append(
+            _r = (
                 f"| {row['Score']} | {row.get('Calibration intercept', np.nan):.4f} "
-                f"| {row.get('Calibration slope', np.nan):.4f} "
-                f"| {row.get('HL chi-square', np.nan):.2f} "
+                f"| {row.get('Calibration slope', np.nan):.4f}"
+            )
+            if _has_cil:
+                _cil = f"{row['CIL']:.4f}" if pd.notna(row.get('CIL')) else "-"
+                _r += f" | {_cil}"
+            if _has_ici:
+                _ici = f"{row['ICI']:.4f}" if pd.notna(row.get('ICI')) else "-"
+                _r += f" | {_ici}"
+            _r += (
+                f" | {row.get('HL chi-square', np.nan):.2f} "
                 f"| {row.get('HL p-value', np.nan):.4f} | {brier_val} |"
             )
+            lines.append(_r)
         lines.append("")
 
     # ── Section 6: Threshold classification ──────────────────────────────
