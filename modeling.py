@@ -130,6 +130,10 @@ _VALVE_SEVERITY_COLS = [
 ]
 _VALVE_SEVERITY_ORDER = ["None", "Trivial", "Mild", "Moderate", "Severe"]
 
+# NYHA functional class — ordinal encoding (clinically ordered I < II < III < IV)
+_NYHA_COLS = ["Preoperative NYHA"]
+_NYHA_ORDER = ["I", "II", "III", "IV"]
+
 
 # ---------------------------------------------------------------------------
 # Clipped Pipeline wrapper
@@ -337,14 +341,17 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
     Numeric: median imputation + StandardScaler.
     Valve severity (ordinal): OrdinalEncoder with clinically meaningful order
         (None=0, Trivial=1, Mild=2, Moderate=3, Severe=4) + median imputation.
-        This avoids TargetEncoder's small-sample bias on these columns.
+    NYHA functional class (ordinal): OrdinalEncoder (I=0, II=1, III=2, IV=3);
+        missing values filled as "I" (conservatively assumes lowest class).
     Categorical: mode imputation + TargetEncoder (encodes each category as the
         smoothed mean of the target variable, producing 1 numeric feature per
         categorical column instead of N one-hot columns).
     """
     numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     valve_cols = [c for c in _VALVE_SEVERITY_COLS if c in X.columns and c not in numeric_cols]
-    categorical_cols = [c for c in X.columns if c not in numeric_cols and c not in valve_cols]
+    nyha_cols = [c for c in _NYHA_COLS if c in X.columns and c not in numeric_cols]
+    _ordinal_set = set(valve_cols) | set(nyha_cols)
+    categorical_cols = [c for c in X.columns if c not in numeric_cols and c not in _ordinal_set]
 
     num_pipe = Pipeline(
         steps=[
@@ -357,6 +364,19 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
             ("fill_missing", SimpleImputer(strategy="constant", fill_value="None")),
             ("ordinal_enc", OrdinalEncoder(
                 categories=[_VALVE_SEVERITY_ORDER] * len(valve_cols),
+                handle_unknown="use_encoded_value",
+                unknown_value=np.nan,
+                encoded_missing_value=np.nan,
+            )),
+            ("post_imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+        ]
+    )
+    nyha_pipe = Pipeline(
+        steps=[
+            ("fill_missing", SimpleImputer(strategy="constant", fill_value="I")),
+            ("ordinal_enc", OrdinalEncoder(
+                categories=[_NYHA_ORDER] * len(nyha_cols),
                 handle_unknown="use_encoded_value",
                 unknown_value=np.nan,
                 encoded_missing_value=np.nan,
@@ -379,6 +399,8 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
     transformers = [("num", num_pipe, numeric_cols)]
     if valve_cols:
         transformers.append(("valve", valve_pipe, valve_cols))
+    if nyha_cols:
+        transformers.append(("nyha", nyha_pipe, nyha_cols))
     if categorical_cols:
         transformers.append(("cat", cat_pipe, categorical_cols))
 
