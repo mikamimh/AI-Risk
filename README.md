@@ -4,7 +4,7 @@
 
 Research tool developed as part of a master's dissertation on risk stratification in cardiovascular surgery using artificial intelligence.
 
-The training source can be a canonical multi-sheet workbook/database, a flat CSV/Parquet table, or a single-sheet Excel export. Single-sheet Excel files with default names such as `Planilha1` are treated like flat datasets.
+The training source can be a canonical multi-sheet workbook/database, a flat CSV/Parquet table, or a single-sheet Excel export. Single-sheet Excel files with default names such as `Planilha1` are treated like flat datasets. When both CSV and XLSX versions of the same dataset exist in `local_data/`, the XLSX is preferred automatically to avoid comma-decimal parsing differences.
 
 ## What this app does
 
@@ -31,9 +31,9 @@ The app is organised visually as ten tabs in the following order:
 | 1 | **Overview** | Organised in five fixed snapshot blocks: **Cohort Snapshot** (n, event rate, surgery profile), **Model Snapshot** (model, version, threshold, calibration method), **Performance Snapshot** (leaderboard with calibrated OOF metrics and per-model Youden thresholds), **Operational Snapshot** (score availability), **Audit Snapshot** (eligibility flow and execution report) |
 | 2 | **Prediction** | Single-patient scoring: AI Risk, EuroSCORE II, and STS Score for one case with per-variable contributions; individual patient report export (Markdown / PDF / XLSX / CSV) covering scores, input completeness, clinical interpretation, risk factors, and methodological notes |
 | 3 | **Batch** | Two workflows in one tab. **Research Export** exports the active research cohort with app-calculated AI Risk, EuroSCORE II, STS Score, classes, and OOF predictions (CSV/XLSX). **Batch Prediction** accepts new patient files, reports compatibility KPIs, computes AI Risk + EuroSCORE II and optional STS Score, shows a short preview plus full table in an expander, and exports CSV/XLSX/Markdown/PDF. |
-| 4 | **Comparison** | Head-to-head statistical comparison of AI Risk, EuroSCORE II, and STS Score. Layout: **Operational threshold** → **Main Result — Matched Triple Cohort** → **Calibration at a Glance** → **Threshold Comparison** → probability distributions/diagnostics → **Overall Comparison — Available Data** → **Supplementary Pairwise Comparisons** → **Supplementary Clinical Utility** → **Interpretation & Export**. |
-| 5 | **Temporal Validation** | Apply the frozen trained model to an independently uploaded cohort. Layout: **Locked Model** → **Cohort Integrity** (upload, chronological check, normalization, STS availability) → **Main Validation Result** → **Supplementary / Exploratory** (common cohort when available, recalibration, threshold analysis, case-level predictions) → exports. |
-| 6 | **Data Quality** | Exception-oriented quality panel: top metrics, issues block when missingness/readiness warnings exist, score availability, validation readiness, and long detailed tables inside expanders. |
+| 4 | **Comparison** | Head-to-head statistical comparison of AI Risk, EuroSCORE II, and STS Score. Layout: **Operational threshold** → **Main Result — Matched Triple Cohort** → **Calibration at a Glance** → **Threshold Comparison** → probability distributions/diagnostics → **Overall Comparison — Available Data** → **Supplementary Pairwise Comparisons** → **Supplementary Clinical Utility** (NRI/IDI with 95% CI and p-value) → **Interpretation & Export**. |
+| 5 | **Temporal Validation** | Apply the frozen trained model to an independently uploaded cohort. Layout: **Locked Model** → **Cohort Integrity** (upload, chronological check, normalization, cohort drift analysis, STS availability) → **Main Validation Result** → **Supplementary / Exploratory** (common cohort when available, recalibration, threshold analysis, case-level predictions) → exports. |
+| 6 | **Data Quality** | Exception-oriented quality panel: top metrics, issues block when missingness/readiness warnings exist, score availability, validation readiness, detailed tables inside expanders, and a consolidated **Audit Package (XLSX)** download with 14 sheets covering the full data governance chain. |
 | 7 | **Models** | Plain-language guide to how each candidate algorithm works — how it behaves, its strengths and limitations, and when it typically fails. Also includes selected-model predictor/explainability views. |
 | 8 | **Subgroups** | Performance stratified by clinically relevant subgroups with controls, best-subgroup insight, compact table, full table expander, caution flags for small n/events, and CSV/PDF/XLSX exports. |
 | 9 | **Guide** | Methodological notes, variable mapping, EuroSCORE II approximations; Methods text download (.txt). |
@@ -55,6 +55,24 @@ Exports are intentionally grouped by use case:
 
 Large exports in Comparison, Temporal Validation, and Subgroups are generated lazily: the first click prepares the file and replaces the same visual slot with the download button. Cached export bytes are invalidated when the relevant model/source/threshold context changes.
 
+## Data governance
+
+### Variable semantic contract
+
+A centralized `variable_contract.py` declares for each of the 50+ canonical variables: data type (`numeric`, `binary`, `ordinal`, `categorical`, `text`), parse mode (`strict` or `tolerant`), blank semantics (`absent`, `unknown`, `not_applicable`), plausibility range (when numeric), and valid literal tokens. The previously hardcoded frozensets (`BLANK_MEANS_NO_COLUMNS`, `BLANK_MEANS_NONE_COLUMNS`, `NONE_IS_VALID_COLUMNS`, `LITERAL_NONE_IS_VALID_COLUMNS`, `_CLINICAL_PLAUSIBILITY_RANGES`) are now derived from this contract — values are identical, but the source of truth is a single declarative structure.
+
+### Case UID
+
+Each surgery case receives a deterministic identifier: `case_uid = SHA-256(patient_key || proc_date || surgery_text)[:16]`. This provides end-to-end traceability across ingestion, training, prediction, and export. The case_uid is included in Batch and Temporal Validation exports but is excluded from model features.
+
+### Training manifest
+
+Each trained bundle includes a provenance record with: generation timestamp (UTC), row count, event count, prevalence, feature list, CV strategy, seed, best model name, calibration method, OOF metrics (AUC, AUPRC, Brier), model version string, and a SHA-256[:24] hash of the training dataset. Displayed in the Overview tab under Model Snapshot.
+
+### Audit Package
+
+The Data Quality tab offers a consolidated XLSX download ("Audit Package") with 14 sheets: README, cohort summary, training manifest, missing rates, score availability, validation readiness, feature exclusion policy, surgery distribution, procedure groups, previous surgery audit, ingestion actions, correction records, variable contract, and leaderboard.
+
 ## How each score is computed
 
 ### AI Risk (machine learning)
@@ -63,22 +81,32 @@ Large exports in Comparison, Temporal Validation, and Subgroups are generated la
 - Postoperative complications are never used as predictors
 - Candidate algorithms compared in each run: LogisticRegression, RandomForest, XGBoost, LightGBM, CatBoost, StackingEnsemble
 - Validated via StratifiedGroupKFold cross-validation (same patient never appears in both train and test folds)
-- Candidate models are compared by cross-validated, calibrated out-of-fold performance (discrimination and calibration). Automatic selection applies explicit clinical-usability guardrails to the calibrated OOF distribution — the auto-selected default must (a) produce at least some predictions below the 8% clinical threshold, (b) have AUC above a minimum floor, (c) have a Brier score lower than the prevalence baseline, and (d) have a non-degenerate dynamic range. Models that fail any guardrail remain visible in the leaderboard and can still be force-selected manually.
+- Candidate models are compared by cross-validated, calibrated out-of-fold performance (discrimination and calibration). Automatic selection applies explicit clinical-usability guardrails to the calibrated OOF distribution — the auto-selected default must pass five explicit guardrails: (A) produce at least some predictions below the 8% clinical threshold, (B1) AUC above a minimum floor (0.60), (B2) Brier score lower than the prevalence baseline, (B3) dynamic range ≥ 0.15, and (C) calibration slope within [0.40, 2.50]. Additionally, when two or more models have AUC within 0.01 of each other, a calibration-aware tiebreaker selects the model whose slope is closest to 1.0 — this prevents models with marginally higher AUC but pathological calibration from winning the automatic selection. Models that fail any guardrail remain visible in the leaderboard and can still be force-selected manually.
 - The current operationally appropriate default is **RandomForest**: its calibrated OOF probabilities cross below 8%, its calibration intercept is near zero and slope near one, and it behaves as a high-sensitivity triage rule at the fixed 8% threshold
 - Calibration is applied inside each CV fold for honest OOF evaluation, using a per-model strategy: RandomForest uses sigmoid (Platt scaling) with inner cv≤5; LightGBM and CatBoost use isotonic with inner cv≤5; XGBoost uses isotonic with inner cv≤3. LogisticRegression and StackingEnsemble are used uncalibrated. Only a numerical-stability epsilon clip (1e-6) is applied; the calibrated probability is the clinical output
 - Individual predictions include a disagreement safeguard: when candidate AI models differ by more than 10 percentage points for the same patient, the selected primary model remains unchanged, but the UI displays a caution banner with the candidate-model minimum, median, maximum, and range. This is an interpretation safeguard only; it does not average models, change calibration, or alter thresholds.
 - Numeric variables: median imputation + StandardScaler
-- Missingness indicators: three conservative panel-level laboratory indicators are derived before imputation (`missing_renal_labs`, `missing_cbc_labs`, `missing_coagulation_labs`). They encode whether a renal, complete blood count, or coagulation laboratory block was partially unavailable; no one-indicator-per-variable expansion is used.
+- Missingness indicators: four conservative panel-level indicators are derived before imputation: `missing_renal_labs`, `missing_cbc_labs`, `missing_coagulation_labs`, and `missing_echo_key` (key echocardiographic variables: LVEF, Aortic Stenosis, Mitral Regurgitation). They encode whether a clinical information block was partially unavailable before median/mode imputation; no one-indicator-per-variable expansion is used. The echo indicator was added after ablation validation (20 seeds: ΔBrier −0.0009, no AUC loss).
 - Surgical derived features: three features are derived from `Surgery` and used as active model inputs — `cirurgia_combinada` (0/1, any multi-procedure case), `peso_procedimento` (4-level complexity bucket: `isolated_cabg`, `1_non_cabg`, `2_procedures`, `3plus_procedures`), and `thoracic_aorta_flag` (0/1). These three features are derived identically in training, individual prediction, batch and temporal validation. A fourth derived feature, `procedure_group` (11-class intermediate surgical taxonomy: `CABG_OPCAB`, `AORTIC_VALVE`, `MITRAL_TRICUSPID`, `AORTA_ROOT`, `AORTA_ANEURYSM`, `HF_TRANSPLANT`, `CONGENITAL_STRUCTURAL`, `CARDIAC_MASS_THROMBUS`, `OTHER_CARDIAC`, plus `OTHER` and `UNKNOWN`), is computed and stored for Data Quality auditing and surgery coverage reporting, but is **not** an active model feature. A controlled ablation (n=454, 68 events) showed consistent performance degradation when including it (AUC −0.017, AUPRC −0.020), attributed to TargetEncoder instability at the current cohort size.
 - `Previous surgery` is encoded with TargetEncoder(smooth="auto") as an active model feature. The training data contains free-text (36 categories, 31 singletons); the individual inference form sends binary Yes/No. The smooth regularization shrinks singleton estimates toward the global mean, making both representations converge to the same effective signal — a formal ablation (n=454, 68 events) confirmed the difference is within CV noise (AUC +0.003, inconclusivo). Five structured audit-only columns are derived from the free-text grammar by `parse_previous_surgery()`: `previous_surgery_any` (bool), `previous_surgery_count_est` (int, episodes estimated using `;`-separation and `(xN)` markers), `previous_surgery_has_combined` (bool, `+` present), `previous_surgery_has_repeat_marker` (bool, `(xN)` present), `previous_surgery_has_year_marker` (bool, `(YYYY)` present). None of these audit columns enter model training or inference.
+- Binary clinical variables (18 columns: IE, Hypertension, Diabetes, CVA, PVD, Dialysis, etc.): converted directly to 0/1 numeric before the preprocessor, bypassing TargetEncoder. This eliminates encoding noise for variables that carry only 1 bit of information. Validated via ablation (20 seeds): AUC +0.007, Brier −0.0007, Std(AUC) −0.003 vs TargetEncoder baseline.
 - Valve severity variables: OrdinalEncoder with clinical order (None < Trivial < Mild < Moderate < Severe) — "None" means no disease, not missing data
 - Other categorical variables: mode imputation + TargetEncoder (smooth="auto")
 
 The same inference core (`ai_risk_inference.py`) is used by all three scoring contexts — individual prediction, batch new-patient prediction, and temporal validation — so the probability computed is identical regardless of how a patient reaches the model.
 
-### Official baseline — v13 (2026-04-21)
+### Official baseline — v14 (2026-04-23)
 
-**Bundle version:** `2026-04-21-v13-none-semantics` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 61
+**Bundle version:** `[TO BE UPDATED AFTER RETRAIN]` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 62
+
+`[LEADERBOARD TO BE UPDATED AFTER RETRAIN WITH V2+V4]`
+
+**What changed from v13 (2026-04-21):** Statistical robustness refactor — variable semantic contract (`variable_contract.py`, 50+ variables with declared dtype, parse mode, blank semantics, and plausibility ranges); strict numeric parsing for critical clinical variables; binary direct encoding for 18 Yes/No variables (ablation-validated: ΔAUC +0.007); echo missingness indicator (`missing_echo_key`, ablation-validated: ΔBrier −0.0009); calibration slope guardrail (C: rejects slope < 0.40 or > 2.50); calibration-aware tiebreaker (slope closest to 1.0 when ΔAUC < 0.01); deterministic case_uid (SHA-256[:16]) for traceability; training manifest with dataset hash in bundle; XLSX preferred over CSV when both exist.
+
+<details>
+<summary>v13 baseline (2026-04-21) — superseded</summary>
+
+**Bundle:** `2026-04-21-v13-none-semantics` · n=454, 68 events · 61 features
 
 | Model | AUC | AUPRC | Brier |
 |:--|--:|--:|--:|
@@ -89,9 +117,9 @@ The same inference core (`ai_risk_inference.py`) is used by all three scoring co
 | StackingEnsemble | 0.7199 | 0.2859 | 0.1301 |
 | LogisticRegression | 0.7173 | 0.2875 | 0.1254 |
 
-**RandomForest calibration:** intercept = 0.034, slope = 1.013 · **Youden threshold:** 0.094 · **@8% threshold:** Sensitivity 0.912, Specificity 0.350, PPV 0.198, NPV 0.957
+RF calibration: intercept = 0.034, slope = 1.013 · Youden threshold: 0.094 · @8%: Sensitivity 0.912, Specificity 0.350, PPV 0.198, NPV 0.957
 
-**What changed from v12 (2026-03-29):** Semantic corrections — `None` is now a valid clinical value (absence of disease/history) in `Previous surgery`, `HF`, `Arrhythmia Remote`, and `Aortic Stenosis`; blank cells in those columns are correctly canonicalized rather than treated as missing. Explicit `NEVER_FEATURE_COLUMNS` policy (79 columns across four categories). `procedure_group` removed from training and inference (ablation-confirmed: consistently hurts performance at current cohort size). Numeric performance change from v12: AUC −0.0002, AUPRC +0.0001, Brier 0.0000 — indistinguishable from CV noise. Bundle adopted for methodological correctness, not numeric gain.
+</details>
 
 ### EuroSCORE II
 
@@ -260,7 +288,7 @@ All loader paths (`.xlsx`, `.xls`, `.db`, `.sqlite`, `.csv`, `.parquet`) converg
 - **Coronary presentation convention** — `Coronary Symptom` is treated as a single coronary-presentation field because it feeds both the local model and established score mappings. It may contain no symptoms, angina presentations, and ACS/MI labels (`Non-STEMI`, `STEMI`). The literal value `"None"` is canonicalized to `"No coronary symptoms"` before generic missing-token handling. True blanks and textual unknown tokens remain missing.
 - **Recent arrhythmia convention** — `Arrhythmia Recent` is a categorical recent-arrhythmia field. The literal value `"None"` is a valid clinical category meaning no recent arrhythmia and is not treated as missing. `"No"` is canonicalized to `"None"` for compatibility with older UI/source entries. True blanks and textual unknown tokens remain missing.
 - **Suspension of anticoagulation days** — `Suspension of Anticoagulation (day)` is a conditional numeric field. Blank, not-informed, and not-applicable values remain missing and are never filled with `0`. Simple recoverable text such as `"> 5"`, `"5 days"`, or `"2d"` is parsed to the numeric day value; ambiguous free text remains missing.
-- **Laboratory missingness indicators** — before imputation, the app derives three binary panel-level indicators: `missing_renal_labs` from `Creatinine (mg/dL)` / `Cr clearance, ml/min *`, `missing_cbc_labs` from `Hematocrit (%)` / `WBC Count (10³/μL)` / `Platelet Count (cells/μL)`, and `missing_coagulation_labs` from `INR` / `PTT`. These indicators preserve a small amount of information about clinically meaningful missing laboratory panels without adding a high-dimensional set of missingness flags.
+- **Laboratory missingness indicators** — before imputation, the app derives four binary panel-level indicators: `missing_renal_labs` from `Creatinine (mg/dL)` / `Cr clearance, ml/min *`, `missing_cbc_labs` from `Hematocrit (%)` / `WBC Count (10³/μL)` / `Platelet Count (cells/μL)`, `missing_coagulation_labs` from `INR` / `PTT`, and `missing_echo_key` from `Pré-LVEF, %` / `Aortic Stenosis` / `Mitral Regurgitation`. These indicators preserve a small amount of information about clinically meaningful missing panels without adding a high-dimensional set of missingness flags.
 - **Binary history columns — implicit negative rule** — a narrow set of binary yes/no history flags follows the cardiac surgery registry convention that *if the condition was present, it was documented; if blank, the condition is absent*. After all standard missing-token normalization (empty string, `"-"`, `"nan"`, etc. → NaN), remaining NaN values in these columns are filled with `"No"` — not by a global rule, but by an explicit named constant (`BLANK_MEANS_NO_COLUMNS`) applied only to the listed variables:
 
   | Variable | Rationale |
@@ -471,5 +499,10 @@ This app follows TRIPOD/TRIPOD-AI reporting principles. Key methodological decis
 - Discrimination (AUC, AUPRC) and calibration (Brier, intercept, slope) are both reported and used jointly
 - The operational clinical threshold is fixed at 8%; the per-model Youden threshold is shown as a complementary reference, not as the default
 - AI Risk is a complementary analytical/research tool — it is not a clinical decision-support system and must not be used for autonomous clinical decision-making
-- NRI and IDI are reported as complementary reclassification metrics, not as primary evidence of model superiority
+- NRI and IDI are reported as complementary reclassification metrics, not as primary evidence of model superiority. Both are now reported with 95% bootstrap CI and two-sided p-value (2000 resamples); reclassification metrics without CI should not be used for inference.
+- Calibration intercept and slope are reported with 95% bootstrap CI in Temporal Validation. Calibration-in-the-large (CIL = mean predicted − mean observed) and Integrated Calibration Index (ICI, via isotonic regression) are reported alongside Hosmer-Lemeshow as complementary calibration measures.
+- AUPRC baseline (cohort prevalence) is displayed alongside AUPRC values — a random classifier's AUPRC equals the prevalence; model AUPRC should be interpreted relative to this baseline.
+- Automatic model selection includes a calibration slope guardrail (reject slope < 0.40 or > 2.50) and a calibration-aware tiebreaker (when ΔAUC < 0.01, prefer slope closest to 1.0). This prevents selection of models with marginally higher AUC but pathological calibration.
+- Temporal Validation includes automatic cohort drift analysis: prevalence shift, per-variable missingness delta, and numeric distribution shift (|Δmedian|/IQR) are computed and displayed before performance results.
+- The variable semantic contract (`variable_contract.py`) is the single source of truth for data type, parse mode, blank semantics, and plausibility ranges for all canonical variables.
 - Risk of bias should be assessed across PROBAST domains
