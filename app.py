@@ -4003,6 +4003,76 @@ if _active_tab == 0:  # Overview
                     f"Relatório de execução indisponível: {_obs_err}",
                 ))
 
+    # ── Overview Snapshot Export ─────────────────────────────────────────
+    st.divider()
+    st.markdown(tr("### Export", "### Exportar"))
+
+    def _build_overview_snapshot_xlsx() -> bytes:
+        from io import BytesIO
+        from stats_compare import (
+            calibration_in_the_large,
+            calibration_intercept_slope,
+            integrated_calibration_index,
+        )
+        _buf = BytesIO()
+        with pd.ExcelWriter(_buf, engine="openpyxl") as _wr:
+            # Cohort + bundle summary
+            _cohort_rows = {
+                "Field": [
+                    tr("Patients", "Pacientes"),
+                    tr("Events", "Eventos"),
+                    tr("Event rate", "Taxa de eventos"),
+                    tr("Features", "Features"),
+                    tr("Active model", "Modelo ativo"),
+                    tr("Model version", "Versão do modelo"),
+                    tr("Operational threshold", "Limiar operacional"),
+                    tr("Training source", "Fonte de treino"),
+                    tr("Bundle saved at", "Bundle salvo em"),
+                ],
+                "Value": [
+                    prepared.info["n_rows"],
+                    _overview_events,
+                    f"{_overview_event_rate:.1%}" if np.isfinite(_overview_event_rate) else "N/A",
+                    prepared.info["n_features"],
+                    forced_model,
+                    bundle_info.get("model_version", "?"),
+                    f"{_default_threshold:.0%}",
+                    bundle_info.get("training_source", "?"),
+                    bundle_info.get("saved_at", "?"),
+                ],
+            }
+            pd.DataFrame(_cohort_rows).to_excel(_wr, sheet_name="Cohort", index=False)
+            # Leaderboard
+            if not artifacts.leaderboard.empty:
+                artifacts.leaderboard.to_excel(_wr, sheet_name="Leaderboard", index=False)
+            # Active model calibration
+            _cal_rows = []
+            if hasattr(artifacts, "oof_predictions") and forced_model in artifacts.oof_predictions:
+                _oof = artifacts.oof_predictions[forced_model]
+                _y_ov = df["morte_30d"].astype(int).values
+                try:
+                    _cal = calibration_intercept_slope(_y_ov, _oof)
+                    _cil = calibration_in_the_large(_y_ov, _oof)
+                    _ici = integrated_calibration_index(_y_ov, _oof)
+                    _cal_rows = [
+                        {"Metric": "Calibration intercept", "Value": _cal.get("Calibration intercept", np.nan)},
+                        {"Metric": "Calibration slope",     "Value": _cal.get("Calibration slope", np.nan)},
+                        {"Metric": "CIL",                   "Value": _cil.get("CIL", np.nan)},
+                        {"Metric": "ICI",                   "Value": _ici},
+                    ]
+                except Exception:
+                    pass
+            if _cal_rows:
+                pd.DataFrame(_cal_rows).to_excel(_wr, sheet_name="Calibration", index=False)
+        return _buf.getvalue()
+
+    st.download_button(
+        label=tr("Download Overview Snapshot (XLSX)", "Baixar Snapshot da Visão Geral (XLSX)"),
+        data=_build_overview_snapshot_xlsx(),
+        file_name="ai_risk_overview_snapshot.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 elif _active_tab == 1:  # Individual Prediction
     st.subheader(tr("Prediction", "Predição"))
     st.caption(tr(
