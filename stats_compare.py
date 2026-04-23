@@ -418,12 +418,14 @@ def delong_roc_test(y: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> Dict[str, 
             "p": np.nan,
             "reason": _DELONG_SKIP_REASON_DEGENERATE_VAR,
         }
-    z = diff / np.sqrt(var)
+    se = float(np.sqrt(max(var, 0)))
+    z = diff / se
     pval = float(2 * norm.sf(abs(z)))
     return {
         "AUC_1": float(aucs[0]),
         "AUC_2": float(aucs[1]),
         "delta_auc": diff,
+        "delta_auc_se": se,
         "z": float(z),
         "p": pval,
         "reason": None,
@@ -810,14 +812,30 @@ def pairwise_score_comparison(
         nri = compute_nri_with_ci(y, p2, p1, n_boot=n_boot, seed=seed)
         idi = compute_idi_with_ci(y, p2, p1, n_boot=n_boot, seed=seed)
 
+        # Primary CI: DeLong when available (analytically exact for AUC
+        # differences), bootstrap otherwise.  Both are always reported.
+        _dl_se = dl.get("delta_auc_se", np.nan)
+        if dl.get("reason") is None and np.isfinite(_dl_se) and _dl_se > 0:
+            _ci_low = dl["delta_auc"] - 1.96 * _dl_se
+            _ci_high = dl["delta_auc"] + 1.96 * _dl_se
+            _ci_source = "DeLong"
+        else:
+            _ci_low = bs["ci_low"]
+            _ci_high = bs["ci_high"]
+            _ci_source = "Bootstrap"
+
         rows.append({
             "Comparison": f"{s1} vs {s2}",
             "n": int(len(sub)),
             "Delta_AUC": dl["delta_auc"],
-            "Delta_AUC_IC95_inf": bs["ci_low"],
-            "Delta_AUC_IC95_sup": bs["ci_high"],
+            "Delta_AUC_IC95_inf": _ci_low,
+            "Delta_AUC_IC95_sup": _ci_high,
+            "Delta_AUC_CI_source": _ci_source,
+            "Bootstrap_CI_low": bs["ci_low"],
+            "Bootstrap_CI_high": bs["ci_high"],
             "Bootstrap_p": bs["p"],
             "DeLong_p": dl["p"],
+            "DeLong_SE": _dl_se,
             # ``DeLong_skip_reason`` is non-null only when the test was not
             # computed for a methodological reason (e.g. <2 events or <2
             # non-events).  Consumers can render this as a footnote; when
@@ -834,8 +852,10 @@ def pairwise_score_comparison(
         })
 
     cols = [
-        "Comparison", "n", "Delta_AUC", "Delta_AUC_IC95_inf",
-        "Delta_AUC_IC95_sup", "Bootstrap_p", "DeLong_p", "DeLong_skip_reason",
+        "Comparison", "n", "Delta_AUC",
+        "Delta_AUC_IC95_inf", "Delta_AUC_IC95_sup", "Delta_AUC_CI_source",
+        "Bootstrap_CI_low", "Bootstrap_CI_high", "Bootstrap_p",
+        "DeLong_p", "DeLong_SE", "DeLong_skip_reason",
         "NRI", "NRI_CI_low", "NRI_CI_high", "NRI_p",
         "IDI", "IDI_CI_low", "IDI_CI_high", "IDI_p",
     ]
