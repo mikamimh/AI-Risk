@@ -98,11 +98,34 @@ The same inference core (`ai_risk_inference.py`) is used by all three scoring co
 
 ### Official baseline — v15 (2026-04-24)
 
-**Bundle version:** `2026-04-24-v15-sts-scope-refinement` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 62 · **Triple cohort (after scope refinement):** `[TO BE UPDATED AFTER RETRAIN]`
+**Bundle version:** `2026-04-24-v15-sts-scope-refinement` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 62
 
-`[LEADERBOARD AND CALIBRATION METRICS TO BE UPDATED AFTER RETRAIN WITH v15]`
+| Model | AUC | AUPRC | Brier | BSS |
+|:--|--:|--:|--:|--:|
+| **RandomForest** *(selected)* | **0.7474** | **0.3303** | **0.1155** | **+0.093** |
+| LogisticRegression | 0.7343 | 0.3154 | 0.1249 | +0.014 |
+| StackingEnsemble | 0.7243 | 0.2976 | 0.1358 | −0.067 |
+| LightGBM | 0.7184 | 0.3213 | 0.1187 | +0.042 |
+| XGBoost | 0.7049 | 0.2855 | 0.1194 | +0.037 |
+| CatBoost | 0.6972 | 0.2940 | 0.1224 | +0.013 |
 
-**What changed from v14 (2026-04-23):** STS scope refinement — expanded `STS_UNSUPPORTED_SURGERY_KEYWORDS` to cover 25 previously misclassified combined procedures (TV Repair, ASD/PFO/VSD closure, LAAO, TEVAR, pericardiectomy, pacemaker); improved `classify_sts_eligibility` reason strings to distinguish base-scope exclusion from combined-procedure exclusion. Triple-cohort n decreased from 366 to ~340. NRI/IDI bootstrap p-value: removed `1e-10` clip, added `p_lower_bound` field when p=0 (resolution limit). Brier Skill Score (BSS) added to all evaluation tables and reports. NRI/IDI direction convention documented in all markdown/PDF/XLSX exports.
+**RandomForest calibration:** intercept = −0.006, slope = 0.999 · **@8% threshold:** Sensitivity 0.941, Specificity 0.367, PPV 0.208, NPV 0.972
+
+**Triple cohort (STS-evaluable, refined):** n=334, 45 events (prevalence 13.5%)
+
+| Score | AUC | AUPRC | Brier | BSS | Intercept | Slope | ICI |
+|:--|--:|--:|--:|--:|--:|--:|--:|
+| STS | 0.802 | 0.415 | 0.1212 | **−0.040** | 2.53 | 1.12 | 0.114 |
+| EuroSCORE II | 0.776 | 0.484 | 0.1029 | +0.088 | 1.69 | 1.43 | 0.061 |
+| AI Risk | 0.762 | 0.343 | 0.1044 | +0.093 | 0.07 | 1.09 | 0.033 |
+
+**What changed from v14 (2026-04-23):** STS scope refinement — `STS_UNSUPPORTED_SURGERY_KEYWORDS` expanded from 12 to 31 terms to catch 25 combined procedures previously marked `supported` despite containing out-of-scope components (e.g. CABG + ASD closure, MVR + TV Repair, CABG + Pacemaker implantation). Triple cohort reduced 366 → 334. NRI/IDI bootstrap p-value: removed `1e-10` clip, added `p_lower_bound` when p = 0 (shows `< 1/n_boot`). Brier Skill Score (BSS) added to all evaluation tables and exports. NRI/IDI direction convention documented in all markdown/PDF/XLSX exports.
+
+**Key observations on refined cohort:**
+- AI Risk ↔ STS AUC difference is no longer statistically significant (DeLong p = 0.077, bootstrap p = 0.088). The previous significance in v14 (p = 0.014) was inflated by the 25 contaminated cases.
+- STS Brier Skill Score is negative (−0.040) — worse than predicting cohort prevalence as a probabilistic score despite AUC 0.80. This is a structural finding (EUA training population vs Brazilian cohort), confirmed to persist after removing the 25 contaminated combined-procedure cases.
+- EuroSCORE II and AI Risk remain probabilistically useful (BSS > +0.08).
+- STS miscalibration (intercept +2.53, ICI 0.114) is structural, not an artifact of out-of-scope cases.
 
 <details>
 <summary>v14 baseline (2026-04-23) — superseded</summary>
