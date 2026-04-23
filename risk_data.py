@@ -2162,6 +2162,9 @@ def normalize_dataframe(
 
     # ── 2. Numeric conversion ──────────────────────────────────────
     _force = numeric_hint or set()
+    _strict_contract_cols: frozenset = frozenset(
+        k for k, v in VARIABLE_CONTRACT.items() if v.get("parse_mode") == "strict"
+    )
     for col in out.columns:
         if out[col].dtype != object:
             continue
@@ -2195,6 +2198,24 @@ def normalize_dataframe(
             ))
             if col_ambiguous:
                 ambiguous_by_col[col] = col_ambiguous
+
+            # For strict-parse columns from the contract, log any non-empty
+            # values that were silently NaN'd by the strict numeric converter.
+            if col in _strict_contract_cols:
+                n_rejected = sum(
+                    1 for idx, parsed in parsed_values.items()
+                    if pd.isna(parsed) and str(non_null.at[idx]).strip() != ""
+                )
+                if n_rejected > 0:
+                    report_warnings.append(ColumnAction(
+                        column=col,
+                        action="strict_parse_rejected",
+                        detail=(
+                            f"{n_rejected} non-empty value(s) could not be parsed "
+                            f"under strict numeric mode and were set to NaN"
+                        ),
+                        count=n_rejected,
+                    ))
 
     # ── 2b. Clinical plausibility correction (narrow, column-specific) ──
     # Runs ONLY for the clinical columns listed in
