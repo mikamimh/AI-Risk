@@ -3487,6 +3487,150 @@ _selected_tab_label = st.segmented_control(
 _active_tab = _tab_labels.index(_selected_tab_label) if _selected_tab_label else st.session_state.active_tab
 st.session_state.active_tab = _active_tab
 
+def _build_audit_package_xlsx(
+    dq: dict,
+    prepared,
+    artifacts,
+    bundle_info: dict,
+    val_checks: list,
+    miss_df: pd.DataFrame,
+) -> bytes:
+    """Build a multi-sheet XLSX audit package for the Data Quality tab."""
+    import datetime
+    from io import BytesIO
+    from variable_contract import VARIABLE_CONTRACT
+
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        _manifest = getattr(artifacts, "training_manifest", None)
+
+        # README
+        readme_rows = [
+            {"Field": "Generated at", "Value": datetime.datetime.now().isoformat()},
+            {"Field": "Model version", "Value": bundle_info.get("model_version", "?")},
+            {"Field": "Best model", "Value": getattr(artifacts, "best_model_name", "?")},
+            {"Field": "Calibration method", "Value": getattr(artifacts, "calibration_method", "?")},
+            {"Field": "N rows", "Value": dq["n_total"]},
+            {"Field": "N events", "Value": dq["n_events"]},
+            {"Field": "Event rate", "Value": f"{dq['event_rate']:.4f}"},
+            {"Field": "N features", "Value": len(prepared.feature_columns)},
+            {"Field": "Sheets in this workbook", "Value": "See tabs below for complete audit data"},
+        ]
+        if _manifest and _manifest.get("dataset_hash"):
+            readme_rows.append({"Field": "Dataset fingerprint", "Value": _manifest["dataset_hash"]})
+        pd.DataFrame(readme_rows).to_excel(writer, sheet_name="README", index=False)
+
+        # 01_COHORT_SUMMARY
+        cohort_rows = [
+            {"Metric": "Total eligible surgeries", "Value": dq["n_total"]},
+            {"Metric": "Deaths (primary outcome)", "Value": dq["n_events"]},
+            {"Metric": "Event rate", "Value": f"{dq['event_rate']:.4f}"},
+            {"Metric": "Triple cohort (AI + Euro + STS)", "Value": dq["n_triple"]},
+            {"Metric": "N features", "Value": len(prepared.feature_columns)},
+        ]
+        pd.DataFrame(cohort_rows).to_excel(writer, sheet_name="01_COHORT_SUMMARY", index=False)
+
+        # 02_TRAINING_MANIFEST
+        if _manifest:
+            manifest_rows = [
+                {"Key": k, "Value": str(v)}
+                for k, v in _manifest.items()
+                if k != "feature_columns"
+            ]
+            for i, fc in enumerate((_manifest.get("feature_columns") or [])):
+                manifest_rows.append({"Key": f"feature_{i + 1:03d}", "Value": fc})
+            pd.DataFrame(manifest_rows).to_excel(writer, sheet_name="02_TRAINING_MANIFEST", index=False)
+
+        # 03_MISSING_RATES
+        if not miss_df.empty:
+            miss_df.to_excel(writer, sheet_name="03_MISSING_RATES", index=False)
+
+        # 04_SCORE_AVAILABILITY
+        score_rows = [
+            {"Score": "AI Risk (OOF)", "Patients": dq.get("n_total", 0)},
+            {"Score": "EuroSCORE II (app-calculated)", "Patients": dq["n_euro_calc"]},
+            {"Score": "STS (app-calculated)", "Patients": dq["n_sts"]},
+            {"Score": "EuroSCORE II (sheet)", "Patients": dq["n_euro_sheet"]},
+            {"Score": "EuroSCORE II Auto (sheet)", "Patients": dq["n_euro_auto"]},
+            {"Score": "STS (sheet)", "Patients": dq["n_sts_sheet"]},
+            {"Score": "Triple cohort", "Patients": dq["n_triple"]},
+        ]
+        pd.DataFrame(score_rows).to_excel(writer, sheet_name="04_SCORE_AVAILABILITY", index=False)
+
+        # 05_VALIDATION_READINESS
+        if val_checks:
+            pd.DataFrame(val_checks).to_excel(writer, sheet_name="05_VALIDATION_READINESS", index=False)
+
+        # 06_FEATURE_EXCLUSION_POLICY
+        nf = dq.get("never_feature_audit", {})
+        nf_rows = []
+        for category, cols in nf.items():
+            for col in (cols if isinstance(cols, list) else []):
+                nf_rows.append({"Category": category, "Column": col})
+        if nf_rows:
+            pd.DataFrame(nf_rows).to_excel(writer, sheet_name="06_FEATURE_EXCLUSION", index=False)
+
+        # 07_SURGERY_DISTRIBUTION
+        if dq.get("surgery_dist"):
+            surg_rows = [{"Procedure": k, "Count": v} for k, v in dq["surgery_dist"].items()]
+            pd.DataFrame(surg_rows).to_excel(writer, sheet_name="07_SURGERY_DIST", index=False)
+
+        # 08_PROCEDURE_GROUPS
+        if dq.get("procedure_group_dist"):
+            pg_total = sum(dq["procedure_group_dist"].values())
+            pg_rows = [
+                {
+                    "Group": k,
+                    "Count": v,
+                    "%": f"{v / pg_total:.1%}" if pg_total > 0 else "—",
+                }
+                for k, v in sorted(
+                    dq["procedure_group_dist"].items(), key=lambda x: x[1], reverse=True
+                )
+            ]
+            pd.DataFrame(pg_rows).to_excel(writer, sheet_name="08_PROCEDURE_GROUPS", index=False)
+
+        # 09_PREVIOUS_SURGERY_AUDIT
+        ps = dq.get("previous_surgery_audit", {})
+        if ps:
+            ps_rows = [{"Field": k, "Value": str(v)} for k, v in ps.items()]
+            pd.DataFrame(ps_rows).to_excel(writer, sheet_name="09_PREV_SURGERY_AUDIT", index=False)
+
+        # 10_INGESTION_ACTIONS
+        ir = getattr(prepared, "ingestion_report", None)
+        if ir:
+            lines = ir.summary_lines()
+            if lines:
+                pd.DataFrame({"Action": lines}).to_excel(
+                    writer, sheet_name="10_INGESTION_ACTIONS", index=False
+                )
+
+        # 11_CORRECTION_RECORDS
+        if ir:
+            corr_df = ir.audit_dataframe()
+            if not corr_df.empty:
+                corr_df.to_excel(writer, sheet_name="11_CORRECTION_RECORDS", index=False)
+
+        # 12_VARIABLE_CONTRACT
+        contract_rows = []
+        for var_name, spec in VARIABLE_CONTRACT.items():
+            row = {"variable": var_name}
+            row.update({k: str(v) for k, v in spec.items()})
+            contract_rows.append(row)
+        if contract_rows:
+            pd.DataFrame(contract_rows).to_excel(
+                writer, sheet_name="12_VARIABLE_CONTRACT", index=False
+            )
+
+        # 13_LEADERBOARD
+        lb = getattr(artifacts, "leaderboard", None)
+        if lb is not None and not lb.empty:
+            lb.to_excel(writer, sheet_name="13_LEADERBOARD", index=False)
+
+    return buf.getvalue()
+
+
+
 if _active_tab == 0:  # Overview
 
     st.subheader(tr("Overview", "Visão Geral"))
@@ -5481,6 +5625,34 @@ elif _active_tab == 7:  # Data Quality
                 },
             ]
             st.dataframe(pd.DataFrame(_ps_rows), width="stretch", hide_index=True)
+
+    st.divider()
+    st.markdown(tr("### Audit Package", "### Pacote de Auditoria"))
+    st.caption(tr(
+        "Download a consolidated XLSX workbook with all data quality, ingestion, training, "
+        "and governance information for external audit or dissertation appendix.",
+        "Baixe um workbook XLSX consolidado com todas as informações de qualidade, ingestão, "
+        "treino e governança para auditoria externa ou apêndice da dissertação.",
+    ))
+    _miss_df_for_export = _miss_df.copy() if not _miss_df.empty else pd.DataFrame(
+        [{"Variable": var, "Missing rate": rate}
+         for var, rate in sorted(_dq["missing_rates"].items(), key=lambda x: x[1], reverse=True)]
+    )
+    _audit_xlsx_bytes = _build_audit_package_xlsx(
+        dq=_dq,
+        prepared=prepared,
+        artifacts=artifacts,
+        bundle_info=bundle_info,
+        val_checks=_val_checks,
+        miss_df=_miss_df_for_export,
+    )
+    _bytes_download_btn(
+        _audit_xlsx_bytes,
+        "ai_risk_audit_package.xlsx",
+        tr("Download Audit Package (XLSX)", "Baixar Pacote de Auditoria (XLSX)"),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_audit_package_xlsx",
+    )
 
     with st.expander(tr("Analysis audit trail", "Trilha de auditoria"), expanded=False):
         st.caption(tr(
