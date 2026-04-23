@@ -545,8 +545,16 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     triple = df[["morte_30d", "ia_risk_oof", "euroscore_calc", "sts_score"]].dropna()
     st.markdown(tr("**Primary head-to-head table**", "**Tabela principal head-to-head**"))
     st.caption(tr(
-        f"Matched triple cohort: n = {len(triple)}. Each score is evaluated in exactly the same patients.",
-        f"Coorte tripla pareada: n = {len(triple)}. Cada escore é avaliado exatamente nos mesmos pacientes.",
+        f"Matched triple cohort: n = {len(triple)}. Each score is evaluated in exactly the same patients. "
+        f"STS Score is only computed for surgeries within the STS ACSD scope "
+        f"(CABG, AVR, MVR, MV Repair, and their CABG combinations). "
+        f"Out-of-scope surgeries (transplant, thoracic aorta, Bentall, Ross, homograft) "
+        f"are excluded from this cohort by design — they do not have a valid STS Score.",
+        f"Coorte tripla pareada: n = {len(triple)}. Cada escore é avaliado exatamente nos mesmos pacientes. "
+        f"O STS Score é calculado apenas para cirurgias dentro do escopo STS ACSD "
+        f"(CABG, AVR, MVR, MV Repair e suas combinações com CABG). "
+        f"Cirurgias fora do escopo (transplante, aorta torácica, Bentall, Ross, homograft) "
+        f"são excluídas desta coorte por definição — não possuem STS Score válido.",
     ))
     triple_ci = pd.DataFrame()
     threshold_metrics = pd.DataFrame()

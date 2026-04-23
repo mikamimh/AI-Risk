@@ -264,6 +264,46 @@ def render(ctx: "TabContext") -> None:
         ])
         st.dataframe(_score_ref, width="stretch", hide_index=True)
 
+    # ── STS ACSD SCOPE BREAKDOWN ─────────────────────────────────────────────
+    if "sts_scope_status" in ctx.df.columns:
+        st.divider()
+        st.subheader(tr("STS ACSD Scope Breakdown", "Detalhamento de Escopo STS ACSD"))
+        st.caption(tr(
+            "STS ACSD covers only CABG, AVR, MVR, MV Repair, and their CABG combinations. "
+            "Surgeries outside this scope (transplant, thoracic aorta, Bentall, Ross, homograft) "
+            "receive NaN STS Score — not an invalid number, but a deliberate exclusion.",
+            "O STS ACSD cobre apenas CABG, AVR, MVR, MV Repair e suas combinações com CABG. "
+            "Cirurgias fora deste escopo (transplante, aorta torácica, Bentall, Ross, homograft) "
+            "recebem STS Score = NaN — não um número inválido, mas uma exclusão deliberada.",
+        ))
+        _scope_counts = ctx.df["sts_scope_status"].value_counts()
+        _n_supported = int(_scope_counts.get("supported", 0))
+        _n_not_supported = int(_scope_counts.get("not_supported", 0))
+        _n_uncertain = int(_scope_counts.get("uncertain", 0))
+        _n_total = len(ctx.df)
+        _sc1, _sc2, _sc3, _sc4 = st.columns(4)
+        _sc1.metric(tr("Total surgeries", "Cirurgias totais"), _n_total, border=True)
+        _sc2.metric(
+            tr("STS-supported", "Suportado STS"),
+            f"{_n_supported} ({_n_supported / _n_total:.0%})" if _n_total else "—",
+            border=True,
+        )
+        _sc3.metric(tr("Out of scope", "Fora de escopo"), _n_not_supported, border=True)
+        _sc4.metric(tr("Uncertain", "Incerto"), _n_uncertain, border=True)
+        if _n_not_supported > 0 and "Surgery" in ctx.df.columns:
+            with st.expander(
+                tr("Out-of-scope surgeries detail", "Detalhamento de cirurgias fora de escopo"),
+                expanded=False,
+            ):
+                _oos = ctx.df[ctx.df["sts_scope_status"] == "not_supported"][
+                    [c for c in ["Surgery", "sts_scope_reason"] if c in ctx.df.columns]
+                ]
+                _oos_grouped = (
+                    _oos.groupby("Surgery").size().reset_index(name="n")
+                    .sort_values("n", ascending=False)
+                )
+                st.dataframe(_oos_grouped, width="stretch", hide_index=True)
+
     # ── VALIDATION READINESS ──────────────────────────────────────────────────
     st.divider()
     st.markdown(tr("### Validation Readiness", "### Prontidão para Validação"))
