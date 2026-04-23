@@ -106,6 +106,11 @@ def _build_input_row(feature_columns, form: Dict[str, object]) -> pd.DataFrame:
         row["Previous surgery"] = normalize_previous_surgery_value(row["Previous surgery"])
     if "Aortic Root Abscess" in row:
         row["Aortic Root Abscess"] = normalize_aortic_root_abscess_value(row["Aortic Root Abscess"])
+    # Strip Surgery value to remove accidental whitespace from custom text input.
+    # Primary canonicalisation guard is the selectbox in tabs/prediction.py
+    # (first-seen capitalisation wins). This handles trailing spaces only.
+    if "Surgery" in row and row.get("Surgery"):
+        row["Surgery"] = str(row["Surgery"]).strip()
     surg = form.get("Surgery", "")
     row["cirurgia_combinada"] = is_combined_surgery(surg)
     row["peso_procedimento"] = procedure_weight(surg)

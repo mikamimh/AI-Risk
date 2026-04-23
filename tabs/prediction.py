@@ -456,14 +456,20 @@ def render(ctx: "TabContext") -> None:
     # Rebuild model_options from artifacts (same logic as app.py)
     model_options = artifacts.leaderboard["Modelo"].tolist()
 
-    # Rebuild surgery_component_options (same logic as app.py)
+    # Rebuild surgery_component_options preserving the original capitalisation
+    # from the training dataset. Using .lower() as key deduplicated but allowed
+    # later (lowercase) variants to overwrite the canonical form, causing the
+    # TargetEncoder to see unknown categories at inference time.
     from risk_data import split_surgery_procedures
-    _procedure_item_map: dict = {}
+    _procedure_item_map: dict = {}  # lower_key → canonical_string (first seen wins)
     for _row in prepared.data["Surgery"].dropna().unique():
         for _part in split_surgery_procedures(str(_row)):
             _part = _part.strip()
             if _part:
-                _procedure_item_map[_part.lower()] = _part
+                _key = _part.lower()
+                if _key not in _procedure_item_map:
+                    # First occurrence defines the canonical spelling.
+                    _procedure_item_map[_key] = _part
     surgery_component_options = sorted(_procedure_item_map.values(), key=str.lower)
 
     st.subheader(tr("Prediction", "Predição"))
