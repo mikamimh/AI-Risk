@@ -695,6 +695,17 @@ def compute_data_quality_summary(
             ),
         }
 
+    # Echo-to-surgery interval quality metrics
+    echo_interval_stats: dict = {}
+    if "days_pre_echo_to_surgery" in df.columns:
+        _echo_days = pd.to_numeric(df["days_pre_echo_to_surgery"], errors="coerce")
+        echo_interval_stats = {
+            "median_days": float(_echo_days.median()) if _echo_days.notna().any() else float("nan"),
+            "p75_days": float(_echo_days.quantile(0.75)) if _echo_days.notna().any() else float("nan"),
+            "stale_count": int(df["echo_stale"].sum()) if "echo_stale" in df.columns else 0,
+            "stale_pct": float(df["echo_stale"].mean()) if "echo_stale" in df.columns else float("nan"),
+        }
+
     return {
         "n_total": n_total,
         "n_events": n_events,
@@ -711,6 +722,7 @@ def compute_data_quality_summary(
         "surgery_coverage": surgery_coverage,
         "never_feature_audit": never_feature_audit,
         "previous_surgery_audit": previous_surgery_audit,
+        "echo_interval_stats": echo_interval_stats,
     }
 
 

@@ -3326,6 +3326,15 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
         else:
             pre_post[c] = np.nan
 
+    # Echo-to-surgery interval (metadata only — excluded from features)
+    if "_echo_date" in echo_aligned.columns:
+        pre_post["days_pre_echo_to_surgery"] = (
+            pd.to_datetime(pre_post["_proc_date"]) - pd.to_datetime(echo_aligned["_echo_date"])
+        ).dt.days
+    else:
+        pre_post["days_pre_echo_to_surgery"] = np.nan
+    pre_post["echo_stale"] = pre_post["days_pre_echo_to_surgery"] > 180
+
     pre_post["cirurgia_combinada"] = pre_post["Surgery"].map(is_combined_surgery)
     pre_post["peso_procedimento"] = pre_post["Surgery"].map(procedure_weight)
     pre_post["thoracic_aorta_flag"] = pre_post["Surgery"].map(thoracic_aorta_surgery)
@@ -3428,6 +3437,7 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
         )
     feature_columns = [c for c in feature_columns if c not in NEVER_FEATURE_COLUMNS]
 
+    _echo_days = pd.to_numeric(pre_post.get("days_pre_echo_to_surgery", pd.Series([], dtype=float)), errors="coerce")
     info = {
         "n_rows": len(pre_post),
         "n_features": len(feature_columns),
@@ -3443,6 +3453,9 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
         "echo_rows": int(len(eco)),
         "available_optional_tables": [t for t in OPTIONAL_SOURCE_TABLES if t in tables],
         "never_feature_intercepted": _nf_hits,
+        "echo_interval_median_days": float(_echo_days.median()) if _echo_days.notna().any() else float("nan"),
+        "echo_interval_p75_days": float(_echo_days.quantile(0.75)) if _echo_days.notna().any() else float("nan"),
+        "echo_stale_count": int(pre_post.get("echo_stale", pd.Series([], dtype=bool)).sum()),
     }
 
     return PreparedData(data=pre_post, feature_columns=feature_columns, info=info, ingestion_report=ingestion_report)
