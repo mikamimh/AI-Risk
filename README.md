@@ -96,9 +96,18 @@ The Data Quality tab offers a consolidated XLSX download ("Audit Package") with 
 
 The same inference core (`ai_risk_inference.py`) is used by all three scoring contexts — individual prediction, batch new-patient prediction, and temporal validation — so the probability computed is identical regardless of how a patient reaches the model.
 
-### Official baseline — v14 (2026-04-23)
+### Official baseline — v15 (2026-04-24)
 
-**Bundle version:** `2026-04-23-v14-statistical-robustness` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 62
+**Bundle version:** `2026-04-24-v15-sts-scope-refinement` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 62 · **Triple cohort (after scope refinement):** `[TO BE UPDATED AFTER RETRAIN]`
+
+`[LEADERBOARD AND CALIBRATION METRICS TO BE UPDATED AFTER RETRAIN WITH v15]`
+
+**What changed from v14 (2026-04-23):** STS scope refinement — expanded `STS_UNSUPPORTED_SURGERY_KEYWORDS` to cover 25 previously misclassified combined procedures (TV Repair, ASD/PFO/VSD closure, LAAO, TEVAR, pericardiectomy, pacemaker); improved `classify_sts_eligibility` reason strings to distinguish base-scope exclusion from combined-procedure exclusion. Triple-cohort n decreased from 366 to ~340. NRI/IDI bootstrap p-value: removed `1e-10` clip, added `p_lower_bound` field when p=0 (resolution limit). Brier Skill Score (BSS) added to all evaluation tables and reports. NRI/IDI direction convention documented in all markdown/PDF/XLSX exports.
+
+<details>
+<summary>v14 baseline (2026-04-23) — superseded</summary>
+
+**Bundle:** `2026-04-23-v14-statistical-robustness` · n=454, 68 events · 62 features · triple cohort n=366
 
 | Model | AUC | AUPRC | Brier |
 |:--|--:|--:|--:|
@@ -109,9 +118,9 @@ The same inference core (`ai_risk_inference.py`) is used by all three scoring co
 | XGBoost | 0.7049 | 0.2855 | 0.1194 |
 | CatBoost | 0.6972 | 0.2940 | 0.1224 |
 
-**RandomForest calibration:** intercept = −0.006, slope = 0.999 · **Youden threshold:** 0.127 · **@8% threshold:** Sensitivity 0.941, Specificity 0.367, PPV 0.208, NPV 0.972
+RF calibration: intercept = −0.006, slope = 0.999 · Youden threshold: 0.127 · @8%: Sensitivity 0.941, Specificity 0.367, PPV 0.208, NPV 0.972
 
-**What changed from v13 (2026-04-21):** Statistical robustness refactor — variable semantic contract (`variable_contract.py`, 50+ variables with declared dtype, parse mode, blank semantics, and plausibility ranges); strict numeric parsing for critical clinical variables; binary direct encoding for 11 verified Yes/No variables (7 multi-category columns excluded to preserve clinical information: Diabetes, CVA, IE, Cancer, Anticoagulation, Pneumonia, Family Hx); echo missingness indicator (`missing_echo_key`, ablation-validated: ΔBrier −0.0009); calibration slope guardrail (C: rejects slope < 0.40 or > 2.50); calibration-aware tiebreaker (slope closest to 1.0 when ΔAUC < 0.01); deterministic case_uid (SHA-256[:16]) for traceability; training manifest with dataset hash in bundle; XLSX preferred over CSV when both exist. Numeric change from v13: AUC +0.002, Brier +0.001, calibration slope improved from 1.013 to 0.999 (near-perfect).
+</details>
 
 <details>
 <summary>v13 baseline (2026-04-21) — superseded</summary>
@@ -155,17 +164,19 @@ The STS Score is obtained by **automated interaction with the official STS Risk 
 | Availability | Requires internet; may break if STS updates the interface | N/A |
 | Validation | Results are consistent with the web calculator for supported procedures | N/A |
 
-**Supported procedures:** Isolated CABG, Isolated AVR, Isolated MVR, AVR+CABG, MVR+CABG, MV Repair, MV Repair+CABG.
+**Supported procedures:** Isolated CABG, Isolated AVR, Isolated MVR, AVR+CABG, MVR+CABG, MV Repair, MV Repair+CABG. Combined procedures where the primary component is supported but a secondary component is outside scope (e.g. "CABG, ASD closure"; "MVR, TV Repair") are classified as `not_supported`, not `supported`.
 
 **STS eligibility pre-classification:** Before any network query is attempted, each patient row is passed through `classify_sts_eligibility()`, the single authoritative gatekeeper for STS admission. It assigns one of three statuses:
 
 | Status | Meaning | Action |
 |:--|:--|:--|
-| `supported` | CABG, AVR, MVR, MV Repair, or combinations thereof | Queried normally |
-| `not_supported` | Aortic dissection, aneurism, aneurysm, Bentall, aortic root replacement, or similar unsupported variants | Skipped — STS calculator does not support these procedures |
+| `supported` | CABG, AVR, MVR, MV Repair, or combinations thereof (no out-of-scope component) | Queried normally |
+| `not_supported` | Procedure or any component outside STS ACSD scope — aortic dissection/aneurysm repair, Bentall, Ross, homograft, transplant, TV Repair, ASD/PFO/VSD closure, LAAO, TEVAR, pericardiectomy, pacemaker implantation, intracardiac tumour | Skipped |
 | `uncertain` | OBSERVATION ADMIT, blank surgery string, or other unmappable priority | Always skipped — never silently mapped to any urgency category |
 
-**Scope enforcement applies to both training and temporal validation.** `classify_sts_eligibility()` is called for every patient row before the web calculator is queried — both when building the internal training bundle (`_compute_bundle`) and when processing uploaded external cohorts. Out-of-scope rows receive `NaN` STS Score (not an invalid numeric value), and the columns `sts_scope_status` / `sts_scope_reason` are written to the dataframe for auditability. The Data Quality tab shows a scope breakdown with out-of-scope surgery detail. Prior to this enforcement, ~64 surgeries in the internal dataset (heart transplant, thoracic aorta repair, Bentall-de Bono, Ross, homograft, ventricular aneurysmectomy) received numerically non-`NaN` STS scores that had no methodological validity.
+**Scope enforcement applies to both training and temporal validation.** `classify_sts_eligibility()` is called for every patient row before the web calculator is queried — both when building the internal training bundle (`_compute_bundle`) and when processing uploaded external cohorts. Out-of-scope rows receive `NaN` STS Score (not an invalid numeric value), and the columns `sts_scope_status` / `sts_scope_reason` are written to the dataframe for auditability. The Data Quality tab shows a scope breakdown with out-of-scope surgery detail.
+
+**Scope refinement (2026-04-24):** an audit of Dataset_2025.csv identified 25 combined-procedure cases previously misclassified as `supported` (e.g. "CABG, ASD closure", "MVR, TV Repair") where STS underestimated risk ~6× (mean STS 4.25% vs observed mortality 24%). The keyword set was expanded to cover TV Repair/TVR, ASD/PFO/VSD closure, LAAO, TEVAR, pericardiectomy, pacemaker implantation, and related structural/congenital/device procedures. Triple-cohort n decreased from 366 to ~340 after applying the refined exclusion; see "Sensitivity analysis — STS scope refinement" below.
 
 **OBSERVATION ADMIT rule:** This admission type is classified as `uncertain` and skipped by `classify_sts_eligibility()`. It is **never** silently mapped to `Elective` or any other urgency category. `classify_sts_eligibility()` is the sole authority on whether a row reaches the STS calculator.
 
@@ -511,10 +522,32 @@ This app follows TRIPOD/TRIPOD-AI reporting principles. Key methodological decis
 - Discrimination (AUC, AUPRC) and calibration (Brier, intercept, slope) are both reported and used jointly
 - The operational clinical threshold is fixed at 8%; the per-model Youden threshold is shown as a complementary reference, not as the default
 - AI Risk is a complementary analytical/research tool — it is not a clinical decision-support system and must not be used for autonomous clinical decision-making
-- NRI and IDI are reported as complementary reclassification metrics, not as primary evidence of model superiority. Both are now reported with 95% bootstrap CI and two-sided p-value (2000 resamples); reclassification metrics without CI should not be used for inference.
+- NRI and IDI are reported as complementary reclassification metrics, not as primary evidence of model superiority. Both are now reported with 95% bootstrap CI and two-sided p-value (2000 resamples); reclassification metrics without CI should not be used for inference. **Convention:** "A vs B" means A is the candidate model and B is the reference; NRI > 0 means A reclassifies better than B. When p = 0.0000, the true p-value is below the bootstrap resolution limit (< 1/n_boot = 0.0005 for 2000 resamples); reports display "< 0.0005" in that case — this is not a computation artifact but a statement about statistical precision.
 - Calibration intercept and slope are reported with 95% bootstrap CI in Temporal Validation. Calibration-in-the-large (CIL = mean predicted − mean observed) and Integrated Calibration Index (ICI, via isotonic regression) are reported alongside Hosmer-Lemeshow as complementary calibration measures.
+- **Brier Skill Score (BSS)** is reported alongside Brier score in all evaluation tables. BSS > 0 means the model outperforms always predicting the prevalence; BSS = 0 is equivalent to a prevalence-constant predictor; BSS < 0 indicates the model is worse than predicting the prevalence as a probabilistic score (relevant even when AUC is adequate — this can occur when a model discriminates well but is miscalibrated on the evaluated cohort).
 - AUPRC baseline (cohort prevalence) is displayed alongside AUPRC values — a random classifier's AUPRC equals the prevalence; model AUPRC should be interpreted relative to this baseline.
 - Automatic model selection includes a calibration slope guardrail (reject slope < 0.40 or > 2.50) and a calibration-aware tiebreaker (when ΔAUC < 0.01, prefer slope closest to 1.0). This prevents selection of models with marginally higher AUC but pathological calibration.
 - Temporal Validation includes automatic cohort drift analysis: prevalence shift, per-variable missingness delta, and numeric distribution shift (|Δmedian|/IQR) are computed and displayed before performance results.
 - The variable semantic contract (`variable_contract.py`) is the single source of truth for data type, parse mode, blank semantics, and plausibility ranges for all canonical variables. Multi-level clinical variables (Diabetes, CVA, IE, Cancer, Anticoagulation, Pneumonia) are typed as `categorical`, not `binary`, to prevent encoding destruction of clinically informative categories. The `blank_impute_no` flag explicitly marks columns where blank means "condition absent" regardless of data type.
 - Risk of bias should be assessed across PROBAST domains
+
+## Sensitivity analysis — STS scope refinement
+
+An audit of Dataset_2025.csv (2026-04-24) identified 25 combined-procedure cases that were previously classified as `supported` by `classify_sts_eligibility()` but contain a component outside STS ACSD scope:
+
+| Category | n | Example |
+|:--|--:|:--|
+| CABG + structural (ASD/PFO/VSD closure) | ~10 | "CABG, ASD closure" |
+| AVR/MVR + TV Repair or TVR | ~9 | "MVR, TV Repair" |
+| AVR/MVR/CABG + pacemaker | ~3 | "CABG, Pacemaker implantation" |
+| Other (pericardiectomy, LAAO combined) | ~3 | "AVR, Pericardiectomy" |
+
+In this subgroup, mean STS Score was 4.25% vs observed 30-day mortality of 24% — a ~6× underestimation of risk. Including these cases in the STS comparison introduced systematic bias toward STS underestimating risk. After expanding `STS_UNSUPPORTED_SURGERY_KEYWORDS`, these rows receive `NaN` STS Score and are excluded from the triple-cohort comparison.
+
+| Metric | Before refinement | After refinement |
+|:--|--:|--:|
+| Triple-cohort n | 366 | ~340 |
+| STS-supported patients | 368 | ~342 |
+| STS-not-supported patients | 64 | ~90 |
+
+STS AUC, Brier, and calibration metrics in the triple cohort will be updated after retraining with bundle v15. The AI Risk model itself is unchanged; only the STS comparison cohort is smaller and methodologically cleaner.
