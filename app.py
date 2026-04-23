@@ -353,6 +353,21 @@ def _update_phase(slot, phase_num: int, phase_total: int, label: str) -> None:
 
 
 def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]:
+    _path = Path(xlsx_path)
+    if _path.suffix.lower() == ".csv":
+        _xlsx_alt = _path.with_suffix(".xlsx")
+        if _xlsx_alt.exists():
+            st.warning(
+                tr(
+                    f"Training from CSV ({_path.name}) but an XLSX file with the same name exists "
+                    f"({_xlsx_alt.name}). XLSX is recommended — it avoids comma-decimal parsing "
+                    f"differences that can affect model results. Consider switching to the XLSX file.",
+                    f"Treinando a partir de CSV ({_path.name}), mas existe um arquivo XLSX com o mesmo nome "
+                    f"({_xlsx_alt.name}). O XLSX é recomendado — evita diferenças de parsing de vírgula decimal "
+                    f"que podem afetar os resultados do modelo. Considere usar o arquivo XLSX.",
+                )
+            )
+
     # Force-reload modeling module to pick up any code changes without server restart
     import importlib
     import config.model_config as _cfg_mod
@@ -660,6 +675,17 @@ def _local_source_candidates() -> list[Path]:
     candidates: list[Path] = []
     for pattern in patterns:
         candidates.extend(sorted(LOCAL_DATA_DIR.glob(pattern)))
+
+    # When both CSV and XLSX exist with the same stem, prefer XLSX.
+    # This avoids comma-decimal parsing differences (e.g. "1,29" vs 1.29)
+    # that can cause the same underlying data to produce different model results.
+    xlsx_stems = {p.stem for p in candidates if p.suffix.lower() in (".xlsx", ".xls")}
+    candidates = [
+        p for p in candidates
+        if p.suffix.lower() in (".xlsx", ".xls")
+        or p.stem not in xlsx_stems
+    ]
+
     unique: dict[str, Path] = {}
     for p in candidates:
         unique[str(p.resolve())] = p
