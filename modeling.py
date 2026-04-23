@@ -359,17 +359,19 @@ def _select_best_model(
     usability_floor: float = 0.08,
     min_auc: float = 0.60,
     min_dynamic_range: float = 0.15,
+    min_cal_slope: float = 0.40,
+    max_cal_slope: float = 2.50,
 ) -> str:
     """Select the best model based on leaderboard ranking + clinical guardrails.
 
     The leaderboard is sorted by AUC (desc) then AUPRC (desc). By default
     the top-ranked model wins — no artificial preference for any family.
 
-    Clinical-usability filter (two auditable guardrails)
-    ----------------------------------------------------
+    Clinical-usability filter (guardrails A, B, C)
+    -----------------------------------------------
     When ``oof_predictions`` and ``y`` are both provided, each model is
-    checked against two explicit guardrails. A model is eligible for
-    automatic selection only if it passes **both**:
+    checked against explicit guardrails. A model is eligible for
+    automatic selection only if it passes **all**:
 
     Guardrail A — Coverage at the clinical threshold
         ``(oof_cal < usability_floor).mean() > 0``
@@ -399,6 +401,20 @@ def _select_best_model(
             compression pathologies where the output range is too
             narrow to separate patients (original StackingEnsemble had
             p01..p99 spanning only 0.102).
+
+    Guardrail C — Calibration slope sanity
+        The calibration slope (logistic regression of outcome on logit
+        of predicted probability) must be within [min_cal_slope,
+        max_cal_slope] (default [0.40, 2.50]).  A slope far below 1.0
+        indicates severe probability compression in logit space
+        (isotonic plateau artefacts); a slope far above 1.0 indicates
+        over-dispersion.  Either makes the model unreliable as a
+        probabilistic score for clinical comparison.
+
+        Example pathology caught: LightGBM isotonic calibration on a
+        454-row / 68-event cohort produced slope 0.22 with AUC 0.747 —
+        passing all prior guardrails but clinically unusable as a
+        probability score.
 
     Excluded models still appear in the leaderboard and remain
     force-selectable from the sidebar; only the automatic default changes.
@@ -450,6 +466,20 @@ def _select_best_model(
         span = float(np.percentile(p_valid, 99) - np.percentile(p_valid, 1))
         if span < min_dynamic_range:
             return False
+
+        # Guardrail C — Calibration slope sanity
+        # A slope far from 1.0 means the logit-scale probability
+        # distribution is pathologically compressed or over-dispersed.
+        # Catches isotonic plateau artefacts that pass all other
+        # guardrails (e.g. LightGBM slope 0.22 with AUC 0.747).
+        try:
+            _cal = calibration_intercept_slope(y_valid, p_valid)
+            _slope = _cal.get("Calibration slope", np.nan)
+            if np.isfinite(_slope):
+                if _slope < min_cal_slope or _slope > max_cal_slope:
+                    return False
+        except Exception:
+            pass  # cannot compute → do not penalise
 
         return True
 
