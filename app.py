@@ -1370,7 +1370,10 @@ def _cached_shap_global(
     feat_names = [_feat_display_name(n) for n in prep.get_feature_names_out()]
 
     explainer = _shap.TreeExplainer(estimator)
-    shap_values = explainer.shap_values(X_proc)
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.filterwarnings("ignore", category=UserWarning, module="shap")
+        shap_values = explainer.shap_values(X_proc)
     # Handle multi-class output: list of arrays or 3D array (samples x features x classes)
     if isinstance(shap_values, list):
         shap_values = shap_values[1]
@@ -1411,7 +1414,10 @@ def _cached_shap_beeswarm(
     feat_names = [_feat_display_name(n) for n in prep.get_feature_names_out()]
 
     explainer = _shap.TreeExplainer(estimator)
-    shap_values = explainer.shap_values(X_proc)
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.filterwarnings("ignore", category=UserWarning, module="shap")
+        shap_values = explainer.shap_values(X_proc)
     if isinstance(shap_values, list):
         shap_values = shap_values[1]
     elif shap_values.ndim == 3:
@@ -1454,7 +1460,10 @@ def _cached_shap_dependence(
     feat_names = [_feat_display_name(n) for n in prep.get_feature_names_out()]
 
     explainer = _shap.TreeExplainer(estimator)
-    shap_values = explainer.shap_values(X_proc)
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.filterwarnings("ignore", category=UserWarning, module="shap")
+        shap_values = explainer.shap_values(X_proc)
     if isinstance(shap_values, list):
         shap_values = shap_values[1]
     elif shap_values.ndim == 3:
