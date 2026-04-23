@@ -27,6 +27,8 @@ from model_metadata import (
     generate_clinical_explanation,
     generate_individual_report,
     log_analysis,
+)
+from export_helpers import (
     statistical_summary_to_csv,
     statistical_summary_to_pdf,
     statistical_summary_to_xlsx,
@@ -170,6 +172,59 @@ def _patient_factor_label(base_feature: str, form_map: Dict, tr) -> str:
         return tr("Combined surgery", "Cirurgia combinada")
     if base_feature == "thoracic_aorta_flag":
         return tr("Thoracic aorta surgery", "Cirurgia da aorta torácica")
+    # Missingness indicators — show as data-quality factors, not technical names.
+    # The model learns that absence of these labs/echo variables correlates
+    # with outcome (e.g., labs not ordered for frail patients).
+    if base_feature == "missing_renal_labs":
+        return tr("Renal labs not recorded", "Exames renais não registrados")
+    if base_feature == "missing_cbc_labs":
+        return tr("Blood count not recorded", "Hemograma não registrado")
+    if base_feature == "missing_coagulation_labs":
+        return tr("Coagulation labs not recorded", "Exames de coagulação não registrados")
+    if base_feature == "missing_echo_key":
+        return tr("Key echocardiographic data missing", "Dados ecocardiográficos principais ausentes")
+    # Procedure complexity derived feature.
+    if base_feature == "peso_procedimento":
+        return tr("Procedure complexity", "Complexidade do procedimento")
+    # Anticoagulation suspension timing.
+    if base_feature == "Suspension of Anticoagulation (day)":
+        days = parse_number(val)
+        if pd.notna(days):
+            if float(days) <= 0:
+                return tr("Anticoagulation not suspended", "Anticoagulação não suspensa")
+            if float(days) <= 2:
+                return tr("Recent anticoagulation suspension", "Suspensão recente de anticoagulação")
+            return tr("Remote anticoagulation suspension", "Suspensão tardia de anticoagulação")
+        return tr("Anticoagulation suspension timing", "Tempo de suspensão da anticoagulação")
+    # CBC labs with clinical interpretation.
+    if base_feature == "WBC Count (10³/μL)":
+        w = parse_number(val)
+        if pd.notna(w):
+            if float(w) > 11.0:
+                return tr("Elevated white blood count", "Leucocitose")
+            if float(w) < 4.0:
+                return tr("Low white blood count", "Leucopenia")
+            return tr("Normal white blood count", "Leucograma normal")
+    if base_feature == "Platelet Count (cells/μL)":
+        p = parse_number(val)
+        if pd.notna(p):
+            if float(p) < 150000:
+                return tr("Low platelet count", "Plaquetopenia")
+            if float(p) > 450000:
+                return tr("Elevated platelet count", "Trombocitose")
+            return tr("Normal platelet count", "Plaquetas normais")
+    if base_feature == "Hematocrit (%)":
+        h = parse_number(val)
+        if pd.notna(h):
+            if float(h) < 36:
+                return tr("Low hematocrit", "Hematócrito baixo")
+            return tr("Normal hematocrit", "Hematócrito normal")
+    if base_feature == "INR":
+        i = parse_number(val)
+        if pd.notna(i):
+            if float(i) >= 1.5:
+                return tr("Elevated INR", "RNI elevado")
+            return tr("Normal INR", "RNI normal")
     mapping = {
         "Critical preoperative state": tr("Critical preoperative state", "Estado crítico pré-operatório"),
         "Dialysis": tr("Dialysis", "Diálise"),
