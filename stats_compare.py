@@ -83,10 +83,24 @@ def evaluate_scores_with_threshold(
         sub = df[[y_col, c]].dropna()
         if len(sub) < 30 or sub[y_col].nunique() < 2:
             continue
-        m = basic_metrics(sub[y_col].values, sub[c].values)
-        cls = classification_metrics_at_threshold(sub[y_col].values, sub[c].values, threshold)
-        rows.append({"Score": c, "n": int(len(sub)), **m, **cls})
-    cols = ["Score", "n", "AUC", "AUPRC", "Brier", "Sensitivity", "Specificity", "PPV", "NPV"]
+        y = sub[y_col].values
+        p = sub[c].values
+        m = basic_metrics(y, p)
+        cls = classification_metrics_at_threshold(y, p, threshold)
+        ici = integrated_calibration_index(y, p)
+        rows.append({
+            "Score": c,
+            "n": int(len(sub)),
+            **m,
+            "AUPRC_baseline": float(np.mean(y)),
+            "ICI": ici,
+            **cls,
+        })
+    cols = [
+        "Score", "n", "AUC", "AUPRC", "AUPRC_baseline",
+        "Brier", "ICI",
+        "Sensitivity", "Specificity", "PPV", "NPV",
+    ]
     if not rows:
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(rows)[cols].sort_values("AUC", ascending=False)
@@ -98,12 +112,16 @@ def evaluate_scores(df: pd.DataFrame, y_col: str, score_cols: List[str]) -> pd.D
         sub = df[[y_col, c]].dropna()
         if len(sub) < 30 or sub[y_col].nunique() < 2:
             continue
-        m = basic_metrics(sub[y_col].values, sub[c].values)
+        y = sub[y_col].values
+        m = basic_metrics(y, sub[c].values)
         m["Score"] = c
+        m["AUPRC_baseline"] = float(np.mean(y))
         rows.append(m)
     if not rows:
-        return pd.DataFrame(columns=["Score", "n", "AUC", "AUPRC", "Brier"])
-    return pd.DataFrame(rows)[["Score", "n", "AUC", "AUPRC", "Brier"]].sort_values("AUC", ascending=False)
+        return pd.DataFrame(columns=["Score", "n", "AUC", "AUPRC", "AUPRC_baseline", "Brier"])
+    return pd.DataFrame(rows)[
+        ["Score", "n", "AUC", "AUPRC", "AUPRC_baseline", "Brier"]
+    ].sort_values("AUC", ascending=False)
 
 
 def bootstrap_metrics_ci(
@@ -178,14 +196,11 @@ def evaluate_scores_with_ci(
         sub = df[[y_col, c]].dropna()
         if len(sub) < 30 or sub[y_col].nunique() < 2:
             continue
-        m = bootstrap_metrics_ci(
-            sub[y_col].values,
-            sub[c].values,
-            n_boot=n_boot,
-            seed=seed,
-        )
+        y = sub[y_col].values
+        m = bootstrap_metrics_ci(y, sub[c].values, n_boot=n_boot, seed=seed)
         m["Score"] = c
         m["n"] = int(len(sub))
+        m["AUPRC_baseline"] = float(np.mean(y))
         rows.append(m)
 
     cols = [
@@ -195,6 +210,7 @@ def evaluate_scores_with_ci(
         "AUC_IC95_inf",
         "AUC_IC95_sup",
         "AUPRC",
+        "AUPRC_baseline",
         "AUPRC_IC95_inf",
         "AUPRC_IC95_sup",
         "Brier",
@@ -232,7 +248,7 @@ def bootstrap_auc_diff(
         return {"delta_auc": np.nan, "ci_low": np.nan, "ci_high": np.nan, "p": np.nan}
 
     arr = np.array(deltas)
-    delta = float(np.mean(arr))
+    delta = float(roc_auc_score(y, p1) - roc_auc_score(y, p2))
     ci_low = float(np.percentile(arr, 2.5))
     ci_high = float(np.percentile(arr, 97.5))
     p = float(2 * min((arr <= 0).mean(), (arr >= 0).mean()))
@@ -490,6 +506,208 @@ def compute_idi(y: np.ndarray, p_old: np.ndarray, p_new: np.ndarray) -> Dict[str
     }
 
 
+def compute_nri_with_ci(
+    y: np.ndarray,
+    p_old: np.ndarray,
+    p_new: np.ndarray,
+    cutoffs: Tuple[float, float] = (0.05, 0.15),
+    n_boot: int = 2000,
+    seed: int = 42,
+) -> Dict[str, float]:
+    """NRI (categorical) with 95% bootstrap CI and two-sided p-value.
+
+    Args:
+        y: Binary outcome array.
+        p_old: Predicted probabilities from the reference model.
+        p_new: Predicted probabilities from the new model.
+        cutoffs: Low/high risk thresholds (default 5%/15%).
+        n_boot: Bootstrap iterations.
+        seed: RNG seed.
+
+    Returns:
+        Dict with NRI total/events/non-events plus CI and p-value keys.
+    """
+    y = np.asarray(y).astype(int)
+    p_old = np.asarray(p_old)
+    p_new = np.asarray(p_new)
+    point = compute_nri(y, p_old, p_new, cutoffs)
+    rng = np.random.default_rng(seed)
+    n = len(y)
+    boot_total, boot_events, boot_nonevents = [], [], []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        if len(np.unique(y[idx])) < 2:
+            continue
+        b = compute_nri(y[idx], p_old[idx], p_new[idx], cutoffs)
+        boot_total.append(b["NRI total"])
+        boot_events.append(b["NRI events"])
+        boot_nonevents.append(b["NRI non-events"])
+    if not boot_total:
+        point.update({
+            "NRI_CI_low": np.nan, "NRI_CI_high": np.nan, "NRI_p": np.nan,
+            "NRI_events_CI_low": np.nan, "NRI_events_CI_high": np.nan,
+            "NRI_nonevents_CI_low": np.nan, "NRI_nonevents_CI_high": np.nan,
+        })
+        return point
+    arr = np.array(boot_total)
+    point["NRI_CI_low"] = float(np.percentile(arr, 2.5))
+    point["NRI_CI_high"] = float(np.percentile(arr, 97.5))
+    point["NRI_p"] = float(min(1.0, 2 * min(
+        np.clip((arr <= 0).mean(), 1e-10, 1),
+        np.clip((arr >= 0).mean(), 1e-10, 1),
+    )))
+    point["NRI_events_CI_low"] = float(np.percentile(boot_events, 2.5))
+    point["NRI_events_CI_high"] = float(np.percentile(boot_events, 97.5))
+    point["NRI_nonevents_CI_low"] = float(np.percentile(boot_nonevents, 2.5))
+    point["NRI_nonevents_CI_high"] = float(np.percentile(boot_nonevents, 97.5))
+    return point
+
+
+def compute_idi_with_ci(
+    y: np.ndarray,
+    p_old: np.ndarray,
+    p_new: np.ndarray,
+    n_boot: int = 2000,
+    seed: int = 42,
+) -> Dict[str, float]:
+    """IDI with 95% bootstrap CI and two-sided p-value.
+
+    Args:
+        y: Binary outcome array.
+        p_old: Predicted probabilities from the reference model.
+        p_new: Predicted probabilities from the new model.
+        n_boot: Bootstrap iterations.
+        seed: RNG seed.
+
+    Returns:
+        Dict with IDI plus CI and p-value keys.
+    """
+    y = np.asarray(y).astype(int)
+    p_old = np.asarray(p_old)
+    p_new = np.asarray(p_new)
+    point = compute_idi(y, p_old, p_new)
+    rng = np.random.default_rng(seed)
+    n = len(y)
+    boot_idi = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        if len(np.unique(y[idx])) < 2:
+            continue
+        b = compute_idi(y[idx], p_old[idx], p_new[idx])
+        boot_idi.append(b["IDI"])
+    if not boot_idi:
+        point.update({"IDI_CI_low": np.nan, "IDI_CI_high": np.nan, "IDI_p": np.nan})
+        return point
+    arr = np.array(boot_idi)
+    point["IDI_CI_low"] = float(np.percentile(arr, 2.5))
+    point["IDI_CI_high"] = float(np.percentile(arr, 97.5))
+    point["IDI_p"] = float(min(1.0, 2 * min(
+        np.clip((arr <= 0).mean(), 1e-10, 1),
+        np.clip((arr >= 0).mean(), 1e-10, 1),
+    )))
+    return point
+
+
+def calibration_intercept_slope_with_ci(
+    y: np.ndarray,
+    p: np.ndarray,
+    n_boot: int = 2000,
+    seed: int = 42,
+) -> Dict[str, float]:
+    """Calibration intercept and slope with 95% bootstrap CI.
+
+    Args:
+        y: Binary outcome array.
+        p: Predicted probabilities.
+        n_boot: Bootstrap iterations.
+        seed: RNG seed.
+
+    Returns:
+        Dict with Calibration intercept/slope + CI keys.
+    """
+    y = np.asarray(y).astype(int)
+    p = np.asarray(p)
+    point = calibration_intercept_slope(y, p)
+    rng = np.random.default_rng(seed)
+    n = len(y)
+    boot_int, boot_slope = [], []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        if len(np.unique(y[idx])) < 2:
+            continue
+        c = calibration_intercept_slope(y[idx], p[idx])
+        if not np.isnan(c["Calibration intercept"]):
+            boot_int.append(c["Calibration intercept"])
+            boot_slope.append(c["Calibration slope"])
+    result = dict(point)
+    if boot_int:
+        result["Calibration_intercept_CI_low"] = float(np.percentile(boot_int, 2.5))
+        result["Calibration_intercept_CI_high"] = float(np.percentile(boot_int, 97.5))
+        result["Calibration_slope_CI_low"] = float(np.percentile(boot_slope, 2.5))
+        result["Calibration_slope_CI_high"] = float(np.percentile(boot_slope, 97.5))
+    else:
+        result["Calibration_intercept_CI_low"] = np.nan
+        result["Calibration_intercept_CI_high"] = np.nan
+        result["Calibration_slope_CI_low"] = np.nan
+        result["Calibration_slope_CI_high"] = np.nan
+    return result
+
+
+def calibration_in_the_large(
+    y: np.ndarray,
+    p: np.ndarray,
+    n_boot: int = 2000,
+    seed: int = 42,
+) -> Dict[str, float]:
+    """Mean predicted minus mean observed, with 95% bootstrap CI.
+
+    Positive CIL = model overestimates risk on average.
+
+    Args:
+        y: Binary outcome array.
+        p: Predicted probabilities.
+        n_boot: Bootstrap iterations.
+        seed: RNG seed.
+
+    Returns:
+        Dict with CIL, CIL_CI_low, CIL_CI_high.
+    """
+    y = np.asarray(y).astype(int)
+    p = np.asarray(p)
+    cil = float(np.mean(p) - np.mean(y))
+    rng = np.random.default_rng(seed)
+    n = len(y)
+    boots = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        boots.append(float(np.mean(p[idx]) - np.mean(y[idx])))
+    arr = np.array(boots)
+    return {
+        "CIL": cil,
+        "CIL_CI_low": float(np.percentile(arr, 2.5)),
+        "CIL_CI_high": float(np.percentile(arr, 97.5)),
+    }
+
+
+def integrated_calibration_index(y: np.ndarray, p: np.ndarray) -> float:
+    """Integrated Calibration Index via isotonic regression.
+
+    ICI = mean |smoothed(p) - p|. Lower is better; 0 = perfect calibration.
+
+    Args:
+        y: Binary outcome array.
+        p: Predicted probabilities.
+
+    Returns:
+        ICI scalar (float).
+    """
+    y = np.asarray(y).astype(int)
+    p = np.asarray(p)
+    ir = IsotonicRegression(out_of_bounds="clip")
+    p_smooth = ir.fit_transform(p, y)
+    return float(np.mean(np.abs(p_smooth - p)))
+
+
 # ---------------------------------------------------------------------------
 # Temporal validation composite functions
 # ---------------------------------------------------------------------------
@@ -517,7 +735,9 @@ def evaluate_scores_temporal(
         p = sub[c].values
 
         m = bootstrap_metrics_ci(y, p, n_boot=n_boot, seed=seed)
-        cal = calibration_intercept_slope(y, p)
+        cal = calibration_intercept_slope_with_ci(y, p, n_boot=n_boot, seed=seed)
+        cil = calibration_in_the_large(y, p, n_boot=n_boot, seed=seed)
+        ici = integrated_calibration_index(y, p)
         hl = hosmer_lemeshow_test(y, p)
         cls = classification_metrics_at_threshold(y, p, threshold)
 
@@ -528,11 +748,20 @@ def evaluate_scores_temporal(
             "AUC_IC95_inf": m["AUC_IC95_inf"],
             "AUC_IC95_sup": m["AUC_IC95_sup"],
             "AUPRC": m["AUPRC"],
+            "AUPRC_baseline": float(np.mean(y)),
             "AUPRC_IC95_inf": m["AUPRC_IC95_inf"],
             "AUPRC_IC95_sup": m["AUPRC_IC95_sup"],
             "Brier": m["Brier"],
             "Calibration_Intercept": cal["Calibration intercept"],
+            "Calibration_Intercept_CI_low": cal.get("Calibration_intercept_CI_low", np.nan),
+            "Calibration_Intercept_CI_high": cal.get("Calibration_intercept_CI_high", np.nan),
             "Calibration_Slope": cal["Calibration slope"],
+            "Calibration_Slope_CI_low": cal.get("Calibration_slope_CI_low", np.nan),
+            "Calibration_Slope_CI_high": cal.get("Calibration_slope_CI_high", np.nan),
+            "CIL": cil["CIL"],
+            "CIL_CI_low": cil["CIL_CI_low"],
+            "CIL_CI_high": cil["CIL_CI_high"],
+            "ICI": ici,
             "HL_p": hl["HL p-value"],
             "Sensitivity": cls["Sensitivity"],
             "Specificity": cls["Specificity"],
@@ -542,8 +771,11 @@ def evaluate_scores_temporal(
 
     cols = [
         "Score", "n", "AUC", "AUC_IC95_inf", "AUC_IC95_sup",
-        "AUPRC", "AUPRC_IC95_inf", "AUPRC_IC95_sup", "Brier",
-        "Calibration_Intercept", "Calibration_Slope", "HL_p",
+        "AUPRC", "AUPRC_baseline", "AUPRC_IC95_inf", "AUPRC_IC95_sup", "Brier",
+        "Calibration_Intercept", "Calibration_Intercept_CI_low", "Calibration_Intercept_CI_high",
+        "Calibration_Slope", "Calibration_Slope_CI_low", "Calibration_Slope_CI_high",
+        "CIL", "CIL_CI_low", "CIL_CI_high",
+        "ICI", "HL_p",
         "Sensitivity", "Specificity", "PPV", "NPV",
     ]
     if not rows:
@@ -575,8 +807,8 @@ def pairwise_score_comparison(
 
         dl = delong_roc_test(y, p1, p2)
         bs = bootstrap_auc_diff(y, p1, p2, n_boot=n_boot, seed=seed)
-        nri = compute_nri(y, p2, p1)
-        idi = compute_idi(y, p2, p1)
+        nri = compute_nri_with_ci(y, p2, p1, n_boot=n_boot, seed=seed)
+        idi = compute_idi_with_ci(y, p2, p1, n_boot=n_boot, seed=seed)
 
         rows.append({
             "Comparison": f"{s1} vs {s2}",
@@ -592,13 +824,20 @@ def pairwise_score_comparison(
             # DeLong_p is a number, this column is empty.
             "DeLong_skip_reason": dl.get("reason"),
             "NRI": nri["NRI total"],
+            "NRI_CI_low": nri.get("NRI_CI_low", np.nan),
+            "NRI_CI_high": nri.get("NRI_CI_high", np.nan),
+            "NRI_p": nri.get("NRI_p", np.nan),
             "IDI": idi["IDI"],
+            "IDI_CI_low": idi.get("IDI_CI_low", np.nan),
+            "IDI_CI_high": idi.get("IDI_CI_high", np.nan),
+            "IDI_p": idi.get("IDI_p", np.nan),
         })
 
     cols = [
         "Comparison", "n", "Delta_AUC", "Delta_AUC_IC95_inf",
         "Delta_AUC_IC95_sup", "Bootstrap_p", "DeLong_p", "DeLong_skip_reason",
-        "NRI", "IDI",
+        "NRI", "NRI_CI_low", "NRI_CI_high", "NRI_p",
+        "IDI", "IDI_CI_low", "IDI_CI_high", "IDI_p",
     ]
     if not rows:
         return pd.DataFrame(columns=cols)

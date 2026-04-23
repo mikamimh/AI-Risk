@@ -759,6 +759,7 @@ def train_and_select_model(
                 "Modelo": name,
                 "AUC": auc,
                 "AUPRC": auprc,
+                "AUPRC_baseline": float(y.mean()),
                 "Brier": brier,
                 "Sensibilidade": sens,
                 "Especificidade": spec,
