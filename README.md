@@ -165,6 +165,8 @@ The STS Score is obtained by **automated interaction with the official STS Risk 
 | `not_supported` | Aortic dissection, aneurism, aneurysm, Bentall, aortic root replacement, or similar unsupported variants | Skipped — STS calculator does not support these procedures |
 | `uncertain` | OBSERVATION ADMIT, blank surgery string, or other unmappable priority | Always skipped — never silently mapped to any urgency category |
 
+**Scope enforcement applies to both training and temporal validation.** `classify_sts_eligibility()` is called for every patient row before the web calculator is queried — both when building the internal training bundle (`_compute_bundle`) and when processing uploaded external cohorts. Out-of-scope rows receive `NaN` STS Score (not an invalid numeric value), and the columns `sts_scope_status` / `sts_scope_reason` are written to the dataframe for auditability. The Data Quality tab shows a scope breakdown with out-of-scope surgery detail. Prior to this enforcement, ~64 surgeries in the internal dataset (heart transplant, thoracic aorta repair, Bentall-de Bono, Ross, homograft, ventricular aneurysmectomy) received numerically non-`NaN` STS scores that had no methodological validity.
+
 **OBSERVATION ADMIT rule:** This admission type is classified as `uncertain` and skipped by `classify_sts_eligibility()`. It is **never** silently mapped to `Elective` or any other urgency category. `classify_sts_eligibility()` is the sole authority on whether a row reaches the STS calculator.
 
 A compact eligibility summary is shown before querying begins: `STS eligibility: N supported · N not supported (skipped) · N uncertain — OBSERVATION ADMIT or unmapped priority (skipped)`.
