@@ -408,14 +408,33 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
     df["euroscore_sheet_clean"] = pd.to_numeric(df["euroscore_sheet"], errors="coerce")
     df["euroscore_auto_sheet_clean"] = pd.to_numeric(df["euroscore_auto_sheet"], errors="coerce")
 
-    # STS Score: query the web calculator for all patients, routed
-    # through the Phase 2 persistent STS Score cache (14-day TTL,
-    # patient-keyed stale fallback, structured execution log).
+    # STS Score: query the web calculator ONLY for patients within STS ACSD scope.
+    # The STS calculator covers 7 procedures (CABG, AVR, MVR, MV Repair and their
+    # CABG combinations); querying outside-scope surgeries (transplant, thoracic
+    # aorta, Bentall, Ross, homograft, ventricular aneurysmectomy) produces
+    # invalid scores. Scope is enforced per-row via classify_sts_eligibility.
+    from sts_calculator import classify_sts_eligibility as _classify_sts
+
     sts_ws_results = []
+    _eligibility: list = []
+    _eligible_mask: list = []
     if HAS_STS:
-        rows_as_dicts = df.to_dict(orient="records")
-        _sts_pids = _sts_score_patient_ids(rows_as_dicts)
+        _all_rows = df.to_dict(orient="records")
+        _eligibility = [_classify_sts(r) for r in _all_rows]
+        _eligible_mask = [status == "supported" for status, _ in _eligibility]
+
+        rows_as_dicts = [r for r, ok in zip(_all_rows, _eligible_mask) if ok]
+        _sts_pids_all = _sts_score_patient_ids(_all_rows)
+        _sts_pids = [p for p, ok in zip(_sts_pids_all, _eligible_mask) if ok]
         _sts_total = len(rows_as_dicts)
+
+        _n_excluded = sum(1 for ok in _eligible_mask if not ok)
+        if _n_excluded > 0:
+            _emit_progress("sts_scope_enforced", 0, len(_all_rows), {
+                "n_total": len(_all_rows),
+                "n_supported": _sts_total,
+                "n_excluded": _n_excluded,
+            })
         _sts_state = {
             "total": _sts_total,
             "processed": 0,
@@ -494,15 +513,31 @@ def _compute_bundle(xlsx_path: str, progress_callback=None) -> Dict[str, object]
         })
         _emit_progress("sts_score_done", _sts_total, _sts_total, _sts_done_detail)
 
-    if sts_ws_results:
-        df["sts_score"] = [r.get("predmort", np.nan) for r in sts_ws_results]
-        # Store all STS sub-scores for later display
+    if HAS_STS and _eligible_mask:
+        # Align results to full df: empty dict for out-of-scope / uncertain rows.
+        _results_aligned: list = []
+        _results_iter = iter(sts_ws_results or [])
+        for ok in _eligible_mask:
+            if ok:
+                try:
+                    _results_aligned.append(next(_results_iter))
+                except StopIteration:
+                    _results_aligned.append({})
+            else:
+                _results_aligned.append({})
+
+        df["sts_score"] = [r.get("predmort", np.nan) for r in _results_aligned]
         for key in ["predmort", "predmm", "predstro", "predrenf", "predreop",
                      "predvent", "preddeep", "pred14d", "pred6d"]:
-            df[f"sts_{key}"] = [r.get(key, np.nan) for r in sts_ws_results]
+            df[f"sts_{key}"] = [r.get(key, np.nan) for r in _results_aligned]
+
+        df["sts_scope_status"] = [status for status, _ in _eligibility]
+        df["sts_scope_reason"] = [reason for _, reason in _eligibility]
     else:
-        # No fallback — STS is only available via the web calculator
+        # STS calculator unavailable — all NaN
         df["sts_score"] = np.nan
+        df["sts_scope_status"] = "not_applicable"
+        df["sts_scope_reason"] = "STS calculator unavailable"
 
     # Phase 3: STS Score step (falls back gracefully if no log attached).
     run_report.add(_obs.build_step_sts_score(
