@@ -212,7 +212,8 @@ class ModelExplainer:
         shap_values = self._compute_shap_values(X)
         feature_idx = list(X.columns).index(feature_name)
 
-        fig = plt.figure(figsize=figsize)
+        plt.close("all")
+        plt.figure(figsize=figsize)
         shap.dependence_plot(
             feature_idx,
             shap_values,
@@ -221,7 +222,7 @@ class ModelExplainer:
             feature_names=X.columns.tolist(),
         )
         plt.tight_layout()
-        return fig
+        return plt.gcf()
 
     def plot_beeswarm(
         self,

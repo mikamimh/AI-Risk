@@ -1473,7 +1473,8 @@ def _cached_shap_dependence(
         return None
     feature_idx = feat_names.index(feature_name)
 
-    fig = plt.figure(figsize=(10, 6))
+    plt.close("all")
+    plt.figure(figsize=(10, 6))
     _shap.dependence_plot(
         feature_idx,
         shap_values,
@@ -1482,7 +1483,7 @@ def _cached_shap_dependence(
         show=False,
     )
     plt.tight_layout()
-    return fig
+    return plt.gcf()
 
 
 def logistic_clinical_coefficients_table(artifacts, prepared, top_n: int = 20, show_all: bool = False) -> pd.DataFrame:
