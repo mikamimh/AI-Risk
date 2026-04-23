@@ -62,9 +62,14 @@ _BINARY_DIRECT_ENCODE_COLS: frozenset = frozenset({
     "Poor mobility",
 })
 
+# Binary Yes/No tokens — applied EXCLUSIVELY to the columns listed in
+# _BINARY_DIRECT_ENCODE_COLS. Multi-level clinical variables (Pneumonia,
+# IE, Cancer, CVA, Diabetes, Anticoagulation) are intentionally routed
+# through TargetEncoder to preserve informative categories and must
+# NEVER be added to _BINARY_DIRECT_ENCODE_COLS. See
+# tests/test_binary_encoding_guard.py for the enforcing test.
 _POSITIVE_TOKENS: frozenset = frozenset({
     "yes", "sim", "true", "1", "1.0",
-    "treated", "active", "possible",
 })
 _NEGATIVE_TOKENS: frozenset = frozenset({
     "no", "não", "nao", "false", "0", "0.0",
