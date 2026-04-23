@@ -20,6 +20,7 @@ from sklearn.metrics import roc_curve
 from stats_compare import (
     bootstrap_auc_diff,
     calibration_bins_detail,
+    calibration_in_the_large,
     calibration_intercept_slope,
     classification_metrics_at_threshold,
     compute_idi,
@@ -32,6 +33,7 @@ from stats_compare import (
     evaluate_scores_with_ci,
     evaluate_scores_with_threshold,
     hosmer_lemeshow_test,
+    integrated_calibration_index,
     threshold_analysis_table,
 )
 from export_helpers import (
@@ -606,14 +608,31 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
 
         calib_rows = []
         for label, col in [("AI Risk", "ia_risk_oof"), ("EuroSCORE II", "euroscore_calc"), ("STS", "sts_score")]:
-            ci_vals = calibration_intercept_slope(triple["morte_30d"].values, triple[col].values)
-            hl_vals = hosmer_lemeshow_test(triple["morte_30d"].values, triple[col].values)
+            _y = triple["morte_30d"].values
+            _p = triple[col].values
+            ci_vals = calibration_intercept_slope(_y, _p)
+            hl_vals = hosmer_lemeshow_test(_y, _p)
+            try:
+                _cil_val = calibration_in_the_large(_y, _p)["CIL"]
+            except Exception:
+                _cil_val = np.nan
+            try:
+                _ici_val = integrated_calibration_index(_y, _p)
+            except Exception:
+                _ici_val = np.nan
             brier_val = np.nan
             if not _triple_ci_canon.empty:
                 _br = _triple_ci_canon[_triple_ci_canon["Score"] == _canon(label)]
                 if not _br.empty:
                     brier_val = float(_br.iloc[0].get("Brier", np.nan))
-            calib_rows.append({"Score": label, **ci_vals, **hl_vals, "Brier": brier_val})
+            calib_rows.append({
+                "Score": label,
+                **ci_vals,
+                **hl_vals,
+                "CIL": _cil_val,
+                "ICI": _ici_val,
+                "Brier": brier_val,
+            })
         calib_df = pd.DataFrame(calib_rows)
 
         _best_auc_label = None
@@ -664,20 +683,28 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
         st.markdown(tr("### Calibration at a Glance", "### Calibração em Resumo"))
         st.caption(tr(
             "Intercept near 0 and slope near 1 indicate good calibration. "
-            "Brier measures probabilistic accuracy (lower is better). "
+            "CIL (Calibration-in-the-Large) = mean predicted − mean observed — close to 0 is ideal. "
+            "ICI (Integrated Calibration Index) measures average absolute calibration error — lower is better. "
             "HL p-value is complementary only — do not interpret in isolation.",
             "Intercepto próximo de 0 e slope próximo de 1 indicam boa calibração. "
-            "Brier mede acurácia probabilística (menor é melhor). "
+            "CIL (Calibração Geral) = média predita − média observada — próximo de 0 é ideal. "
+            "ICI (Índice Integrado de Calibração) mede o erro médio absoluto de calibração — menor é melhor. "
             "p-valor de HL é apenas complementar — não interpretar isoladamente.",
         ))
-        _calib_glance_cols = ["Score", "Calibration intercept", "Calibration slope", "Brier", "HL p-value"]
+        _calib_glance_cols = ["Score", "Calibration intercept", "Calibration slope", "CIL", "ICI", "Brier", "HL p-value"]
         _calib_glance_df = calib_df[[c for c in _calib_glance_cols if c in calib_df.columns]].copy()
         st.dataframe(_calib_glance_df, width="stretch", column_config=stats_table_column_config("calibration"), hide_index=True)
 
         st.markdown(tr("**Full calibration table**", "**Tabela de calibração completa**"))
         st.caption(tr(
-            "Brier measures probabilistic accuracy. Calibration-in-the-large (intercept) close to 0 and slope close to 1 are desirable. Hosmer-Lemeshow should be interpreted as complementary, not in isolation.",
-            "O Brier mede a acurácia probabilística. Calibration-in-the-large (intercepto) próximo de 0 e slope próximo de 1 são desejáveis. O teste de Hosmer-Lemeshow deve ser interpretado como complementar, e não isoladamente.",
+            "Brier measures probabilistic accuracy. Intercept close to 0 and slope close to 1 are desirable. "
+            "CIL (Calibration-in-the-Large) = mean predicted − mean observed — close to 0 is ideal. "
+            "ICI (Integrated Calibration Index) measures average absolute calibration error via isotonic regression — lower is better. "
+            "Hosmer-Lemeshow should be interpreted as complementary, not in isolation.",
+            "O Brier mede a acurácia probabilística. Intercepto próximo de 0 e slope próximo de 1 são desejáveis. "
+            "CIL (Calibração Geral) = média predita − média observada — próximo de 0 é ideal. "
+            "ICI (Índice Integrado de Calibração) mede o erro médio absoluto de calibração via regressão isotônica — menor é melhor. "
+            "O teste de Hosmer-Lemeshow deve ser interpretado como complementar, e não isoladamente.",
         ))
         st.dataframe(calib_df, width="stretch", column_config=stats_table_column_config("calibration"))
 

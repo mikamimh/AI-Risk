@@ -204,13 +204,17 @@ def build_statistical_summary(
             )
         )
         lines.append("")
-        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | Brier | HL p |")
-        lines.append("|:--|:--|:--|:--|:--|")
+        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | CIL | ICI | Brier | HL p |")
+        lines.append("|:--|:--|:--|:--|:--|:--|:--|")
         for _, row in calib_df.iterrows():
             brier_val = f"{row['Brier']:.4f}" if pd.notna(row.get('Brier')) else "-"
+            cil_val = f"{row['CIL']:.4f}" if pd.notna(row.get('CIL')) else "-"
+            ici_val = f"{row['ICI']:.4f}" if pd.notna(row.get('ICI')) else "-"
             lines.append(
                 f"| {row['Score']} | {row.get('Calibration intercept', np.nan):.4f} "
                 f"| {row.get('Calibration slope', np.nan):.4f} "
+                f"| {cil_val} "
+                f"| {ici_val} "
                 f"| {brier_val} "
                 f"| {row.get('HL p-value', np.nan):.4f} |"
             )
@@ -220,10 +224,22 @@ def build_statistical_summary(
     if not calib_df.empty:
         lines.append(f"## {_tr('Calibration (full)', 'Calibração (completa)')}")
         lines.append("")
-        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | HL chi² | HL p |")
-        lines.append("|:--|:--|:--|:--|:--|")
+        lines.append(f"| {_tr('Score', 'Escore')} | {_tr('Intercept', 'Intercepto')} | Slope | CIL | ICI | HL chi² | HL p | Brier |")
+        lines.append("|:--|:--|:--|:--|:--|:--|:--|:--|")
         for _, row in calib_df.iterrows():
-            lines.append(f"| {row['Score']} | {row.get('Calibration intercept', np.nan):.4f} | {row.get('Calibration slope', np.nan):.4f} | {row.get('HL chi-square', np.nan):.2f} | {row.get('HL p-value', np.nan):.4f} |")
+            brier_val = f"{row['Brier']:.4f}" if pd.notna(row.get('Brier')) else "-"
+            cil_val = f"{row['CIL']:.4f}" if pd.notna(row.get('CIL')) else "-"
+            ici_val = f"{row['ICI']:.4f}" if pd.notna(row.get('ICI')) else "-"
+            lines.append(
+                f"| {row['Score']} "
+                f"| {row.get('Calibration intercept', np.nan):.4f} "
+                f"| {row.get('Calibration slope', np.nan):.4f} "
+                f"| {cil_val} "
+                f"| {ici_val} "
+                f"| {row.get('HL chi-square', np.nan):.2f} "
+                f"| {row.get('HL p-value', np.nan):.4f} "
+                f"| {brier_val} |"
+            )
         lines.append("")
 
     # DeLong
