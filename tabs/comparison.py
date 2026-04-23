@@ -23,7 +23,9 @@ from stats_compare import (
     calibration_intercept_slope,
     classification_metrics_at_threshold,
     compute_idi,
+    compute_idi_with_ci,
     compute_nri,
+    compute_nri_with_ci,
     decision_curve,
     delong_roc_test,
     evaluate_scores,
@@ -1145,26 +1147,46 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
             ("AI Risk", "ia_risk_oof", "EuroSCORE II", "euroscore_calc"),
             ("AI Risk", "ia_risk_oof", "STS", "sts_score"),
         ]:
-            nri = compute_nri(triple["morte_30d"].values, triple[old_col].values, triple[new_col].values, cutoffs=(0.05, 0.15))
-            idi = compute_idi(triple["morte_30d"].values, triple[old_col].values, triple[new_col].values)
+            nri = compute_nri_with_ci(triple["morte_30d"].values, triple[old_col].values, triple[new_col].values, cutoffs=(0.05, 0.15), n_boot=2000, seed=42)
+            idi = compute_idi_with_ci(triple["morte_30d"].values, triple[old_col].values, triple[new_col].values, n_boot=2000, seed=42)
+            _comp_col = tr("Comparison", "Comparação")
+            _nri_ci_low = nri.get("NRI_CI_low", float("nan"))
+            _nri_ci_high = nri.get("NRI_CI_high", float("nan"))
+            _idi_ci_low = idi.get("IDI_CI_low", float("nan"))
+            _idi_ci_high = idi.get("IDI_CI_high", float("nan"))
             reclass_rows.append(
                 {
-                    tr("Comparison", "Comparação"): f"{new_name} vs {old_name}",
-                    "NRI events": nri["NRI events"],
-                    "NRI non-events": nri["NRI non-events"],
-                    "NRI total": nri["NRI total"],
-                    "IDI": idi["IDI"],
+                    _comp_col: f"{new_name} vs {old_name}",
+                    "NRI events": round(nri["NRI events"], 4),
+                    "NRI non-events": round(nri["NRI non-events"], 4),
+                    "NRI total": round(nri["NRI total"], 4),
+                    "NRI 95% CI": f"({_nri_ci_low:.3f}, {_nri_ci_high:.3f})" if pd.notna(_nri_ci_low) else "—",
+                    "NRI p": round(nri.get("NRI_p", float("nan")), 4),
+                    "IDI": round(idi["IDI"], 4),
+                    "IDI 95% CI": f"({_idi_ci_low:.3f}, {_idi_ci_high:.3f})" if pd.notna(_idi_ci_low) else "—",
+                    "IDI p": round(idi.get("IDI_p", float("nan")), 4),
                 }
             )
+        _comp_col = tr("Comparison", "Comparação")
         reclass_df = pd.DataFrame(reclass_rows)
-        st.dataframe(reclass_df, width="stretch", column_config=stats_table_column_config("reclass"))
+        st.dataframe(reclass_df, use_container_width=True)
         if not reclass_df.empty:
             best_nri = reclass_df.sort_values("NRI total", ascending=False).iloc[0]
             best_idi = reclass_df.sort_values("IDI", ascending=False).iloc[0]
+            _nri_p_str = f", p = {best_nri['NRI p']:.4f}" if pd.notna(best_nri["NRI p"]) else ""
+            _idi_p_str = f", p = {best_idi['IDI p']:.4f}" if pd.notna(best_idi["IDI p"]) else ""
             st.info(
                 tr(
-                    f"The highest NRI was observed for {best_nri[tr('Comparison','Comparação')]} (NRI total = {best_nri['NRI total']:.3f}). The highest IDI was observed for {best_idi[tr('Comparison','Comparação')]} (IDI = {best_idi['IDI']:.3f}). These are complementary reclassification metrics and should be interpreted alongside discrimination and calibration results.",
-                    f"O maior NRI foi observado em {best_nri[tr('Comparison','Comparação')]} (NRI total = {best_nri['NRI total']:.3f}). O maior IDI foi observado em {best_idi[tr('Comparison','Comparação')]} (IDI = {best_idi['IDI']:.3f}). Essas são métricas complementares de reclassificação e devem ser interpretadas em conjunto com os resultados de discriminação e calibração.",
+                    f"The highest NRI was observed for {best_nri[_comp_col]} "
+                    f"(NRI total = {best_nri['NRI total']:.3f}{_nri_p_str}). "
+                    f"The highest IDI was observed for {best_idi[_comp_col]} "
+                    f"(IDI = {best_idi['IDI']:.3f}{_idi_p_str}). "
+                    f"These are complementary reclassification metrics and should be interpreted alongside discrimination and calibration results.",
+                    f"O maior NRI foi observado em {best_nri[_comp_col]} "
+                    f"(NRI total = {best_nri['NRI total']:.3f}{_nri_p_str}). "
+                    f"O maior IDI foi observado em {best_idi[_comp_col]} "
+                    f"(IDI = {best_idi['IDI']:.3f}{_idi_p_str}). "
+                    f"Essas são métricas complementares de reclassificação e devem ser interpretadas em conjunto com os resultados de discriminação e calibração.",
                 )
             )
     else:
