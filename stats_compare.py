@@ -552,12 +552,15 @@ def compute_nri_with_ci(
         })
         return point
     arr = np.array(boot_total)
+    n_valid = len(arr)
     point["NRI_CI_low"] = float(np.percentile(arr, 2.5))
     point["NRI_CI_high"] = float(np.percentile(arr, 97.5))
-    point["NRI_p"] = float(min(1.0, 2 * min(
-        np.clip((arr <= 0).mean(), 1e-10, 1),
-        np.clip((arr >= 0).mean(), 1e-10, 1),
-    )))
+    p_left = float((arr <= 0).sum() / n_valid)
+    p_right = float((arr >= 0).sum() / n_valid)
+    p_two_sided = min(1.0, 2.0 * min(p_left, p_right))
+    point["NRI_p"] = p_two_sided
+    # When no bootstrap sample crosses zero, report the resolution limit.
+    point["NRI_p_lower_bound"] = float(1.0 / n_valid) if p_two_sided == 0.0 else None
     point["NRI_events_CI_low"] = float(np.percentile(boot_events, 2.5))
     point["NRI_events_CI_high"] = float(np.percentile(boot_events, 97.5))
     point["NRI_nonevents_CI_low"] = float(np.percentile(boot_nonevents, 2.5))
@@ -601,12 +604,14 @@ def compute_idi_with_ci(
         point.update({"IDI_CI_low": np.nan, "IDI_CI_high": np.nan, "IDI_p": np.nan})
         return point
     arr = np.array(boot_idi)
+    n_valid = len(arr)
     point["IDI_CI_low"] = float(np.percentile(arr, 2.5))
     point["IDI_CI_high"] = float(np.percentile(arr, 97.5))
-    point["IDI_p"] = float(min(1.0, 2 * min(
-        np.clip((arr <= 0).mean(), 1e-10, 1),
-        np.clip((arr >= 0).mean(), 1e-10, 1),
-    )))
+    p_left = float((arr <= 0).sum() / n_valid)
+    p_right = float((arr >= 0).sum() / n_valid)
+    p_two_sided = min(1.0, 2.0 * min(p_left, p_right))
+    point["IDI_p"] = p_two_sided
+    point["IDI_p_lower_bound"] = float(1.0 / n_valid) if p_two_sided == 0.0 else None
     return point
 
 

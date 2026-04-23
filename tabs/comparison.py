@@ -1192,10 +1192,18 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
                     "NRI non-events": round(nri["NRI non-events"], 4),
                     "NRI total": round(nri["NRI total"], 4),
                     "NRI 95% CI": f"({_nri_ci_low:.3f}, {_nri_ci_high:.3f})" if pd.notna(_nri_ci_low) else "—",
-                    "NRI p": round(nri.get("NRI_p", float("nan")), 4),
+                    "NRI p": (
+                        f"< {nri['NRI_p_lower_bound']:.4f}"
+                        if nri.get("NRI_p_lower_bound") is not None
+                        else round(nri.get("NRI_p", float("nan")), 4)
+                    ),
                     "IDI": round(idi["IDI"], 4),
                     "IDI 95% CI": f"({_idi_ci_low:.3f}, {_idi_ci_high:.3f})" if pd.notna(_idi_ci_low) else "—",
-                    "IDI p": round(idi.get("IDI_p", float("nan")), 4),
+                    "IDI p": (
+                        f"< {idi['IDI_p_lower_bound']:.4f}"
+                        if idi.get("IDI_p_lower_bound") is not None
+                        else round(idi.get("IDI_p", float("nan")), 4)
+                    ),
                 }
             )
         _comp_col = tr("Comparison", "Comparação")
