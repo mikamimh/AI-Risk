@@ -74,19 +74,17 @@ LITERAL_NONE_IS_VALID_COLUMNS: frozenset = (
     | _VALVE_ALIAS_NONE_VALID
 )
 
-# Binary history variables where a blank cell in the source data means the
-# condition is absent (implicit negative), NOT that the information is unknown.
-# This convention is standard in cardiac surgery registries (STS, EuroSCORE II):
-# if a historical flag is positive, it is always explicitly documented; blank
-# entries are used as shorthand for "No" by the data entry workflow.
+# Columns where blank means "condition absent" (implicit negative), NOT unknown.
+# Identified by blank_impute_no=True in the variable contract (dtype-independent)
+# or by the legacy fallback (blank_semantics=absent AND dtype=binary).
+# Both conditions produce the same set; blank_impute_no is the explicit flag.
 #
-# Derived from VARIABLE_CONTRACT (dtype=binary, blank_semantics=absent).
-# Excluded from this set (intentionally):
-#   "Suspension of Anticoagulation (day)" — numeric, conditional on
-#   Anticoagulation=Yes; blank = N/A, not zero days.
+# Excluded: "Suspension of Anticoagulation (day)" — numeric, conditional on
+# Anticoagulation=Yes; blank = N/A, not zero days.
 BLANK_MEANS_NO_COLUMNS: frozenset = frozenset(
     k for k, v in VARIABLE_CONTRACT.items()
-    if v.get("blank_semantics") == "absent" and v.get("dtype") == "binary"
+    if v.get("blank_impute_no", False)
+    or (v.get("blank_semantics") == "absent" and v.get("dtype") == "binary")
 )
 
 # Columns where blank means "None" (the canonical absence-of-disease category).

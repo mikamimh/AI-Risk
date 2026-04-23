@@ -161,3 +161,37 @@ def test_strict_parse_columns_in_contract():
         assert VARIABLE_CONTRACT[col]["parse_mode"] == "strict", (
             f"'{col}' expected parse_mode='strict', got '{VARIABLE_CONTRACT[col]['parse_mode']}'"
         )
+
+
+# ── Dtype correctness ─────────────────────────────────────────────────────────
+
+def test_multi_category_variables_not_binary():
+    """Variables with >2 clinical categories must not be dtype='binary'."""
+    multi_category = {
+        "Diabetes",                      # No/Oral/Insulin/Diet Only/No Control Method
+        "CVA",                           # No/TIA/≤30d/≥30d
+        "IE",                            # No/Yes/Possible
+        "Cancer ≤ 5 yrs",               # No + specific cancer types
+        "Anticoagulation/ Antiaggregation",  # No + medication regimens
+        "Pneumonia",                     # No/Treated/Under treatment
+    }
+    for name in multi_category:
+        spec = VARIABLE_CONTRACT.get(name)
+        assert spec is not None, f"'{name}' not in VARIABLE_CONTRACT"
+        assert spec["dtype"] != "binary", (
+            f"'{name}' has multi-level clinical categories but dtype='{spec['dtype']}'. "
+            "Should be 'categorical'."
+        )
+
+
+def test_blank_impute_no_flag_consistency():
+    """Every column in BLANK_MEANS_NO_COLUMNS must have blank_impute_no=True or be legacy-binary."""
+    for name in BLANK_MEANS_NO_COLUMNS:
+        spec = VARIABLE_CONTRACT.get(name)
+        assert spec is not None, f"'{name}' in BLANK_MEANS_NO_COLUMNS but not in contract"
+        has_flag = spec.get("blank_impute_no", False)
+        is_legacy = spec.get("blank_semantics") == "absent" and spec.get("dtype") == "binary"
+        assert has_flag or is_legacy, (
+            f"'{name}' is in BLANK_MEANS_NO_COLUMNS but has neither blank_impute_no=True "
+            "nor the legacy (blank_semantics=absent AND dtype=binary) combination"
+        )

@@ -11,6 +11,9 @@ Boolean fields:
     ordinal_encoding_none_valid -- valve disease columns only; "None" = no
                                    disease, participates in ordinal encoding
                                    (NONE_IS_VALID_COLUMNS set)
+    blank_impute_no            -- blank cells → "No" during ingestion
+                                   (registry convention: condition absent
+                                   when not documented; dtype-independent)
 """
 
 from typing import Any, Dict
@@ -99,7 +102,7 @@ VARIABLE_CONTRACT: Dict[str, Dict[str, Any]] = {
 
     # ── Cardiac history ──────────────────────────────────────────────────
     "IE": {
-        "dtype": "binary",
+        "dtype": "categorical",  # No / Yes / Possible — not binary
         "parse_mode": "tolerant",
         "blank_semantics": "unknown",
         "missing_tokens": _GLOBAL_MISSING,
@@ -200,7 +203,7 @@ VARIABLE_CONTRACT: Dict[str, Dict[str, Any]] = {
         "none_is_valid": False,
     },
     "Diabetes": {
-        "dtype": "binary",
+        "dtype": "categorical",  # No / Oral / Insulin / Diet Only / No Control Method
         "parse_mode": "tolerant",
         "blank_semantics": "unknown",
         "missing_tokens": _GLOBAL_MISSING,
@@ -214,7 +217,7 @@ VARIABLE_CONTRACT: Dict[str, Dict[str, Any]] = {
         "none_is_valid": False,
     },
     "CVA": {
-        "dtype": "binary",
+        "dtype": "categorical",  # No / TIA / ≤ 30 days / ≥ 30 days
         "parse_mode": "tolerant",
         "blank_semantics": "unknown",
         "missing_tokens": _GLOBAL_MISSING,
@@ -243,7 +246,7 @@ VARIABLE_CONTRACT: Dict[str, Dict[str, Any]] = {
         "valid_categories": ["Never", "Former", "Current"],
     },
     "Cancer ≤ 5 yrs": {
-        "dtype": "binary",
+        "dtype": "categorical",  # No / plus specific cancer types (Bowel, Breast, …)
         "parse_mode": "tolerant",
         "blank_semantics": "unknown",
         "missing_tokens": _GLOBAL_MISSING,
@@ -253,13 +256,15 @@ VARIABLE_CONTRACT: Dict[str, Dict[str, Any]] = {
         "dtype": "binary",
         "parse_mode": "tolerant",
         "blank_semantics": "absent",   # registry convention: documented when positive
+        "blank_impute_no": True,       # blank → "No" regardless of dtype
         "missing_tokens": _GLOBAL_MISSING,
         "none_is_valid": False,
     },
     "Anticoagulation/ Antiaggregation": {
-        "dtype": "binary",
+        "dtype": "categorical",  # No / plus medication regimens (AAS, Clopidogrel, …)
         "parse_mode": "tolerant",
         "blank_semantics": "absent",   # registry convention: documented when positive
+        "blank_impute_no": True,       # blank → "No" regardless of dtype
         "missing_tokens": _GLOBAL_MISSING,
         "none_is_valid": False,
     },
@@ -273,7 +278,7 @@ VARIABLE_CONTRACT: Dict[str, Dict[str, Any]] = {
         "unit": "days",
     },
     "Pneumonia": {
-        "dtype": "binary",
+        "dtype": "categorical",  # No / Treated / Under treatment
         "parse_mode": "tolerant",
         "blank_semantics": "unknown",
         "missing_tokens": _GLOBAL_MISSING,
