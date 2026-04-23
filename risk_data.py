@@ -15,6 +15,7 @@ Example:
 """
 
 import csv as _csv_module
+import hashlib
 import re
 import sqlite3
 import warnings
@@ -863,7 +864,9 @@ EXCLUDED_METADATA_COLUMNS: frozenset = frozenset({
     "patient_id",
     "surgery_year",
     "surgery_quarter",
+    "case_uid",
     "days_pre_echo_to_surgery",
+    "echo_stale",
     "days_surgery_to_post_echo",
     # AI Risk model output columns (circular leakage)
     "ia_risk_oof",
@@ -895,6 +898,25 @@ def normalize_patient(value: object) -> str:
 
 def _to_date(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors="coerce").dt.date
+
+
+def compute_case_uid(patient_key: str, proc_date: object, surgery_text: str) -> str:
+    """Return a 16-char SHA-256 hash uniquely identifying a surgery case.
+
+    Args:
+        patient_key: Normalized patient identifier (uppercase name).
+        proc_date: Procedure date (any str/date representation).
+        surgery_text: Surgery description string.
+
+    Returns:
+        Lowercase hex string of length 16.
+    """
+    raw = "\x00".join([
+        str(patient_key).strip().upper(),
+        str(proc_date),
+        str(surgery_text).strip().upper(),
+    ])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def parse_number(
@@ -3148,6 +3170,17 @@ def prepare_flat_dataset(source_path: str) -> PreparedData:
         else:
             data["_patient_key"] = pd.Series(range(len(data))).astype(str)
 
+    _flat_surgery = data["Surgery"].astype(str) if "Surgery" in data.columns else pd.Series("", index=data.index)
+    _flat_procdate = data["Procedure Date"].astype(str) if "Procedure Date" in data.columns else pd.Series("", index=data.index)
+    data["case_uid"] = [
+        compute_case_uid(pk, str(pd_val), str(surg))
+        for pk, pd_val, surg in zip(
+            data["_patient_key"].astype(str),
+            _flat_procdate,
+            _flat_surgery,
+        )
+    ]
+
     # ── Unified normalization ──
     data = _normalize_coronary_symptom_column(data)
     data = _impute_blank_as_none(data)
@@ -3266,6 +3299,14 @@ def prepare_master_dataset(xlsx_path: str, require_surgery_and_date: bool = True
     )
     pre_post_rows = len(pre_post)
     pre_post["morte_30d"] = pre_post["Death"].map(map_death_30d)
+    pre_post["case_uid"] = [
+        compute_case_uid(pk, str(pd_val), str(surg))
+        for pk, pd_val, surg in zip(
+            pre_post["_patient_key"].astype(str),
+            pre_post["_proc_date"].astype(str),
+            pre_post["Surgery"].astype(str),
+        )
+    ]
 
     eco_cols = [c for c in eco.columns if c not in {"Patient", "Exam date", "_patient_key", "_echo_date"}]
     echo_joined_rows = []
