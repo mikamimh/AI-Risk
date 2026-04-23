@@ -1,5 +1,6 @@
-[tool.ruff]
 line-length = 120
+exclude = ["tests/"]
+
+[lint]
 select = ["E", "F", "W"]
 ignore = ["E501", "E402", "F841"]
-exclude = ["tests/"]
