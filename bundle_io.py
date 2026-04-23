@@ -26,7 +26,7 @@ owned by the cache policy layer (``load_train_bundle`` and
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Dict
 
 from config import AppConfig
@@ -184,7 +184,7 @@ def bundle_metadata_from_payload(
       * ``training_source``    — filename used at training time.
       * ``schema_version``     — current bundle schema version.
       * ``loaded_schema_version`` — what was actually read from disk (≤ current).
-      * ``dataset_fingerprint`` — composite of (xlsx_path, mtime_ns, size)
+      * ``dataset_fingerprint`` — composite of (basename, path hash, mtime_ns, size)
                                   from the signature; ``None`` when absent.
       * ``bundle_fingerprint`` — short hash of the signature block, suitable
                                   for embedding in audit logs / manifests.
@@ -209,10 +209,10 @@ def bundle_metadata_from_payload(
     if sig.get("xlsx_path") and "xlsx_mtime_ns" in sig and "xlsx_size" in sig:
         import hashlib
         _full_path = str(sig.get("xlsx_path"))
-        _basename = Path(_full_path).name
+        _basename = PureWindowsPath(_full_path).name
         _path_hash = hashlib.sha1(_full_path.encode("utf-8")).hexdigest()[:8]
         dataset_fp = (
-            f"{_basename}|"
+            f"name={_basename}|"
             f"path_sha1={_path_hash}|"
             f"mtime_ns={sig.get('xlsx_mtime_ns')}|"
             f"size={sig.get('xlsx_size')}"
