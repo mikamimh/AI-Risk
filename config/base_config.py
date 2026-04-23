@@ -26,7 +26,7 @@ class AppConfig:
     GSHEETS_CACHE_FILE = TEMP_DATA_DIR / "google_sheets_tables.xlsx"
 
     # ==== Model & Training ====
-    MODEL_VERSION = "2026-04-23-v14-statistical-robustness"
+    MODEL_VERSION = "2026-04-24-v15-sts-scope-refinement"
     RANDOM_SEED = 42
     N_JOBS = -1
 
