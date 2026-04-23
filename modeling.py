@@ -361,6 +361,7 @@ def _select_best_model(
     min_dynamic_range: float = 0.15,
     min_cal_slope: float = 0.40,
     max_cal_slope: float = 2.50,
+    auc_tie_margin: float = 0.01,
 ) -> str:
     """Select the best model based on leaderboard ranking + clinical guardrails.
 
@@ -415,6 +416,18 @@ def _select_best_model(
         454-row / 68-event cohort produced slope 0.22 with AUC 0.747 —
         passing all prior guardrails but clinically unusable as a
         probability score.
+
+    Calibration-aware tiebreaker
+    ----------------------------
+    After guardrail filtering, if two or more models have AUC within
+    ``auc_tie_margin`` (default 0.01) of the top usable model, the one
+    with calibration slope closest to 1.0 is selected.  This prevents a
+    model with negligibly higher AUC but poor calibration from winning
+    over a well-calibrated competitor.
+
+    Example: XGBoost AUC 0.746 (slope 0.52) vs RandomForest AUC 0.745
+    (slope 1.01) — ΔAUC = 0.001, within tie margin.  RF selected because
+    |1.01 − 1.0| = 0.01 < |0.52 − 1.0| = 0.48.
 
     Excluded models still appear in the leaderboard and remain
     force-selectable from the sidebar; only the automatic default changes.
@@ -487,6 +500,40 @@ def _select_best_model(
     usable_lb = leaderboard[usable_mask]
     if len(usable_lb) == 0:
         return str(leaderboard.iloc[0]["Modelo"])
+
+    # ── Calibration-aware tiebreaker ──────────────────────────────────────
+    # When the top usable models have AUC within auc_tie_margin of each
+    # other, prefer the one whose calibration slope is closest to 1.0.
+    # This prevents a model with negligibly higher AUC but poor calibration
+    # (e.g. XGBoost slope 0.52 vs RF slope 1.01, ΔAUC = 0.001) from
+    # winning over a well-calibrated competitor.
+    top_auc = float(usable_lb.iloc[0]["AUC"])
+    tied = usable_lb[usable_lb["AUC"] >= top_auc - auc_tie_margin]
+
+    if len(tied) > 1 and oof_predictions is not None and y is not None:
+        slope_dist: Dict[str, float] = {}
+        for name in tied["Modelo"].values:
+            p = oof_predictions.get(str(name))
+            if p is None:
+                slope_dist[str(name)] = float("inf")
+                continue
+            p_arr = np.asarray(p, dtype=float)
+            mask = ~np.isnan(p_arr)
+            if mask.sum() < 10 or len(np.unique(y_arr[mask])) < 2:
+                slope_dist[str(name)] = float("inf")
+                continue
+            try:
+                cal = calibration_intercept_slope(y_arr[mask], p_arr[mask])
+                slope = cal.get("Calibration slope", float("nan"))
+                slope_dist[str(name)] = (
+                    abs(slope - 1.0) if np.isfinite(slope) else float("inf")
+                )
+            except Exception:
+                slope_dist[str(name)] = float("inf")
+
+        best_tied = min(slope_dist, key=slope_dist.get)
+        return best_tied
+
     return str(usable_lb.iloc[0]["Modelo"])
 
 
