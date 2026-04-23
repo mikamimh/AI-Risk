@@ -52,7 +52,7 @@ def test_import_temporal_validation_module():
 
 def test_chronological_state_labels_are_distinct_and_cover_all_states():
     """All four chronological states produce a distinct, non-empty label."""
-    from temporal_validation import (
+    from tv_helpers import (
         CHRONO_STATE_NO_OVERLAP,
         CHRONO_STATE_OVERLAP,
         CHRONO_STATE_RETROGRADE,
@@ -83,7 +83,7 @@ def test_chronological_state_labels_are_distinct_and_cover_all_states():
 
 def test_check_temporal_overlap_status_belongs_to_canonical_set():
     """check_temporal_overlap must only emit one of the four canonical states."""
-    from temporal_validation import check_temporal_overlap, CHRONO_STATES
+    from tv_helpers import check_temporal_overlap, CHRONO_STATES
     cases = [
         # (train_start, train_end, val_start, val_end, expected_in_set)
         ("2020-Q1", "2021-Q4", "2022-Q1", "2023-Q4"),   # no_overlap

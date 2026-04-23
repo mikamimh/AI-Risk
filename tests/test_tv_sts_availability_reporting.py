@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from temporal_validation import (
+from tv_helpers import (
     STS_AVAILABILITY_COMPLETE,
     STS_AVAILABILITY_PARTIAL,
     STS_AVAILABILITY_UNAVAILABLE,

@@ -11,7 +11,7 @@ Verifies that when STS n < full cohort n (PARTIAL availability):
 import pandas as pd
 import pytest
 
-from temporal_validation import (
+from tv_helpers import (
     build_sts_availability_summary,
     build_temporal_validation_summary,
     STS_AVAILABILITY_COMPLETE,

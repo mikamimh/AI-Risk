@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from risk_data import ExternalNormalizationReport, ExternalReadMeta
-from temporal_validation import build_temporal_validation_summary
+from tv_helpers import build_temporal_validation_summary
 
 
 def _minimal_norm_report(**overrides):
@@ -208,7 +208,7 @@ class TestNoRegressionWithNormalizationReport:
 
     def test_sts_availability_still_rendered_with_norm_report(self):
         """STS availability note is still rendered alongside normalization note."""
-        from temporal_validation import build_sts_availability_summary
+        from tv_helpers import build_sts_availability_summary
         sts_avail = build_sts_availability_summary(n_eligible=40, n_score=38)
         report = _call_summary(
             norm_report=_minimal_norm_report(),

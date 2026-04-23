@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from temporal_validation import (
+from tv_helpers import (
     build_sts_accounting_table,
     build_temporal_validation_summary,
     build_exploratory_threshold_summary,
@@ -238,7 +238,7 @@ class TestThresholdTableConfusionMatrix:
             assert col in result["table"].columns, f"{col} missing from exploratory threshold summary"
 
     def test_exploratory_markdown_includes_tp_fp_tn_fn_headers(self):
-        from temporal_validation import build_exploratory_temporal_validation_section
+        from tv_helpers import build_exploratory_temporal_validation_section
         y, p = self._cohort(n=100)
         thr_tables = {"score": threshold_analysis_table(y, p, [0.05, 0.08])}
         thresh_sum = build_exploratory_threshold_summary(

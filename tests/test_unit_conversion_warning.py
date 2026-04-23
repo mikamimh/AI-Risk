@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from risk_data import ExternalNormalizationReport, ExternalReadMeta
-from temporal_validation import build_temporal_validation_summary
+from tv_helpers import build_temporal_validation_summary
 
 
 def _unit_summary(height=False, weight=False):
