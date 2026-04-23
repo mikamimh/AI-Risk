@@ -45,6 +45,25 @@ def basic_metrics(y: np.ndarray, p: np.ndarray) -> Dict[str, float]:
     }
 
 
+def brier_skill_score(y: np.ndarray, p: np.ndarray) -> float:
+    """Brier Skill Score vs constant-prevalence baseline.
+
+    BSS > 0: model outperforms always predicting the prevalence.
+    BSS = 0: equivalent to predicting the prevalence.
+    BSS < 0: worse than predicting the prevalence (harmful as a probabilistic
+        score even if AUC is adequate — this can occur when a model is
+        well-calibrated overall but mis-calibrated on the evaluated subgroup).
+    """
+    y = np.asarray(y).astype(int)
+    p = np.asarray(p)
+    prev = float(y.mean())
+    brier_baseline = prev * (1.0 - prev)
+    if brier_baseline <= 0:
+        return float("nan")
+    brier_model = float(brier_score_loss(y, p))
+    return 1.0 - brier_model / brier_baseline
+
+
 def classification_metrics_at_threshold(y: np.ndarray, p: np.ndarray, threshold: float) -> Dict[str, float]:
     y = np.asarray(y).astype(int)
     p = np.asarray(p)
@@ -93,12 +112,13 @@ def evaluate_scores_with_threshold(
             "n": int(len(sub)),
             **m,
             "AUPRC_baseline": float(np.mean(y)),
+            "BSS": brier_skill_score(y, p),
             "ICI": ici,
             **cls,
         })
     cols = [
         "Score", "n", "AUC", "AUPRC", "AUPRC_baseline",
-        "Brier", "ICI",
+        "Brier", "BSS", "ICI",
         "Sensitivity", "Specificity", "PPV", "NPV",
     ]
     if not rows:
@@ -113,14 +133,16 @@ def evaluate_scores(df: pd.DataFrame, y_col: str, score_cols: List[str]) -> pd.D
         if len(sub) < 30 or sub[y_col].nunique() < 2:
             continue
         y = sub[y_col].values
-        m = basic_metrics(y, sub[c].values)
+        p_vals = sub[c].values
+        m = basic_metrics(y, p_vals)
         m["Score"] = c
         m["AUPRC_baseline"] = float(np.mean(y))
+        m["BSS"] = brier_skill_score(y, p_vals)
         rows.append(m)
     if not rows:
-        return pd.DataFrame(columns=["Score", "n", "AUC", "AUPRC", "AUPRC_baseline", "Brier"])
+        return pd.DataFrame(columns=["Score", "n", "AUC", "AUPRC", "AUPRC_baseline", "Brier", "BSS"])
     return pd.DataFrame(rows)[
-        ["Score", "n", "AUC", "AUPRC", "AUPRC_baseline", "Brier"]
+        ["Score", "n", "AUC", "AUPRC", "AUPRC_baseline", "Brier", "BSS"]
     ].sort_values("AUC", ascending=False)
 
 
@@ -197,10 +219,12 @@ def evaluate_scores_with_ci(
         if len(sub) < 30 or sub[y_col].nunique() < 2:
             continue
         y = sub[y_col].values
-        m = bootstrap_metrics_ci(y, sub[c].values, n_boot=n_boot, seed=seed)
+        _p_vals = sub[c].values
+        m = bootstrap_metrics_ci(y, _p_vals, n_boot=n_boot, seed=seed)
         m["Score"] = c
         m["n"] = int(len(sub))
         m["AUPRC_baseline"] = float(np.mean(y))
+        m["BSS"] = brier_skill_score(y, _p_vals)
         rows.append(m)
 
     cols = [
@@ -216,6 +240,7 @@ def evaluate_scores_with_ci(
         "Brier",
         "Brier_IC95_inf",
         "Brier_IC95_sup",
+        "BSS",
     ]
     if not rows:
         return pd.DataFrame(columns=cols)
@@ -759,6 +784,7 @@ def evaluate_scores_temporal(
             "AUPRC_IC95_inf": m["AUPRC_IC95_inf"],
             "AUPRC_IC95_sup": m["AUPRC_IC95_sup"],
             "Brier": m["Brier"],
+            "BSS": brier_skill_score(y, p),
             "Calibration_Intercept": cal["Calibration intercept"],
             "Calibration_Intercept_CI_low": cal.get("Calibration_intercept_CI_low", np.nan),
             "Calibration_Intercept_CI_high": cal.get("Calibration_intercept_CI_high", np.nan),
@@ -778,7 +804,8 @@ def evaluate_scores_temporal(
 
     cols = [
         "Score", "n", "AUC", "AUC_IC95_inf", "AUC_IC95_sup",
-        "AUPRC", "AUPRC_baseline", "AUPRC_IC95_inf", "AUPRC_IC95_sup", "Brier",
+        "AUPRC", "AUPRC_baseline", "AUPRC_IC95_inf", "AUPRC_IC95_sup",
+        "Brier", "BSS",
         "Calibration_Intercept", "Calibration_Intercept_CI_low", "Calibration_Intercept_CI_high",
         "Calibration_Slope", "Calibration_Slope_CI_low", "Calibration_Slope_CI_high",
         "CIL", "CIL_CI_low", "CIL_CI_high",

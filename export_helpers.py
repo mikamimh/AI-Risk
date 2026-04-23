@@ -616,6 +616,10 @@ def build_comparison_xlsx(
                     ("AUC 95% CI", f"{best_auc.get('AUC_IC95_inf', ''):.3f}–{best_auc.get('AUC_IC95_sup', ''):.3f}"),
                     (_tr("Best Brier (score)", "Melhor Brier (escore)"), best_brier["Score"]),
                     ("Brier", f"{best_brier['Brier']:.4f}"),
+                    (
+                        _tr("Brier Skill Score (BSS)", "Brier Skill Score (BSS)"),
+                        f"{best_brier.get('BSS', float('nan')):.4f}" if pd.notna(best_brier.get("BSS", float("nan"))) else "—",
+                    ),
                 ]
             except Exception:
                 pass

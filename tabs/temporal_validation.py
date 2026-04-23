@@ -2800,7 +2800,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     st.caption(_tv_sts_availability_note["suppressed_note"])
                             _tv_perf_display = _tv_perf.copy()
                             # Format for display
-                            for _fc in ["AUC", "AUPRC", "AUPRC_baseline", "Brier",
+                            for _fc in ["AUC", "AUPRC", "AUPRC_baseline", "Brier", "BSS",
                                         "Calibration_Intercept", "Calibration_Slope",
                                         "Sensitivity", "Specificity", "PPV", "NPV",
                                         "CIL", "ICI"]:
