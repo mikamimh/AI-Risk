@@ -63,6 +63,8 @@ class TabContext:
     format_ppv_npv: Callable          # _format_ppv_npv(df) -> df
     to_csv_bytes: Callable            # _to_csv_bytes(df) -> bytes
     safe_prob: Callable               # _safe_prob(x) -> float
+    fig_to_png_bytes: Callable        # _fig_to_png_bytes(fig) -> bytes
+    chart_download_buttons: Callable  # _chart_download_buttons(df, png, name)
 
     # ── 5b. Plot helpers (closures from app.py) ──────────────────────────
     plot_roc: Callable                # _plot_roc(scores, y)
