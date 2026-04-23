@@ -1383,14 +1383,48 @@ def _build_comparison_full_md(
         lines.append("")
         comp_col = [c for c in reclass_df.columns if "Comparison" in c or "Comparação" in c]
         comp_key = comp_col[0] if comp_col else "Comparison"
-        lines.append(f"| {_tr('Comparison', 'Comparação')} | NRI events | NRI non-events | NRI total | IDI |")
-        lines.append("|:--|:--|:--|:--|:--|")
+        _has_nri_ci = "NRI 95% CI" in reclass_df.columns
+        _has_nri_p = "NRI p" in reclass_df.columns
+        _has_idi_ci = "IDI 95% CI" in reclass_df.columns
+        _has_idi_p = "IDI p" in reclass_df.columns
+        _hdr = f"| {_tr('Comparison', 'Comparação')} | NRI events | NRI non-events | NRI total"
+        if _has_nri_ci:
+            _hdr += " | NRI 95% CI"
+        if _has_nri_p:
+            _hdr += " | NRI p"
+        _hdr += " | IDI"
+        if _has_idi_ci:
+            _hdr += " | IDI 95% CI"
+        if _has_idi_p:
+            _hdr += " | IDI p"
+        _hdr += " |"
+        _sep = "|:--|:--|:--|:--"
+        if _has_nri_ci: _sep += "|:--"
+        if _has_nri_p: _sep += "|:--"
+        _sep += "|:--"
+        if _has_idi_ci: _sep += "|:--"
+        if _has_idi_p: _sep += "|:--"
+        _sep += "|"
+        lines.append(_hdr)
+        lines.append(_sep)
         for _, row in reclass_df.iterrows():
-            lines.append(
-                f"| {row.get(comp_key, '')} | {row.get('NRI events', np.nan):.3f} "
-                f"| {row.get('NRI non-events', np.nan):.3f} | {row.get('NRI total', np.nan):.3f} "
-                f"| {row.get('IDI', np.nan):.4f} |"
-            )
+            _r = (f"| {row.get(comp_key, '')} "
+                  f"| {row.get('NRI events', np.nan):.3f} "
+                  f"| {row.get('NRI non-events', np.nan):.3f} "
+                  f"| {row.get('NRI total', np.nan):.3f}")
+            if _has_nri_ci:
+                _r += f" | {row.get('NRI 95% CI', '—')}"
+            if _has_nri_p:
+                _nri_p = row.get("NRI p", np.nan)
+                _r += f" | {_nri_p:.4f}" if pd.notna(_nri_p) else " | —"
+            _r += f" | {row.get('IDI', np.nan):.4f}"
+            if _has_idi_ci:
+                _r += f" | {row.get('IDI 95% CI', '—')}"
+            if _has_idi_p:
+                _idi_p = row.get("IDI p", np.nan)
+                _r += f" | {_idi_p:.4f}" if pd.notna(_idi_p) else " | —"
+            _r += " |"
+            lines.append(_r)
         lines.append("")
 
     # ── Section 11: Interpretation ────────────────────────────────────────
