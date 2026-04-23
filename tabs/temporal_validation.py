@@ -536,7 +536,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             for r in _tv_drift["missingness_shift"][:10]
                         ]
                         if _miss_df:
-                            st.dataframe(pd.DataFrame(_miss_df), use_container_width=True, hide_index=True)
+                            st.dataframe(pd.DataFrame(_miss_df), width="stretch", hide_index=True)
                         st.markdown(tr(
                             "**Top 10 numeric variables with largest relative shift (|Δmedian| / IQR_train):**",
                             "**Top 10 variáveis numéricas com maior shift relativo (|Δmediana| / IQR_treino):**",
@@ -552,7 +552,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             for r in _tv_drift["numeric_shift"][:10]
                         ]
                         if _num_df:
-                            st.dataframe(pd.DataFrame(_num_df), use_container_width=True, hide_index=True)
+                            st.dataframe(pd.DataFrame(_num_df), width="stretch", hide_index=True)
                 except Exception:
                     pass
 
@@ -2773,7 +2773,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 _tv_perf_display["HL_p"] = _tv_perf_display["HL_p"].map(
                                     lambda v: f"{v:.4f}" if pd.notna(v) else "—"
                                 )
-                            st.dataframe(_tv_perf_display, use_container_width=True, hide_index=True)
+                            st.dataframe(_tv_perf_display, width="stretch", hide_index=True)
 
                     # ── Calibration at a Glance ──────────────────────────
                     st.markdown(tr("**Calibration at a Glance**", "**Calibração em Resumo**"))
@@ -2798,7 +2798,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             _tv_calib_display["HL_p"] = _tv_calib_display["HL_p"].map(
                                 lambda v: f"{v:.4f}" if pd.notna(v) else "—"
                             )
-                        st.dataframe(_tv_calib_display, use_container_width=True, hide_index=True)
+                        st.dataframe(_tv_calib_display, width="stretch", hide_index=True)
                         st.caption(tr(
                             "ICI (Integrated Calibration Index): continuous calibration measure via isotonic "
                             "regression — lower is better (0 = perfect calibration). "
@@ -2847,7 +2847,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     if isinstance(r, str) and r
                                 ]
                                 _tv_pw_display = _tv_pw_display.drop(columns=["DeLong_skip_reason"])
-                            st.dataframe(_tv_pw_display, use_container_width=True, hide_index=True)
+                            st.dataframe(_tv_pw_display, width="stretch", hide_index=True)
                             if _tv_pw_skip_notes:
                                 st.caption(
                                     tr(

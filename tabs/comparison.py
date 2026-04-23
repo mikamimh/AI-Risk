@@ -1169,7 +1169,7 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
             )
         _comp_col = tr("Comparison", "Comparação")
         reclass_df = pd.DataFrame(reclass_rows)
-        st.dataframe(reclass_df, use_container_width=True)
+        st.dataframe(reclass_df, width="stretch")
         if not reclass_df.empty:
             best_nri = reclass_df.sort_values("NRI total", ascending=False).iloc[0]
             best_idi = reclass_df.sort_values("IDI", ascending=False).iloc[0]
