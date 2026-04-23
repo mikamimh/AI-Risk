@@ -2148,7 +2148,24 @@ if _active_tab == 0:  # Overview
         float(_active_model_perf.iloc[0].get("Brier", np.nan))
         if not _active_model_perf.empty else np.nan
     )
+    _active_auprc = (
+        float(_active_model_perf.iloc[0].get("AUPRC", np.nan))
+        if not _active_model_perf.empty else np.nan
+    )
+    try:
+        from stats_compare import calibration_intercept_slope as _cal_is
+        _y_ov = df["morte_30d"].astype(int).values
+        _p_ov = artifacts.oof_predictions.get(forced_model)
+        if _p_ov is not None:
+            _active_slope = float(_cal_is(_y_ov, _p_ov).get("Calibration slope", np.nan))
+        else:
+            _active_slope = float("nan")
+    except Exception:
+        _active_slope = float("nan")
 
+    # Top-of-page: cohort + primary performance metrics.
+    # Model identity and threshold are shown once in Model Snapshot below —
+    # not repeated here to avoid redundancy.
     _k1, _k2, _k3, _k4 = st.columns(4)
     _k1.metric(tr("Patients", "Pacientes"), f"{prepared.info['n_rows']}", border=True)
     _k2.metric(tr("Events", "Eventos"), f"{_overview_events}", border=True)
@@ -2157,21 +2174,29 @@ if _active_tab == 0:  # Overview
         "N/A" if not np.isfinite(_overview_event_rate) else f"{_overview_event_rate*100:.1f}%",
         border=True,
     )
-    _k4.metric(tr("Active AI model", "Modelo IA ativo"), forced_model, border=True)
+    _k4.metric(tr("Predictors", "Preditores"), f"{prepared.info['n_features']}", border=True)
 
     _k5, _k6, _k7, _k8 = st.columns(4)
-    _k5.metric(tr("Operational threshold", "Limiar operacional"), f"{_default_threshold:.0%}", border=True)
-    _k6.metric(
+    _k5.metric(
         "AUC",
         "N/A" if not np.isfinite(_active_auc) else f"{_active_auc:.3f}",
         border=True,
     )
-    _k7.metric(
+    _k6.metric(
         "Brier",
         "N/A" if not np.isfinite(_active_brier) else f"{_active_brier:.4f}",
         border=True,
     )
-    _k8.metric(tr("Predictors", "Preditores"), f"{prepared.info['n_features']}", border=True)
+    _k7.metric(
+        "AUPRC",
+        "N/A" if not np.isfinite(_active_auprc) else f"{_active_auprc:.3f}",
+        border=True,
+    )
+    _k8.metric(
+        tr("Calibration slope", "Slope de calibração"),
+        "N/A" if not np.isfinite(_active_slope) else f"{_active_slope:.3f}",
+        border=True,
+    )
 
     # ── 1. Cohort Snapshot ──────────────────────────────────────────────
     st.divider()
