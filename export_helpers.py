@@ -325,14 +325,14 @@ def build_statistical_summary(
             if _has_nri_ci:
                 _r += f" | {row.get('NRI 95% CI', '—')}"
             if _has_nri_p:
-                _nri_p = row.get("NRI p", np.nan)
-                _r += f" | {_nri_p:.4f}" if pd.notna(_nri_p) else " | —"
+                _nri_p = row.get("NRI p", "—")
+                _r += f" | {_nri_p}" if _nri_p not in ("—", "", None) else " | —"
             _r += f" | {row.get('IDI', np.nan):.4f}"
             if _has_idi_ci:
                 _r += f" | {row.get('IDI 95% CI', '—')}"
             if _has_idi_p:
-                _idi_p = row.get("IDI p", np.nan)
-                _r += f" | {_idi_p:.4f}" if pd.notna(_idi_p) else " | —"
+                _idi_p = row.get("IDI p", "—")
+                _r += f" | {_idi_p}" if _idi_p not in ("—", "", None) else " | —"
             _r += " |"
             lines.append(_r)
         lines.append("")
@@ -1448,14 +1448,14 @@ def _build_comparison_full_md(
             if _has_nri_ci:
                 _r += f" | {row.get('NRI 95% CI', '—')}"
             if _has_nri_p:
-                _nri_p = row.get("NRI p", np.nan)
-                _r += f" | {_nri_p:.4f}" if pd.notna(_nri_p) else " | —"
+                _nri_p = row.get("NRI p", "—")
+                _r += f" | {_nri_p}" if _nri_p not in ("—", "", None) else " | —"
             _r += f" | {row.get('IDI', np.nan):.4f}"
             if _has_idi_ci:
                 _r += f" | {row.get('IDI 95% CI', '—')}"
             if _has_idi_p:
-                _idi_p = row.get("IDI p", np.nan)
-                _r += f" | {_idi_p:.4f}" if pd.notna(_idi_p) else " | —"
+                _idi_p = row.get("IDI p", "—")
+                _r += f" | {_idi_p}" if _idi_p not in ("—", "", None) else " | —"
             _r += " |"
             lines.append(_r)
         lines.append("")

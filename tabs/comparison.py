@@ -1192,17 +1192,21 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
                     "NRI non-events": round(nri["NRI non-events"], 4),
                     "NRI total": round(nri["NRI total"], 4),
                     "NRI 95% CI": f"({_nri_ci_low:.3f}, {_nri_ci_high:.3f})" if pd.notna(_nri_ci_low) else "—",
+                    # Always string: keeps Arrow dtype consistent (object),
+                    # avoids ArrowInvalid when mixing float and "< 0.0005".
                     "NRI p": (
                         f"< {nri['NRI_p_lower_bound']:.4f}"
                         if nri.get("NRI_p_lower_bound") is not None
-                        else round(nri.get("NRI_p", float("nan")), 4)
+                        else (f"{nri.get('NRI_p', float('nan')):.4f}"
+                              if pd.notna(nri.get("NRI_p")) else "—")
                     ),
                     "IDI": round(idi["IDI"], 4),
                     "IDI 95% CI": f"({_idi_ci_low:.3f}, {_idi_ci_high:.3f})" if pd.notna(_idi_ci_low) else "—",
                     "IDI p": (
                         f"< {idi['IDI_p_lower_bound']:.4f}"
                         if idi.get("IDI_p_lower_bound") is not None
-                        else round(idi.get("IDI_p", float("nan")), 4)
+                        else (f"{idi.get('IDI_p', float('nan')):.4f}"
+                              if pd.notna(idi.get("IDI_p")) else "—")
                     ),
                 }
             )
@@ -1212,16 +1216,9 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
         if not reclass_df.empty:
             best_nri = reclass_df.sort_values("NRI total", ascending=False).iloc[0]
             best_idi = reclass_df.sort_values("IDI", ascending=False).iloc[0]
-            def _fmt_p(v) -> str:
-                if not pd.notna(v):
-                    return ""
-                # p may be a pre-formatted string (e.g. "< 0.0005") or a float
-                try:
-                    return f", p = {float(v):.4f}"
-                except (TypeError, ValueError):
-                    return f", p = {v}"
-            _nri_p_str = _fmt_p(best_nri["NRI p"])
-            _idi_p_str = _fmt_p(best_idi["IDI p"])
+            # "NRI p"/"IDI p" are always pre-formatted strings in reclass_df.
+            _nri_p_str = f", p = {best_nri['NRI p']}" if best_nri["NRI p"] not in ("—", "") else ""
+            _idi_p_str = f", p = {best_idi['IDI p']}" if best_idi["IDI p"] not in ("—", "") else ""
             st.info(
                 tr(
                     f"The highest NRI was observed for {best_nri[_comp_col]} "
