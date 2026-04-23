@@ -2821,12 +2821,16 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                     if not _tv_pairwise.empty:
                         with st.expander(tr("Pairwise comparison", "Comparação pareada"), expanded=True):
                             _tv_pw_display = _tv_pairwise.copy()
-                            for _fc in ["Delta_AUC", "Delta_AUC_IC95_inf", "Delta_AUC_IC95_sup", "NRI", "IDI"]:
+                            for _fc in ["Delta_AUC", "Delta_AUC_IC95_inf", "Delta_AUC_IC95_sup",
+                                        "Bootstrap_CI_low", "Bootstrap_CI_high",
+                                        "DeLong_SE",
+                                        "NRI", "NRI_CI_low", "NRI_CI_high",
+                                        "IDI", "IDI_CI_low", "IDI_CI_high"]:
                                 if _fc in _tv_pw_display.columns:
                                     _tv_pw_display[_fc] = _tv_pw_display[_fc].map(
-                                        lambda v: f"{v:.3f}" if pd.notna(v) else "—"
+                                        lambda v: f"{v:.4f}" if pd.notna(v) else "—"
                                     )
-                            for _fc in ["Bootstrap_p", "DeLong_p"]:
+                            for _fc in ["Bootstrap_p", "DeLong_p", "NRI_p", "IDI_p"]:
                                 if _fc in _tv_pw_display.columns:
                                     _tv_pw_display[_fc] = _tv_pw_display[_fc].map(
                                         lambda v: f"{v:.4f}" if pd.notna(v) else "—"
@@ -2843,7 +2847,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                     if isinstance(r, str) and r
                                 ]
                                 _tv_pw_display = _tv_pw_display.drop(columns=["DeLong_skip_reason"])
-                            st.dataframe(_tv_pw_display, width="stretch", hide_index=True)
+                            st.dataframe(_tv_pw_display, use_container_width=True, hide_index=True)
                             if _tv_pw_skip_notes:
                                 st.caption(
                                     tr(
