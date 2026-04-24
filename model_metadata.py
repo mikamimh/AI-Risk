@@ -114,7 +114,10 @@ def build_model_metadata(
             "method": f"{calibration_method} (Platt scaling)" if calibration_method == "sigmoid" else calibration_method,
             "applied_to": "tree-based models (RandomForest, XGBoost, LightGBM, CatBoost)",
             "oof_evaluation": "calibrated inside each CV fold (RandomForest: sigmoid inner cv≤5; LightGBM/CatBoost: isotonic inner cv≤5; XGBoost: isotonic inner cv≤3)",
-            "grouping_note": "inner calibration CV does not enforce patient grouping (sklearn limitation)",
+            "grouping_note": (
+                "inner calibration CV does not enforce patient grouping (sklearn limitation); "
+                "operationally moot for this cohort (n_patients == n_surgeries, see training_manifest)"
+            ),
         },
         "thresholds": {
             "leaderboard": "Youden's J (optimal per model, on calibrated OOF)",
