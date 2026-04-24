@@ -277,6 +277,30 @@ The launcher verifies that Streamlit is available in the resolved environment be
 
 **To rebuild the exe** after changing `launcher.py`, run `build_exe.bat`.
 
+### Parallelism control (AI_RISK_N_JOBS)
+
+`AppConfig.N_JOBS` controls how many CPU cores joblib and scikit-learn
+use for parallel work. The default is `-1` (all available cores), which
+is optimal on Linux and macOS and is what CI uses.
+
+On Windows, combining `-1` with Streamlit can trigger `PermissionError`
+in joblib's named-pipe backend. To avoid this, `N_JOBS` is overridable
+via the `AI_RISK_N_JOBS` environment variable:
+
+```powershell
+$env:AI_RISK_N_JOBS = "1"   # single-threaded
+$env:AI_RISK_N_JOBS = "2"   # two workers
+streamlit run app.py
+```
+
+The bundled Windows entry points (`launcher.py` / `AI Risk.exe` and
+`run_app.bat`) default to `AI_RISK_N_JOBS=1` if the variable is not
+already set, so double-clicking the executable just works. Explicitly
+setting the variable before launch always wins.
+
+Linux and macOS users can ignore this variable; the `-1` default
+continues to apply.
+
 ## Expected data structure
 
 The app accepts multiple data formats:

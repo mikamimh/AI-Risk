@@ -1,5 +1,6 @@
 """Base configuration for AI Risk - Cardiac Surgery application."""
 
+import os
 from pathlib import Path
 from enum import Enum
 
@@ -28,7 +29,7 @@ class AppConfig:
     # ==== Model & Training ====
     MODEL_VERSION = "2026-04-24-v15-sts-scope-refinement"
     RANDOM_SEED = 42
-    N_JOBS = -1
+    N_JOBS = int(os.environ.get("AI_RISK_N_JOBS", "-1"))
 
     # ==== Cross-Validation ====
     CV_STRATEGY = "StratifiedGroupKFold"  # Options: StratifiedKFold, StratifiedGroupKFold
