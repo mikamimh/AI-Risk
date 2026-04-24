@@ -41,3 +41,4 @@ Thumbs.db
 # Arquivos de configuração local com dados sensíveis
 .streamlit/secrets.toml
 .claude/settings.local.json
+.claude/settings.json
