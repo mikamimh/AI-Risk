@@ -124,8 +124,12 @@ def normalize_payload(payload: Dict[str, object]) -> Dict[str, object]:
     bumps should branch on ``source_version`` here before writing the
     upgraded fields onto ``out``.
 
-    The inner ``bundle`` dict is NOT deserialized here — callers still pass
-    ``payload["bundle"]`` through :func:`deserialize_bundle` as before.
+    The inner ``bundle`` dict is deserialized eagerly so that callers can
+    access ``payload["artifacts"]`` and ``payload["prepared"]`` directly,
+    without a separate :func:`deserialize_bundle` call.  Callers that still
+    pass ``payload["bundle"]`` through :func:`deserialize_bundle` continue
+    to work: ``deserialize_bundle`` is idempotent when the values are
+    already dataclass instances.
     """
     validate_payload(payload)
     out = dict(payload)
@@ -144,6 +148,13 @@ def normalize_payload(payload: Dict[str, object]) -> Dict[str, object]:
 
     out["bundle_schema_version"] = BUNDLE_SCHEMA_VERSION
     out["_loaded_schema_version"] = source_version
+    # Eagerly deserialize the inner bundle so payload["artifacts"] and
+    # payload["prepared"] are accessible at the top level without a
+    # separate deserialize_bundle call.  out["bundle"] is intentionally
+    # kept as-is (same object reference) for callers that rely on it.
+    _inner = deserialize_bundle(out["bundle"])
+    out["artifacts"] = _inner.get("artifacts")
+    out["prepared"] = _inner.get("prepared")
     return out
 
 
@@ -317,6 +328,7 @@ def serialize_bundle(bundle: Dict[str, object]) -> Dict[str, object]:
         "calibration_method": getattr(artifacts, "calibration_method", "sigmoid"),
         "youden_thresholds": getattr(artifacts, "youden_thresholds", None),
         "best_youden_threshold": getattr(artifacts, "best_youden_threshold", None),
+        "training_manifest": getattr(artifacts, "training_manifest", None),
     }
     # Phase 3: persist the run report as a plain dict so module reloads
     # don't break unpickling.
@@ -353,6 +365,7 @@ def deserialize_bundle(bundle: Dict[str, object]) -> Dict[str, object]:
             oof_raw=a.get("oof_raw"),                       # may be None in old caches
             youden_thresholds=a.get("youden_thresholds"),
             best_youden_threshold=a.get("best_youden_threshold"),
+            training_manifest=a.get("training_manifest"),
         )
     # Phase 3: rebuild RunReport from persisted dict (legacy bundles without
     # the key simply carry no report).
