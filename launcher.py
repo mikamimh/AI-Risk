@@ -59,6 +59,11 @@ def _fail(message: str) -> None:
 
 
 def main() -> None:
+    # Windows launcher default: single-threaded joblib to avoid
+    # PermissionError in joblib's named-pipe backend under Streamlit.
+    # Respects AI_RISK_N_JOBS if the user set it explicitly.
+    os.environ.setdefault("AI_RISK_N_JOBS", "1")
+
     # ── 1. Locate the project root (same folder as the exe or this script). ──
     if getattr(sys, "frozen", False):
         here = os.path.dirname(os.path.abspath(sys.executable))
