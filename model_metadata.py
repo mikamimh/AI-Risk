@@ -28,16 +28,19 @@ from config import AppConfig
 # no changes.
 
 
+# Re-exports for backward compatibility. These names are not used inside this
+# module; callers import them via `model_metadata` instead of `tv_helpers`.
 from tv_helpers import (
     extract_year_quarter_range,
-    chronological_state_label,
-    check_temporal_overlap,
-    CHRONO_STATE_NO_OVERLAP,
-    CHRONO_STATE_OVERLAP,
-    CHRONO_STATE_RETROGRADE,
-    CHRONO_STATE_UNKNOWN,
-    CHRONO_STATES,
+    chronological_state_label,  # noqa: F401
+    check_temporal_overlap,  # noqa: F401
+    CHRONO_STATE_NO_OVERLAP,  # noqa: F401
+    CHRONO_STATE_OVERLAP,  # noqa: F401
+    CHRONO_STATE_RETROGRADE,  # noqa: F401
+    CHRONO_STATE_UNKNOWN,  # noqa: F401
+    CHRONO_STATES,  # noqa: F401
 )
+
 # Backward-compat alias: build_model_metadata (below) and any caller that uses
 # the private-style name both continue to work without modification.
 _extract_year_quarter_range = extract_year_quarter_range
