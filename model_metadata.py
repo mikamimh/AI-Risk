@@ -30,13 +30,6 @@ from config import AppConfig
 
 from tv_helpers import (
     extract_year_quarter_range,
-    chronological_state_label,
-    check_temporal_overlap,
-    CHRONO_STATE_NO_OVERLAP,
-    CHRONO_STATE_OVERLAP,
-    CHRONO_STATE_RETROGRADE,
-    CHRONO_STATE_UNKNOWN,
-    CHRONO_STATES,
 )
 # Backward-compat alias: build_model_metadata (below) and any caller that uses
 # the private-style name both continue to work without modification.

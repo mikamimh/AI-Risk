@@ -34,7 +34,6 @@ except Exception:
     pass
 
 import json
-from io import BytesIO
 from pathlib import Path
 from typing import Dict
 import re
@@ -68,7 +67,6 @@ from risk_data import (
     FLAT_ALIAS_TO_APP_COLUMNS,
     MISSINGNESS_INDICATOR_COLUMNS,
     REQUIRED_SOURCE_TABLES,
-    parse_number,
     prepare_master_dataset,
     split_surgery_procedures,
 )
@@ -1390,7 +1388,6 @@ from report_text import (
     build_methods_text as _build_methods_text_impl,
     build_results_text as _build_results_text_impl,
 )
-from subgroups import evaluate_subgroup
 
 
 def _subgroup_add_caution_flags(metrics: pd.DataFrame) -> pd.DataFrame:
