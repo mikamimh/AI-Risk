@@ -1,37 +1,43 @@
+# Arquivos que o Python cria automaticamente enquanto roda
 __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# Caches internos do app AI-Risk
 .ia_risk_cache/
 catboost_info/
 
+# Pastas de trabalho que não devem ir para o repo
 local_data/
 exports/
 temp/
 
+# Arquivos de dados (ficam só na sua máquina, nunca sobem)
 *.csv
 *.xlsx
 *.xls
 *.parquet
 
+# Modelos treinados e arquivos binários
 *.joblib
 *.pkl
 
+# Ambientes virtuais de Python (isolam as dependências)
 .venv/
+.venv*/
 venv/
 env/
 
-# Packaged binary + PyInstaller intermediates.  The binary is produced by
-# `build_exe.bat`; only the source (app.py, launcher.py, build_exe.bat) is
-# versioned.  `build/` is the workdir PyInstaller writes into.
+# Binário compilado do Windows e arquivos intermediários do PyInstaller
 AI Risk.exe
 *.exe
 build/
 dist/
 
-# OS / editor noise
+# Arquivos que o sistema operacional cria sozinho (ignorar)
 .DS_Store
 Thumbs.db
 
+# Arquivos de configuração local com dados sensíveis
 .streamlit/secrets.toml
 .claude/settings.local.json
