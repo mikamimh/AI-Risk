@@ -16,7 +16,9 @@
       "Bash(python -m pytest tests/test_case_uid.py -v)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(python -m pytest -q --ignore=tests/test_training_manifest.py --ignore=tests/test_statistical_regression.py --tb=short)"
+      "Bash(python -m pytest -q --ignore=tests/test_training_manifest.py --ignore=tests/test_statistical_regression.py --tb=short)",
+      "Bash(git checkout *)",
+      "Bash(git pull *)"
     ]
   }
 }
