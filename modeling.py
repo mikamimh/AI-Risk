@@ -854,13 +854,15 @@ def train_and_select_model(
         # outer fold so that evaluation is honest (no data seen during
         # calibration leaks into evaluation).
         #
-        # Limitation: CalibratedClassifierCV uses StratifiedKFold internally
-        # and does not accept a ``groups`` parameter, so patient grouping is
-        # not enforced in the *inner* calibration splits.  The risk is minor
-        # because (a) calibration only fits 2 parameters (sigmoid), (b) the
-        # inner CV is applied within the outer-fold training set, and (c) few
-        # patients have multiple surgeries.  This is documented as a known
-        # limitation for methodological transparency.
+        # Note on inner calibration CV: CalibratedClassifierCV uses
+        # StratifiedKFold internally and does not accept a ``groups``
+        # parameter, so patient grouping is not enforced in the *inner*
+        # calibration splits.  In this cohort this is operationally moot:
+        # Dataset_2025.xlsx has 454 patient_keys and 454 surgeries (zero
+        # patients with multiple procedures), so grouped and non-grouped
+        # splits produce identical partitions.  The limitation is retained
+        # in documentation for future cohorts where patients may contribute
+        # multiple surgeries.
         if name in _TREE_MODELS:
             _cal_method, _cal_cv_cap = _calib_config_for(name)
             proba_cal = np.full(len(y), np.nan)
@@ -997,7 +999,12 @@ def train_and_select_model(
         "prevalence": float(y.mean()),
         "n_features": len(non_empty_cols),
         "feature_columns": list(non_empty_cols),
+        # When groups is not None but every group has cardinality 1,
+        # StratifiedGroupKFold and StratifiedKFold produce identical
+        # splits; the label below records the nominal strategy invoked.
         "cv_strategy": "StratifiedGroupKFold" if groups is not None else "StratifiedKFold",
+        "n_patients": int(pd.Series(groups).nunique()) if groups is not None else int(len(y)),
+        "n_surgeries": int(len(y)),
         "cv_splits": cv.n_splits,
         "seed": AppConfig.RANDOM_SEED,
         "best_model": best_name,
