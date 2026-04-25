@@ -339,7 +339,7 @@ def _apply_threshold_policy(
         return m
 
 
-# Fixed threshold name → probability value map (for string-based dispatch)
+# Fixed threshold name -> probability value map (for string-based dispatch)
 _FIXED_MAP: Dict[str, float] = {
     "fixed_2": 0.02, "fixed_5": 0.05, "fixed_8": 0.08,
     "fixed_10": 0.10, "fixed_15": 0.15,
@@ -790,25 +790,25 @@ def run_ablation(
     r_csv = outdir / "ablation_calibration_threshold_policy_results.csv"
     results.to_csv(r_csv, index=False)
     if verbose:
-        print(f"\nResults   → {r_csv}  ({len(results)} rows)")
+        print(f"\nResults   -> {r_csv}  ({len(results)} rows)")
 
     summary = summarize_results(results)
     s_csv = outdir / "ablation_calibration_threshold_policy_summary.csv"
     summary.to_csv(s_csv, index=False)
     if verbose:
-        print(f"Summary   → {s_csv}")
+        print(f"Summary   -> {s_csv}")
 
     recs = build_recommendations(summary)
     rec_csv = outdir / "ablation_calibration_threshold_policy_recommendations.csv"
     recs.to_csv(rec_csv, index=False)
     if verbose:
-        print(f"Recs      → {rec_csv}")
+        print(f"Recs      -> {rec_csv}")
 
     xlsx = outdir / "ablation_calibration_threshold_policy.xlsx"
     try:
         write_xlsx_report(results, summary, recs, xlsx)
         if verbose:
-            print(f"XLSX      → {xlsx}")
+            print(f"XLSX      -> {xlsx}")
     except Exception as exc:
         warnings.warn(f"XLSX export failed: {exc}")
 
@@ -997,7 +997,7 @@ def build_recommendations(summary_df: pd.DataFrame) -> pd.DataFrame:
                 "Preserved as reference_only regardless of guardrail outcome."
             )
             if rejects:
-                reason_str += " — Issues: " + "; ".join(rejects)
+                reason_str += " - Issues:" + "; ".join(rejects)
         elif policy == "youden":
             rec_type   = "reference_only"
             reason_str = (
@@ -1005,7 +1005,7 @@ def build_recommendations(summary_df: pd.DataFrame) -> pd.DataFrame:
                 "Labelled reference_only; not a primary clinical recommendation."
             )
             if rejects:
-                reason_str += " — Issues: " + "; ".join(rejects)
+                reason_str += " - Issues:" + "; ".join(rejects)
         elif rejects:
             rec_type   = "reject"
             reason_str = "; ".join(rejects)
@@ -1057,7 +1057,7 @@ _README_DATA = [
     ("Production model",
      "This ablation does NOT alter the production model, bundle, or MODEL_VERSION."),
     ("OOF evaluation",
-     "All metrics are honest OOF — calibrator fitted inside outer folds, no leakage."),
+     "All metrics are honest OOF - calibrator fitted inside outer folds, no leakage."),
     ("8% reference",
      "The 8% threshold is the production reference. Not replaced automatically."),
     ("sensitivity_constrained_90",
@@ -1166,7 +1166,7 @@ def _print_console_summary(summary: pd.DataFrame) -> None:
     if summary.empty:
         return
     print("\n" + "=" * 90)
-    print("SUMMARY — top 10 combinations by mean AUC")
+    print("SUMMARY - top 10 combinations by mean AUC")
     print("=" * 90)
     cols = [
         "model_name", "calibrator_name", "threshold_policy",
@@ -1272,7 +1272,7 @@ def main() -> None:
 
     verbose = not args.quiet
     if verbose:
-        print("=== Calibration × Threshold Policy Ablation ===")
+        print("=== Calibration x Threshold Policy Ablation ===")
         print(f"  data              : {args.data}")
         print(f"  seeds             : {args.seeds} (base={_BASE_SEED})")
         print(f"  models            : {models_filter or 'all'}")
