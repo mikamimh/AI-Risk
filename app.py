@@ -2064,10 +2064,23 @@ for value in raw_surgery_values:
 
 surgery_component_options = sorted(procedure_item_map.values(), key=str.lower)
 surgery_other_label = tr("Other / custom", "Outro / personalizado")
-# Default threshold: 8% — a conservative choice for cardiac surgery where
-# missing a high-risk patient (false negative) is worse than a false alarm.
-# The user can adjust freely via the slider.
-_default_threshold = 0.08
+# Primary operational threshold: use the sensitivity-constrained 90% policy
+# value stored in the bundle when available.  Falls back to the legacy fixed
+# 8% for older bundles that pre-date the threshold_policy field.
+_threshold_policy = getattr(artifacts, "threshold_policy", None)
+_policy_threshold = (
+    _threshold_policy.get("selected_threshold")
+    if isinstance(_threshold_policy, dict)
+    else None
+)
+_policy_valid = (
+    _policy_threshold is not None
+    and isinstance(_policy_threshold, float)
+    and 0.0 < _policy_threshold < 1.0
+    and _threshold_policy.get("status") == "ok"
+)
+_default_threshold = float(_policy_threshold) if _policy_valid else 0.08
+_is_legacy_threshold = not _policy_valid
 
 # Phase 3 — compact execution status near the top of the page.
 # The full expandable report is rendered at the bottom of the Overview
@@ -2364,7 +2377,15 @@ if _active_tab == 0:  # Overview
     _ms1, _ms2, _ms3, _ms4 = st.columns(4)
     _ms1.metric(tr("Selected model", "Modelo selecionado"), forced_model, border=True)
     _ms2.metric(tr("Model version", "Versão do modelo"), bundle_info.get("model_version") or MODEL_VERSION, border=True)
-    _ms3.metric(tr("Decision threshold", "Limiar de decisão"), f"{_default_threshold:.0%}", border=True)
+    _ms3.metric(
+        tr("Primary threshold", "Limiar primário"),
+        f"{_default_threshold:.0%}",
+        delta=tr(
+            "Sens-90% (OOF)" if not _is_legacy_threshold else "Legacy fixed 8%",
+            "Sens-90% (OOF)" if not _is_legacy_threshold else "Legado fixo 8%",
+        ),
+        border=True,
+    )
     _ms4.metric(
         tr("Calibration method", "Método de calibração"),
         _display_calib_method(getattr(artifacts, "calibration_method", None)),
@@ -2374,6 +2395,37 @@ if _active_tab == 0:  # Overview
         f"Best training model: {best_model_name} · Last action: {bundle_source}",
         f"Melhor modelo no treino: {best_model_name} · Última ação: {bundle_source}",
     ))
+    if _is_legacy_threshold:
+        st.caption(tr(
+            "Primary threshold: legacy fixed 8% fallback "
+            "(bundle pre-dates sensitivity-constrained policy; retrain to activate).",
+            "Limiar primario: fallback legado de 8% "
+            "(bundle anterior a politica de sensibilidade minima; retreine para ativar).",
+        ))
+    else:
+        _pol_sens = _threshold_policy.get("metrics", {}).get("sensitivity")
+        _pol_spec = _threshold_policy.get("metrics", {}).get("specificity")
+        _pol_flag = _threshold_policy.get("metrics", {}).get("flag_rate")
+        _pol_parts = [
+            tr(
+                "Primary operational threshold: sensitivity-constrained 90% policy.",
+                "Limiar operacional primario: politica de sensibilidade minima de 90%.",
+            ),
+            tr(
+                f"Selected threshold: {_default_threshold:.1%} (derived from OOF training predictions).",
+                f"Limiar selecionado: {_default_threshold:.1%} (derivado das predicoes OOF do treino).",
+            ),
+        ]
+        if _pol_sens is not None:
+            _pol_parts.append(tr(
+                f"OOF: sensitivity {_pol_sens:.1%}, specificity {_pol_spec:.1%}, flag rate {_pol_flag:.1%}.",
+                f"OOF: sensibilidade {_pol_sens:.1%}, especificidade {_pol_spec:.1%}, taxa de flags {_pol_flag:.1%}.",
+            ))
+        _pol_parts.append(tr(
+            "Fixed 8% is retained as a historical comparator.",
+            "O limiar fixo de 8% e mantido como comparador historico.",
+        ))
+        st.caption("  ".join(_pol_parts))
     _manifest = getattr(artifacts, "training_manifest", None)
     if _manifest:
         st.caption(tr(
@@ -2426,8 +2478,12 @@ if _active_tab == 0:  # Overview
     st.markdown(tr("**AI model leaderboard**", "**Leaderboard dos modelos de IA**"))
     st.caption(
         tr(
-            "AUC/AUPRC summarize discrimination; Brier summarizes calibration. Youden thresholds are complementary references, not the operational 8% default.",
-            "AUC/AUPRC resumem discriminação; Brier resume calibração. Limiares de Youden são referências complementares, não o padrão operacional de 8%.",
+            "AUC/AUPRC summarize discrimination; Brier summarizes calibration. "
+            "Youden thresholds shown here are per-model references (exploratory); "
+            "the primary operational threshold is the sensitivity-constrained 90% policy.",
+            "AUC/AUPRC resumem discriminação; Brier resume calibração. "
+            "Limiares de Youden mostrados aqui são referencias por modelo (exploratórios); "
+            "o limiar operacional primário é a política de sensibilidade mínima de 90%.",
         )
     )
     st.dataframe(artifacts.leaderboard, width="stretch", column_config=general_table_column_config("leaderboard"))
