@@ -956,6 +956,115 @@ def youden_threshold(y: np.ndarray, p: np.ndarray) -> Tuple[float, float]:
 
 
 # ---------------------------------------------------------------------------
+# Threshold role labels (used across UI, exports, and recommendations)
+# ---------------------------------------------------------------------------
+
+THRESHOLD_ROLE_PRIMARY = "Primary"
+THRESHOLD_ROLE_FIXED_COMPARATOR = "Fixed comparator"
+THRESHOLD_ROLE_HISTORICAL_COMPARATOR = "Historical comparator"
+THRESHOLD_ROLE_EXPLORATORY = "Exploratory"
+
+
+# ---------------------------------------------------------------------------
+# Sensitivity-constrained threshold (primary operational policy)
+# ---------------------------------------------------------------------------
+
+def sensitivity_constrained_threshold(
+    y: np.ndarray,
+    p: np.ndarray,
+    min_sensitivity: float = 0.90,
+) -> Dict[str, Any]:
+    """Derive the primary operational threshold via sensitivity constraint.
+
+    Selects the LARGEST threshold that maintains sensitivity >= min_sensitivity,
+    which maximises specificity (and minimises flag rate) within the constraint.
+    Tie-breaks prefer the highest numeric threshold value.
+
+    Clinical rationale: in cardiovascular surgery, false negatives carry
+    high cost, so a minimum sensitivity floor is set first and specificity
+    is maximised within that constraint.
+
+    Args:
+        y:               Binary outcome array.
+        p:               Predicted probabilities in [0, 1].
+        min_sensitivity: Minimum required sensitivity (default 0.90).
+
+    Returns:
+        Dict with keys:
+          threshold, sensitivity, specificity, PPV, NPV,
+          TP, FP, TN, FN, n_flagged, flag_rate,
+          event_rate_above, event_rate_below, status.
+        status is "ok" when a valid threshold is found, "not_available"
+        when the constraint cannot be satisfied at any threshold.
+    """
+    y = np.asarray(y).astype(int)
+    p = np.asarray(p)
+
+    pos = int(y.sum())
+    neg = int(len(y) - pos)
+    _nan_result: Dict[str, Any] = {
+        "threshold": float("nan"),
+        "sensitivity": float("nan"), "specificity": float("nan"),
+        "PPV": float("nan"), "NPV": float("nan"),
+        "TP": 0, "FP": 0, "TN": 0, "FN": 0,
+        "n_flagged": 0, "flag_rate": float("nan"),
+        "event_rate_above": float("nan"), "event_rate_below": float("nan"),
+        "status": "not_available",
+    }
+    if pos == 0 or neg == 0 or len(p) == 0:
+        return _nan_result
+
+    # Candidate thresholds: observed probability values + fine uniform grid.
+    # Including observed values ensures exact score boundaries are evaluated.
+    candidates = np.unique(np.concatenate([
+        np.linspace(0.001, 0.999, 1000),
+        p[np.isfinite(p)],
+    ]))
+
+    best_thr = float("nan")
+    best_spec = -1.0
+
+    for t in candidates:
+        pred = (p >= t).astype(int)
+        tp = int(((pred == 1) & (y == 1)).sum())
+        fp = int(((pred == 1) & (y == 0)).sum())
+        tn = int(((pred == 0) & (y == 0)).sum())
+        fn = int(((pred == 0) & (y == 1)).sum())
+        sens = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        spec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+
+        if sens >= min_sensitivity:
+            if spec > best_spec or (abs(spec - best_spec) < 1e-9 and t > best_thr):
+                best_thr, best_spec = float(t), spec
+
+    if np.isnan(best_thr):
+        return _nan_result
+
+    # Recompute full metrics at the selected threshold
+    pred = (p >= best_thr).astype(int)
+    tp = int(((pred == 1) & (y == 1)).sum())
+    fp = int(((pred == 1) & (y == 0)).sum())
+    tn = int(((pred == 0) & (y == 0)).sum())
+    fn = int(((pred == 0) & (y == 1)).sum())
+    n = len(y)
+    n_flagged = tp + fp
+
+    return {
+        "threshold":         best_thr,
+        "sensitivity":       float(tp / (tp + fn)) if (tp + fn) > 0 else float("nan"),
+        "specificity":       float(tn / (tn + fp)) if (tn + fp) > 0 else float("nan"),
+        "PPV":               float(tp / (tp + fp)) if (tp + fp) > 0 else float("nan"),
+        "NPV":               float(tn / (tn + fn)) if (tn + fn) > 0 else float("nan"),
+        "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+        "n_flagged":         n_flagged,
+        "flag_rate":         float(n_flagged / n) if n > 0 else float("nan"),
+        "event_rate_above":  float(tp / n_flagged) if n_flagged > 0 else float("nan"),
+        "event_rate_below":  float(fn / (fn + tn)) if (fn + tn) > 0 else float("nan"),
+        "status":            "ok",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Multi-threshold classification analysis
 # ---------------------------------------------------------------------------
 
