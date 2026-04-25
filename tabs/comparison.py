@@ -33,6 +33,10 @@ from stats_compare import (
     hosmer_lemeshow_test,
     integrated_calibration_index,
     threshold_analysis_table,
+    THRESHOLD_ROLE_PRIMARY,
+    THRESHOLD_ROLE_FIXED_COMPARATOR,
+    THRESHOLD_ROLE_HISTORICAL_COMPARATOR,
+    THRESHOLD_ROLE_EXPLORATORY,
 )
 from export_helpers import (
     build_comparison_full_package,
@@ -70,9 +74,16 @@ def _build_threshold_comparison_export_df(
     artifacts,
     forced_model: str,
 ) -> pd.DataFrame:
-    """Build a supplementary AI Risk threshold comparison table for exports."""
+    """Build a supplementary AI Risk threshold comparison table for exports.
+
+    Includes a Threshold Role column distinguishing Primary (sens-constrained
+    90%), Fixed comparator, Historical comparator (8%), and Exploratory (Youden).
+    The Primary row is derived from the training bundle's threshold_policy when
+    available; it is omitted (as NaN) for legacy bundles.
+    """
     cols = [
         "Threshold label",
+        "Threshold Role",
         "Threshold",
         "Sensitivity",
         "Specificity",
@@ -100,23 +111,35 @@ def _build_threshold_comparison_export_df(
     _youden_thr = _youden_map.get(forced_model, getattr(artifacts, "best_youden_threshold", np.nan))
     _youden_thr = float(_youden_thr) if _youden_thr is not None else float("nan")
 
-    candidates: list[tuple[str, float]] = [
-        ("5%", 0.05),
-        ("8% (Operational main)", 0.08),
-        ("10%", 0.10),
-        ("15%", 0.15),
-        ("Youden", _youden_thr),
+    # Primary threshold from bundle threshold_policy (NaN for legacy bundles)
+    _tp_dict = getattr(artifacts, "threshold_policy", None)
+    _primary_thr = float("nan")
+    if isinstance(_tp_dict, dict) and _tp_dict.get("status") == "ok":
+        _v = _tp_dict.get("selected_threshold")
+        if _v is not None and 0.0 < float(_v) < 1.0:
+            _primary_thr = float(_v)
+
+    # (label, role, threshold_value)
+    candidates: list[tuple[str, str, float]] = [
+        ("Sens-90% (Primary)", THRESHOLD_ROLE_PRIMARY,              _primary_thr),
+        ("2%",                  THRESHOLD_ROLE_FIXED_COMPARATOR,     0.02),
+        ("5%",                  THRESHOLD_ROLE_FIXED_COMPARATOR,     0.05),
+        ("8%",                  THRESHOLD_ROLE_HISTORICAL_COMPARATOR, 0.08),
+        ("10%",                 THRESHOLD_ROLE_FIXED_COMPARATOR,     0.10),
+        ("15%",                 THRESHOLD_ROLE_FIXED_COMPARATOR,     0.15),
+        ("Youden",              THRESHOLD_ROLE_EXPLORATORY,          _youden_thr),
     ]
-    valid_thresholds = [float(t) for _, t in candidates if np.isfinite(t)]
+    valid_thresholds = [float(t) for _, _, t in candidates if np.isfinite(t)]
     analysis = threshold_analysis_table(_y, _p, valid_thresholds) if valid_thresholds else pd.DataFrame()
 
-    rows: list[dict[str, float | int | str]] = []
+    rows: list[dict] = []
     valid_idx = 0
     n_total = int(len(_y))
-    for label, thr in candidates:
+    for label, role, thr in candidates:
         if not np.isfinite(thr):
             rows.append({
                 "Threshold label": label,
+                "Threshold Role": role,
                 "Threshold": np.nan,
                 "Sensitivity": np.nan,
                 "Specificity": np.nan,
@@ -142,6 +165,7 @@ def _build_threshold_comparison_export_df(
         acc = ((tp + tn) / n_total) if n_total else np.nan
         rows.append({
             "Threshold label": label,
+            "Threshold Role": role,
             "Threshold": float(thr),
             "Sensitivity": _row.get("Sensitivity", np.nan),
             "Specificity": _row.get("Specificity", np.nan),
@@ -454,27 +478,44 @@ def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, compl
     # ── Threshold mode selector ──
     _best_youden = getattr(artifacts, "best_youden_threshold", None)
     _youden_available = _best_youden is not None
-    _mode_fixed_label = tr("Fixed clinical threshold (8%)", "Limiar clínico fixo (8%)")
+
+    # Determine primary threshold label: sens-constrained 90% when available,
+    # else legacy fixed 8%.
+    _tp_dict = getattr(artifacts, "threshold_policy", None)
+    _primary_available = (
+        isinstance(_tp_dict, dict)
+        and _tp_dict.get("status") == "ok"
+        and _tp_dict.get("selected_threshold") is not None
+        and 0.0 < float(_tp_dict["selected_threshold"]) < 1.0
+    )
+    _mode_primary_label = (
+        tr(
+            f"Primary: Sens-90% = {_default_threshold*100:.1f}%",
+            f"Primario: Sens-90% = {_default_threshold*100:.1f}%",
+        )
+        if _primary_available
+        else tr(f"Primary: legacy fixed {_default_threshold:.0%}", f"Primario: legado fixo {_default_threshold:.0%}")
+    )
     _mode_youden_label = (
         tr(
-            f"Best model Youden threshold: {_best_youden*100:.1f}%",
-            f"Limiar de Youden do melhor modelo: {_best_youden*100:.1f}%",
+            f"Exploratory: Youden = {_best_youden*100:.1f}%",
+            f"Exploratorio: Youden = {_best_youden*100:.1f}%",
         )
         if _youden_available
-        else tr("Youden threshold (not available — retrain required)", "Limiar de Youden (indisponível — retreino necessário)")
+        else tr("Youden (not available — retrain required)", "Youden (indisponivel — retreine para ativar)")
     )
     st.markdown(tr("#### Operational threshold", "#### Limiar operacional"))
     _threshold_mode = st.radio(
         tr("Threshold mode", "Modo de limiar"),
-        options=[_mode_fixed_label, _mode_youden_label],
-        index=0,  # Fixed 8% is always the default
+        options=[_mode_primary_label, _mode_youden_label],
+        index=0,
         horizontal=True,
         disabled=not _youden_available and True,
         help=tr(
-            "Choose between the fixed 8% clinical threshold (default) or the optimal Youden threshold learned from the training data. "
-            "AUC, AUPRC, and Brier score are not affected — only classification metrics change.",
-            "Escolha entre o limiar clínico fixo de 8% (padrão) ou o limiar ótimo de Youden aprendido dos dados de treino. "
-            "AUC, AUPRC e Brier score não são afetados — apenas métricas de classificação mudam.",
+            "Primary threshold: sensitivity-constrained 90% policy (largest OOF threshold keeping sensitivity >= 90%). "
+            "Youden is data-driven and exploratory — not for prospective use.",
+            "Limiar primario: politica de sensibilidade minima de 90% (maior limiar OOF com sensibilidade >= 90%). "
+            "Youden e orientado por dados e exploratorio — nao para uso prospectivo.",
         ),
     )
     _use_youden = _youden_available and _threshold_mode == _mode_youden_label
@@ -716,10 +757,12 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
 
         st.markdown(tr("### Threshold Comparison", "### Comparação entre Limiares"))
         st.caption(tr(
-            "The fixed 8% threshold remains the operational threshold of the study. "
-            "The other cutoffs are supplementary benchmarks for sensitivity, specificity, and case flagging.",
-            "O limiar fixo de 8% continua sendo o limiar operacional do estudo. "
-            "Os demais pontos de corte são referências suplementares para sensibilidade, especificidade e classificação de alto risco.",
+            "Primary: sensitivity-constrained 90% (largest OOF threshold keeping sensitivity >= 90%). "
+            "Fixed 8% is a historical comparator. Youden is exploratory. "
+            "All other fixed thresholds are supplementary benchmarks.",
+            "Primario: sensibilidade minima 90% (maior limiar OOF com sensibilidade >= 90%). "
+            "Fixo 8% e comparador historico. Youden e exploratorio. "
+            "Os demais limiares fixos sao referencias suplementares.",
         ))
         _threshold_comparison_for_display = _build_threshold_comparison_export_df(
             df=df,

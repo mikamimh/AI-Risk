@@ -605,11 +605,15 @@ def build_comparison_xlsx(
             ("", ""),
             (_tr("Analysis note", "Nota metodológica"), _tr(
                 "Primary analysis: triple cohort (AI Risk + EuroSCORE II + STS Score in the same patients). "
-                "The 8% threshold remains the primary operational threshold; additional threshold rows are supplementary. "
+                "Primary operational threshold: sensitivity-constrained 90% policy "
+                "(largest OOF threshold keeping sensitivity >= 90%). "
+                "Fixed 8% is a historical comparator. Youden is exploratory. "
                 "Reclassification (NRI/IDI) is complementary and exploratory.",
-                "Análise principal: coorte tripla (AI Risk + EuroSCORE II + STS Score nos mesmos pacientes). "
-                "O limiar de 8% permanece como limiar operacional principal; as demais linhas de limiar são suplementares. "
-                "Reclassificação (NRI/IDI) é complementar e exploratória.",
+                "Analise principal: coorte tripla (AI Risk + EuroSCORE II + STS Score nos mesmos pacientes). "
+                "Limiar operacional primario: politica de sensibilidade minima de 90% "
+                "(maior limiar OOF com sensibilidade >= 90%). "
+                "Fixo 8% e comparador historico. Youden e exploratorio. "
+                "Reclassificacao (NRI/IDI) e complementar e exploratoria.",
             )),
         ]
         readme_df = pd.DataFrame(readme_rows, columns=[_tr("Field", "Campo"), _tr("Value", "Valor")])
@@ -1315,8 +1319,14 @@ def _build_comparison_full_md(
     )
     lines.append("")
     lines.append(_tr(
-        "Operational note: 8% remains the primary clinical threshold. The other thresholds below are supplementary for comparison.",
-        "Nota operacional: 8% permanece como limiar clínico principal. Os demais limiares abaixo são suplementares para comparação.",
+        "Operational note: primary threshold is the sensitivity-constrained 90% policy "
+        "(largest OOF threshold keeping sensitivity >= 90%). "
+        "Fixed 8% is a historical comparator. Youden is exploratory. "
+        "All other fixed thresholds are supplementary.",
+        "Nota operacional: limiar primario e a politica de sensibilidade minima de 90% "
+        "(maior limiar OOF com sensibilidade >= 90%). "
+        "Fixo 8% e comparador historico. Youden e exploratorio. "
+        "Os demais limiares fixos sao suplementares.",
     ))
     lines.append("")
     if not _threshold_comp.empty:

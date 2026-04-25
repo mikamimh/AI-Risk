@@ -397,32 +397,57 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
         training_data=prepared.data,
         model_version=MODEL_VERSION,
     )
-    _tv_locked_threshold_default = _tv_meta.get("locked_threshold", 0.08)
+    # Resolve the locked primary threshold from the bundle.
+    # Priority: (1) threshold_policy from training artifacts (sensitivity-
+    # constrained 90%); (2) legacy locked_threshold from model metadata;
+    # (3) hardcoded 8% fallback for very old bundles.
+    _tv_tp_dict = getattr(artifacts, "threshold_policy", None)
+    _tv_policy_valid = (
+        isinstance(_tv_tp_dict, dict)
+        and _tv_tp_dict.get("status") == "ok"
+        and _tv_tp_dict.get("selected_threshold") is not None
+        and 0.0 < float(_tv_tp_dict["selected_threshold"]) < 1.0
+    )
+    if _tv_policy_valid:
+        _tv_locked_threshold_default = float(_tv_tp_dict["selected_threshold"])
+        _tv_primary_policy_name = "sensitivity_constrained_90"
+    else:
+        _tv_locked_threshold_default = float(_tv_meta.get("locked_threshold", 0.08))
+        _tv_primary_policy_name = "legacy_fixed_8"
 
     # ── Threshold mode selector ──
     _tv_best_youden = getattr(artifacts, "best_youden_threshold", None)
     _tv_youden_avail = _tv_best_youden is not None
-    _tv_mode_fixed = tr(
-        f"Locked clinical threshold ({_tv_locked_threshold_default*100:.0f}%)",
-        f"Limiar clínico bloqueado ({_tv_locked_threshold_default*100:.0f}%)",
+    _tv_mode_primary = (
+        tr(
+            f"Primary: Sens-90% locked = {_tv_locked_threshold_default*100:.1f}%",
+            f"Primario: Sens-90% bloqueado = {_tv_locked_threshold_default*100:.1f}%",
+        )
+        if _tv_policy_valid
+        else tr(
+            f"Primary: legacy fixed {_tv_locked_threshold_default*100:.0f}%",
+            f"Primario: legado fixo {_tv_locked_threshold_default*100:.0f}%",
+        )
     )
     _tv_mode_youden = (
         tr(
-            f"Training Youden threshold: {_tv_best_youden*100:.1f}%",
-            f"Limiar de Youden do treino: {_tv_best_youden*100:.1f}%",
+            f"Exploratory: Youden (training) = {_tv_best_youden*100:.1f}%",
+            f"Exploratorio: Youden (treino) = {_tv_best_youden*100:.1f}%",
         )
         if _tv_youden_avail
-        else tr("Youden threshold (not available)", "Limiar de Youden (indisponível)")
+        else tr("Youden threshold (not available)", "Limiar de Youden (indisponivel)")
     )
     _tv_threshold_mode = st.radio(
         tr("Threshold mode", "Modo de limiar"),
-        options=[_tv_mode_fixed, _tv_mode_youden],
+        options=[_tv_mode_primary, _tv_mode_youden],
         index=0,
         horizontal=True,
         disabled=not _tv_youden_avail,
         help=tr(
-            "Choose the threshold for classification metrics. The Youden threshold was learned during training — it is NOT recomputed on the validation data.",
-            "Escolha o limiar para métricas de classificação. O limiar de Youden foi aprendido durante o treino — NÃO é recalculado nos dados de validação.",
+            "Primary threshold: locked from training artifacts (sensitivity-constrained 90% policy or legacy 8%). "
+            "Youden is exploratory — learned during training, not recomputed on validation data.",
+            "Limiar primario: bloqueado nos artefatos de treino (politica de sensibilidade minima 90% ou legado 8%). "
+            "Youden e exploratorio — aprendido no treino, nao recalculado nos dados de validacao.",
         ),
         key="tv_threshold_mode",
     )
@@ -431,19 +456,34 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
 
     if _tv_use_youden:
         st.info(tr(
-            f"**Active threshold: Training Youden = {_tv_locked_threshold*100:.1f}%** (probability {_tv_locked_threshold:.4f}). "
-            f"Learned during model development — not recomputed on temporal data.",
-            f"**Limiar ativo: Youden do treino = {_tv_locked_threshold*100:.1f}%** (probabilidade {_tv_locked_threshold:.4f}). "
-            f"Aprendido durante o desenvolvimento — não recalculado nos dados temporais.",
+            f"**Active threshold: Training Youden = {_tv_locked_threshold*100:.1f}%** "
+            f"(probability {_tv_locked_threshold:.4f}).  \n"
+            f"Exploratory reference learned during training — not recomputed on temporal data.",
+            f"**Limiar ativo: Youden do treino = {_tv_locked_threshold*100:.1f}%** "
+            f"(probabilidade {_tv_locked_threshold:.4f}).  \n"
+            f"Referencia exploratoria aprendida no treino — nao recalculada nos dados temporais.",
+        ))
+    elif _tv_policy_valid:
+        st.info(tr(
+            f"**Active threshold: {_tv_locked_threshold*100:.1f}%** "
+            f"(probability {_tv_locked_threshold:.4f}) — sensitivity-constrained 90% policy.  \n"
+            f"Derived from out-of-fold training predictions as the largest threshold keeping "
+            f"sensitivity >= 90%.  Not recomputed on temporal data — prospective validation integrity preserved.",
+            f"**Limiar ativo: {_tv_locked_threshold*100:.1f}%** "
+            f"(probabilidade {_tv_locked_threshold:.4f}) — politica de sensibilidade minima de 90%.  \n"
+            f"Derivado das predicoes OOF do treino como o maior limiar mantendo "
+            f"sensibilidade >= 90%.  Nao recalculado nos dados temporais — integridade da validacao prospectiva preservada.",
         ))
     else:
         st.info(tr(
-            f"**Active threshold: Locked clinical = {_tv_locked_threshold*100:.1f}%** (probability {_tv_locked_threshold:.4f})  \n"
-            f"Locked at training time, aligned with the EuroSCORE II high-risk boundary (>8%). "
-            f"Not recomputed on temporal data — this preserves the prospective validation integrity.",
-            f"**Limiar ativo: Clínico bloqueado = {_tv_locked_threshold*100:.1f}%** (probabilidade {_tv_locked_threshold:.4f})  \n"
-            f"Bloqueado no treinamento, alinhado com a fronteira de alto risco do EuroSCORE II (>8%). "
-            f"Não recalculado nos dados temporais — isso preserva a integridade da validação prospectiva.",
+            f"**Active threshold: Legacy fixed {_tv_locked_threshold*100:.1f}%** "
+            f"(probability {_tv_locked_threshold:.4f}).  \n"
+            f"Bundle pre-dates the sensitivity-constrained policy; retrain to activate. "
+            f"Fixed 8% is now a historical comparator — primary policy is sensitivity-constrained 90%.",
+            f"**Limiar ativo: Legado fixo {_tv_locked_threshold*100:.1f}%** "
+            f"(probabilidade {_tv_locked_threshold:.4f}).  \n"
+            f"Bundle anterior a politica de sensibilidade minima; retreine para ativar. "
+            f"O fixo de 8% e agora um comparador historico — a politica primaria e sensibilidade minima de 90%.",
         ))
 
     with st.expander(tr("Locked model details", "Detalhes do modelo congelado"), expanded=True):
@@ -3556,12 +3596,16 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                     st.divider()
                     st.markdown(tr("### Threshold Analysis", "### Análise de Limiar"))
                     st.caption(tr(
-                        "Fixed thresholds: 2%, 5%, 8%, 10%. "
-                        "Youden's J optimal threshold is data-driven and **exploratory** — "
-                        "do not use it as the operative locked threshold.",
-                        "Limiares fixos: 2%, 5%, 8%, 10%. "
-                        "O limiar ótimo de Youden é orientado pelos dados e **exploratório** — "
-                        "não deve ser usado como limiar operacional bloqueado.",
+                        "Primary (locked): sensitivity-constrained 90% derived from training OOF. "
+                        "Fixed 8% shown as historical comparator. "
+                        "Youden's J is data-driven and **exploratory** — "
+                        "not the operative locked threshold. "
+                        "Any threshold derived from the validation cohort is post-hoc/exploratory.",
+                        "Primario (bloqueado): sensibilidade minima 90% derivada do OOF de treino. "
+                        "Fixo 8% mostrado como comparador historico. "
+                        "Youden e orientado por dados e **exploratorio** — "
+                        "nao e o limiar operacional bloqueado. "
+                        "Qualquer limiar derivado da coorte de validacao e pos-hoc/exploratorio.",
                     ))
                     # ── E. Compact threshold operating characteristics (AI Risk) ──
                     _thr_ia_raw = _tv_exploratory_thresh_tables.get("ia_risk")

@@ -556,16 +556,43 @@ The **execution details** expander (visible after a run) exposes:
 
 ## Decision threshold
 
-The **operational clinical threshold remains fixed at 8%**. This is the default used throughout the app for classification, clinical comparison, and temporal validation.
+### Primary operational threshold — sensitivity-constrained 90% policy
 
-- **Asymmetric cost of errors:** In cardiac surgery, the cost of missing a high-risk patient (false negative) far outweighs the cost of an unnecessary alert (false positive). A missed at-risk patient may die without adequate team preparation; an unnecessary alert only means the team prepares more carefully — causing no harm.
-- **Clinical consistency:** The average mortality rate in cardiac surgery ranges from 3–8% globally. The 8% threshold sits just above this range, meaning it does not flag most patients as high-risk, but is low enough to capture patients at real risk before it becomes clinically obvious.
-- **Aligned with established scores:** This is consistent with EuroSCORE II stratification thresholds (low risk <3%, intermediate 3–8%, high risk >8%).
-- **Operationally a high-sensitivity triage rule:** At 8% the current AI Risk configuration (RandomForest) behaves as a high-sensitivity triage threshold — it favors detecting at-risk patients at the cost of more false positives, which is the safer posture in surgical risk stratification.
+The primary operational threshold is now defined by a **clinical policy**, not a fixed value:
 
-The app additionally computes and displays a **per-model Youden threshold** (the OOF-optimal J cutoff) in the leaderboard as a complementary, model-specific reference. Youden is shown for auditability and balanced-classifier comparison; **it is not the default operational threshold**. In the Statistical Comparison tab the user can switch between the fixed 8% clinical mode and the stored Youden mode, but the fixed 8% remains the default.
+> **Rule:** select the largest threshold derived from out-of-fold training predictions that maintains sensitivity ≥ 90%, maximising specificity within that constraint.
 
-The threshold slider and the Youden switch never modify the model, the calibrated probabilities, or any discrimination/calibration metric — AUC, AUPRC, and Brier score evaluate the full probability distribution and are unaffected by any threshold choice.
+**Clinical rationale:** in cardiovascular surgery, the cost of missing a high-risk patient (false negative) is asymmetrically higher than the cost of a false alarm (false positive). A missed at-risk patient may die without adequate team preparation; an unnecessary alert only means the team prepares more carefully. Setting a sensitivity floor of ≥ 90% first, then maximising specificity within that constraint, formalises this asymmetry in the threshold selection rule.
+
+**How it is computed:**
+1. At training time, calibrated out-of-fold (OOF) predictions are generated for the best model.
+2. All candidate threshold values (observed probability values + a fine uniform grid) are evaluated.
+3. The largest threshold with sensitivity ≥ 90% is selected; ties are broken by highest threshold value.
+4. The selected threshold, target sensitivity, and classification metrics are stored in the bundle's `threshold_policy` field.
+5. When the bundle is loaded by the app, `threshold_policy["selected_threshold"]` is used as the default operational threshold.
+
+**Fallback for legacy bundles:** bundles generated before this policy was introduced do not carry `threshold_policy`. The app falls back to the fixed **8%** for those bundles and displays a "legacy fixed 8% fallback" label in the Overview and Temporal Validation panels. Retraining generates a bundle with the new policy.
+
+### Threshold hierarchy
+
+| Role | Threshold | Description |
+|:--|:--|:--|
+| **Primary** | Sensitivity-constrained 90% | Largest OOF threshold with sensitivity ≥ 90% |
+| **Fixed comparators** | 2%, 5%, 10%, 15% | Supplementary reference points |
+| **Historical comparator** | 8% | Former primary threshold; retained for continuity |
+| **Exploratory** | Youden's J | Data-driven OOF optimum; not for prospective use |
+
+The fixed **8%** is no longer the primary threshold. It is displayed in all comparison tables as a **historical comparator** to support continuity with prior analyses and external publications that used it. It is **not removed** from any view.
+
+**Youden's J** (sensitivity + specificity − 1 optimum) remains a per-model exploratory reference shown in the leaderboard and comparison views. It is data-driven and must not be used as a prospective locked threshold — it is optimistic because it is evaluated on the same data it was derived from.
+
+### Temporal Validation
+
+In the Temporal Validation tab, the locked primary threshold is always taken from the training bundle's `threshold_policy` (or 8% fallback for legacy bundles). Any threshold derived from the validation cohort itself is clearly labelled **post-hoc / exploratory** and must not replace the locked training-time threshold in primary reporting.
+
+### Threshold slider and Youden switch
+
+The threshold slider and the Youden switch in the Comparison tab never modify the model, calibrated probabilities, or any discrimination/calibration metric. AUC, AUPRC, and Brier score evaluate the full probability distribution and are unaffected by any threshold choice.
 
 ## Methodological transparency
 
@@ -580,7 +607,7 @@ This app follows TRIPOD/TRIPOD-AI reporting principles. Key methodological decis
 - **OOF is a development metric; Temporal Validation is the primary test metric.** The leaderboard is intended to guide model selection and audit model behavior during development. Generalization performance should be judged from the Temporal Validation tab, which applies the frozen model to an independently uploaded cohort that was not seen during training or selection. When reporting results outside this app (publications, presentations, clinical discussion), the Temporal Validation estimates should be cited as the primary performance; the leaderboard OOF should be cited as model-development metrics with an explicit note that they may be optimistic due to selection on the same partition.
 - **Nested cross-validation is not implemented.** A methodologically stronger alternative would be nested CV (outer loop for honest estimation, inner loop for selection), which is not implemented in this version because the cohort size (n ≈ 454, 68 events) makes the computational cost high relative to the benefit when an independent temporal cohort is available. If a future study replicates this work on a larger multi-center cohort, nested CV is the recommended approach for publication-grade internal validation.
 - Discrimination (AUC, AUPRC) and calibration (Brier, intercept, slope) are both reported and used jointly
-- The operational clinical threshold is fixed at 8%; the per-model Youden threshold is shown as a complementary reference, not as the default
+- The primary operational threshold is the sensitivity-constrained 90% policy (largest OOF threshold keeping sensitivity ≥ 90%); the fixed 8% is a historical comparator; the per-model Youden threshold is exploratory and not the default
 - AI Risk is a complementary analytical/research tool — it is not a clinical decision-support system and must not be used for autonomous clinical decision-making
 - NRI and IDI are reported as complementary reclassification metrics, not as primary evidence of model superiority. Both are now reported with 95% bootstrap CI and two-sided p-value (2000 resamples); reclassification metrics without CI should not be used for inference. **Convention:** "A vs B" means A is the candidate model and B is the reference; NRI > 0 means A reclassifies better than B. When p = 0.0000, the true p-value is below the bootstrap resolution limit (< 1/n_boot = 0.0005 for 2000 resamples); reports display "< 0.0005" in that case — this is not a computation artifact but a statement about statistical precision.
 - Calibration intercept and slope are reported with 95% bootstrap CI in Temporal Validation. Calibration-in-the-large (CIL = mean predicted − mean observed) and Integrated Calibration Index (ICI, via isotonic regression) are reported alongside Hosmer-Lemeshow as complementary calibration measures.
