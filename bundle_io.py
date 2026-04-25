@@ -329,6 +329,7 @@ def serialize_bundle(bundle: Dict[str, object]) -> Dict[str, object]:
         "youden_thresholds": getattr(artifacts, "youden_thresholds", None),
         "best_youden_threshold": getattr(artifacts, "best_youden_threshold", None),
         "training_manifest": getattr(artifacts, "training_manifest", None),
+        "threshold_policy": getattr(artifacts, "threshold_policy", None),
     }
     # Phase 3: persist the run report as a plain dict so module reloads
     # don't break unpickling.
@@ -366,6 +367,7 @@ def deserialize_bundle(bundle: Dict[str, object]) -> Dict[str, object]:
             youden_thresholds=a.get("youden_thresholds"),
             best_youden_threshold=a.get("best_youden_threshold"),
             training_manifest=a.get("training_manifest"),
+            threshold_policy=a.get("threshold_policy"),
         )
     # Phase 3: rebuild RunReport from persisted dict (legacy bundles without
     # the key simply carry no report).

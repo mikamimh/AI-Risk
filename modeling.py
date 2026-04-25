@@ -26,7 +26,7 @@ from risk_data import (
     parse_number as _rd_parse_number,
     is_missing as _rd_is_missing,
 )
-from stats_compare import calibration_intercept_slope
+from stats_compare import calibration_intercept_slope, sensitivity_constrained_threshold
 
 # Binary clinical variables: ONLY truly binary Yes/No columns, verified against
 # Dataset_2025.xlsx unique values (2026-04-23). Reduces encoding noise on
@@ -421,6 +421,11 @@ class TrainedArtifacts:
     training_manifest: Optional[Dict[str, Any]] = None
     """Provenance record written at training time: dataset hash, row count,
     event count, feature list, CV strategy, seed, and OOF metrics."""
+    threshold_policy: Optional[Dict[str, Any]] = None
+    """Primary operational threshold policy derived from OOF training
+    predictions.  Contains selected_threshold, target_sensitivity, metrics,
+    and source information.  None for legacy bundles trained before this
+    field was introduced; callers should fall back to 0.08 when None."""
 
 
 # ---------------------------------------------------------------------------
@@ -1023,6 +1028,56 @@ def train_and_select_model(
     except Exception:
         pass
 
+    # ── Primary operational threshold policy ──────────────────────────────
+    # Derive the sensitivity-constrained threshold from the best model's OOF
+    # predictions.  This is the training-time estimate of the highest threshold
+    # that preserves sensitivity >= 90%, maximising specificity within that
+    # constraint.  Stored in the bundle so downstream code can read it back
+    # without recomputing.
+    _policy_target_sens = 0.90
+    _sens_result: Dict[str, Any] = {}
+    if len(_best_oof) == len(y) and len(np.unique(y)) > 1:
+        try:
+            _sens_result = sensitivity_constrained_threshold(
+                y, _best_oof, min_sensitivity=_policy_target_sens
+            )
+        except Exception:
+            _sens_result = {"status": "not_available", "threshold": float("nan")}
+
+    _primary_thr = _sens_result.get("threshold", float("nan"))
+    _threshold_policy: Dict[str, Any] = {
+        "name": "sensitivity_constrained_90",
+        "selected_threshold": _primary_thr,
+        "target_sensitivity": _policy_target_sens,
+        "source": "training_oof_predictions",
+        "role": "primary",
+        "status": _sens_result.get("status", "not_available"),
+        "metrics": {
+            "sensitivity":      _sens_result.get("sensitivity"),
+            "specificity":      _sens_result.get("specificity"),
+            "PPV":              _sens_result.get("PPV"),
+            "NPV":              _sens_result.get("NPV"),
+            "TP":               _sens_result.get("TP"),
+            "FP":               _sens_result.get("FP"),
+            "TN":               _sens_result.get("TN"),
+            "FN":               _sens_result.get("FN"),
+            "flag_rate":        _sens_result.get("flag_rate"),
+            "event_rate_above": _sens_result.get("event_rate_above"),
+            "event_rate_below": _sens_result.get("event_rate_below"),
+        },
+    }
+
+    # Mirror key policy metrics in the manifest for quick access
+    _manifest["primary_threshold_policy"]          = "sensitivity_constrained_90"
+    _manifest["primary_threshold_value"]           = _primary_thr
+    _manifest["primary_threshold_target_sensitivity"] = _policy_target_sens
+    _manifest["primary_threshold_sensitivity"]     = _sens_result.get("sensitivity")
+    _manifest["primary_threshold_specificity"]     = _sens_result.get("specificity")
+    _manifest["primary_threshold_ppv"]             = _sens_result.get("PPV")
+    _manifest["primary_threshold_npv"]             = _sens_result.get("NPV")
+    _manifest["primary_threshold_flag_rate"]       = _sens_result.get("flag_rate")
+    _manifest["primary_threshold_status"]          = _sens_result.get("status", "not_available")
+
     return TrainedArtifacts(
         model=best_model,
         leaderboard=leaderboard,
@@ -1035,4 +1090,5 @@ def train_and_select_model(
         youden_thresholds=youden_thresholds,
         best_youden_threshold=youden_thresholds.get(best_name),
         training_manifest=_manifest,
+        threshold_policy=_threshold_policy,
     )
