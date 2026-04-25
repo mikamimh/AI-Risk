@@ -1978,6 +1978,27 @@ artifacts = bundle["artifacts"]
 base_df = bundle["data"].copy()
 best_model_name = artifacts.best_model_name
 
+# Bundles saved by regenerate_bundle.py store only prepared.data (no live
+# calculator output).  Ensure computed score columns are present so the rest
+# of the app can access them unconditionally.  The app's _compute_bundle path
+# always adds these, so this guard is a no-op for in-app trained bundles.
+if "euroscore_calc" not in base_df.columns:
+    base_df["euroscore_calc"] = base_df.apply(euroscore_from_row, axis=1)
+if "euroscore_sheet_clean" not in base_df.columns:
+    base_df["euroscore_sheet_clean"] = pd.to_numeric(
+        base_df.get("euroscore_sheet"), errors="coerce"
+    )
+if "euroscore_auto_sheet_clean" not in base_df.columns:
+    base_df["euroscore_auto_sheet_clean"] = pd.to_numeric(
+        base_df.get("euroscore_auto_sheet"), errors="coerce"
+    )
+if "sts_score" not in base_df.columns:
+    base_df["sts_score"] = np.nan
+if "sts_scope_status" not in base_df.columns:
+    base_df["sts_scope_status"] = "not_applicable"
+if "sts_scope_reason" not in base_df.columns:
+    base_df["sts_scope_reason"] = "STS calculator unavailable"
+
 # Guard the single-patient inference simplification: the individual prediction
 # flow calls _run_ai_risk_inference_row with artifacts.feature_columns only
 # (no prepared/artifacts merge).  If the schemas ever diverge the input will

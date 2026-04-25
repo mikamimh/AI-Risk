@@ -43,6 +43,7 @@ sys.path.insert(0, ".")
 from risk_data import prepare_master_dataset
 from modeling import train_and_select_model
 from stats_compare import calibration_intercept_slope, classification_metrics_at_threshold
+from euroscore import euroscore_from_row
 from bundle_io import bundle_signature, serialize_bundle, BUNDLE_SCHEMA_VERSION
 from config import AppConfig
 
@@ -195,6 +196,17 @@ def run():
 
     # ── Construcao e salvamento do bundle ─────────────────────────────────────
     print("\n[5] Construindo e salvando bundle...")
+
+    # Add app-computed columns so the bundle mirrors what _compute_bundle
+    # produces.  Without these the app crashes when it loads the bundle from
+    # the cache file (euroscore_calc, sts_score, etc. are expected unconditionally).
+    df["euroscore_calc"] = df.apply(euroscore_from_row, axis=1)
+    df["euroscore_sheet_clean"] = pd.to_numeric(df.get("euroscore_sheet"), errors="coerce")
+    df["euroscore_auto_sheet_clean"] = pd.to_numeric(df.get("euroscore_auto_sheet"), errors="coerce")
+    df["sts_score"] = np.nan
+    df["sts_scope_status"] = "not_applicable"
+    df["sts_scope_reason"] = "STS calculator unavailable"
+    print("  App-computed columns added (euroscore_calc, sts_score): OK")
 
     sig = bundle_signature(XLSX)
     print(f"  Assinatura XLSX: mtime_ns={sig['xlsx_mtime_ns']}, size={sig['xlsx_size']}")
