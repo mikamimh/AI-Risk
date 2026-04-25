@@ -591,6 +591,72 @@ This app follows TRIPOD/TRIPOD-AI reporting principles. Key methodological decis
 - The variable semantic contract (`variable_contract.py`) is the single source of truth for data type, parse mode, blank semantics, and plausibility ranges for all canonical variables. Multi-level clinical variables (Diabetes, CVA, IE, Cancer, Anticoagulation, Pneumonia) are typed as `categorical`, not `binary`, to prevent encoding destruction of clinically informative categories. The `blank_impute_no` flag explicitly marks columns where blank means "condition absent" regardless of data type.
 - Risk of bias should be assessed across PROBAST domains
 
+## Calibration and threshold policy ablation
+
+`ablation_calibration_threshold_policy.py` evaluates all combinations of model × calibrator × threshold policy on honest OOF (out-of-fold) predictions. It does **not** alter the production model, bundle, `MODEL_VERSION`, or the primary operational threshold.
+
+**Motivation:** the fixed 8 % clinical threshold is becoming harder to defend as the sole operational threshold. This ablation evaluates whether a sensitivity-constrained policy (e.g. "largest threshold that keeps sensitivity ≥ 90 %") delivers a better clinical trade-off while preserving discrimination and calibration.
+
+### Run
+
+```bash
+python ablation_calibration_threshold_policy.py \
+    --data local_data/Dataset_2025.xlsx \
+    --seeds 20 \
+    --outdir ablation_outputs/calibration_threshold_policy
+```
+
+Optional flags: `--models LogisticRegression,RandomForest`, `--thresholds 2,5,8,10,15`, `--sensitivity-targets 0.85,0.90,0.95`, `--npv-targets 0.95,0.97`, `--n-boot 0`, `--quiet`.
+
+Seeds default to `42, 43, …, 42+N-1`.
+
+### Calibrators evaluated
+
+| Name | Method | Inner CV | Notes |
+|:--|:--|--:|:--|
+| `raw` | uncalibrated | — | Raw model probabilities |
+| `sigmoid_cv3` | Platt scaling | 3 | |
+| `sigmoid_cv5` | Platt scaling | 5 | |
+| `isotonic_cv3` | Isotonic regression | 3 | |
+| `isotonic_cv5` | Isotonic regression | 5 | |
+
+Each calibrator is fitted **inside each outer fold** via `CalibratedClassifierCV(ensemble=False)` so calibrated OOF probabilities are honest.
+
+### Threshold policies
+
+| Policy | Definition | Role |
+|:--|:--|:--|
+| `fixed_8` | Fixed 8 % (production threshold) | **Reference only** — never re-classified |
+| `fixed_2`, `fixed_5`, `fixed_10`, `fixed_15` | Other fixed thresholds | Reference |
+| `youden` | Maximises sensitivity + specificity − 1 | **Exploratory only** (data-driven) |
+| `sensitivity_constrained_85` | Largest threshold keeping sensitivity ≥ 85 % | Supplementary |
+| `sensitivity_constrained_90` | Largest threshold keeping sensitivity ≥ 90 % | **Primary candidate policy** |
+| `sensitivity_constrained_95` | Largest threshold keeping sensitivity ≥ 95 % | Conservative alternative |
+| `npv_constrained_95` | Largest threshold keeping NPV ≥ 95 % | Supplementary |
+| `npv_constrained_97` | Largest threshold keeping NPV ≥ 97 % | Supplementary |
+
+**`sensitivity_constrained_90`** is the primary candidate policy: in cardiovascular surgery, false negatives carry high cost, so the goal is to maximise specificity (reduce over-flagging) while keeping sensitivity ≥ 90 %. **`fixed_8` is always retained as a reference baseline regardless of guardrail outcome.**  **`youden` is labelled exploratory / reference only** — it must not be promoted automatically to primary candidate.
+
+### Output files (in `--outdir`)
+
+| File | Contents |
+|:--|:--|
+| `ablation_calibration_threshold_policy_results.csv` | One row per seed × model × calibrator × threshold_policy |
+| `ablation_calibration_threshold_policy_summary.csv` | Mean ± SD across seeds per combination |
+| `ablation_calibration_threshold_policy_recommendations.csv` | Guardrail-based classification: primary_candidate / supplementary_candidate / reference_only / reject |
+| `ablation_calibration_threshold_policy.xlsx` | Multi-sheet workbook: README, RESULTS_LONG, SUMMARY, RECOMMENDATIONS, MODEL_CALIBRATOR_RANKING, THRESHOLD_POLICY_RANKING, SENS90_FOCUS, SENS95_FOCUS, FIXED8_REFERENCE, YOUDEN_REFERENCE, DISTRIBUTION_DIAGNOSTICS |
+
+### Guardrails applied to recommendations
+
+- AUC: must not drop > 0.005 versus the best calibrator for the same model.
+- AUPRC: must not drop > 0.010.
+- Calibration slope: acceptable [0.7, 1.3]; ideal [0.8, 1.2].
+- |CIL|: acceptable < 0.03; ideal < 0.02.
+- Distribution: `n_unique_probabilities > 10` and `pct_below_8 > 0` in ≥ 80 % of runs.
+- Sensitivity constraints: mean sensitivity at the returned threshold must meet the target.
+
+> **Important:** This ablation is exploratory. Any change to the primary operational threshold or production calibrator requires an explicit methodological review and approval — it is **not** applied automatically from these results. `fixed_8` is preserved as the reference baseline and requires no change to remain in use.
+
 ## Sensitivity analysis — STS scope refinement
 
 An audit of Dataset_2025.csv (2026-04-24) identified 25 combined-procedure cases that were previously classified as `supported` by `classify_sts_eligibility()` but contain a component outside STS ACSD scope:
