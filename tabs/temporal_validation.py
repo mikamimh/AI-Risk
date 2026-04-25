@@ -536,19 +536,82 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         feature_columns=artifacts.feature_columns,
                     )
                     with st.expander(
-                        tr("Cohort Drift Analysis", "Análise de Drift da Coorte"),
-                        expanded=False,
+                        tr("Drift Summary — Training vs Validation", "Resumo de Drift — Treino vs Validação"),
+                        expanded=True,
                     ):
-                        _dc1, _dc2 = st.columns(2)
-                        _dc1.metric(
-                            tr("Prevalence (training)", "Prevalência (treino)"),
-                            f"{_tv_drift['prevalence_train']:.1%}",
+                        # ── Training vs Validation structured comparison ──
+                        _drift_train_n    = int(_tv_meta.get("n_patients", 0) or 0)
+                        _drift_train_ev   = int(_tv_meta.get("n_events", 0) or 0)
+                        _drift_train_rate = float(_tv_meta.get("event_rate", 0.0) or 0.0)
+                        _drift_val_rate   = _tv_drift.get("prevalence_temporal", _tv_rate)
+                        _drift_abs_diff   = _drift_val_rate - _drift_train_rate
+                        _drift_ratio      = (
+                            _drift_val_rate / _drift_train_rate
+                            if _drift_train_rate > 0 else float("nan")
                         )
-                        _dc2.metric(
-                            tr("Prevalence (temporal)", "Prevalência (temporal)"),
-                            f"{_tv_drift['prevalence_temporal']:.1%}",
-                            delta=f"{_tv_drift['prevalence_delta']:+.1%}" if not np.isnan(_tv_drift.get('prevalence_delta', float('nan'))) else None,
+                        _drift_hi_n = int(
+                            (_tv_data["_completeness"] == "low").sum()
+                            if "_completeness" in _tv_data.columns else 0
                         )
+                        _drift_hi_rate = _drift_hi_n / _tv_n if _tv_n > 0 else 0.0
+
+                        _drift_summary_df = pd.DataFrame([
+                            {
+                                tr("Cohort", "Coorte"):       tr("Training", "Treino"),
+                                "N":                          _drift_train_n,
+                                tr("Events", "Eventos"):      _drift_train_ev,
+                                tr("Event rate", "Taxa de eventos"): f"{_drift_train_rate:.1%}",
+                                tr("Heavily imputed", "Muito imputado"): "—",
+                            },
+                            {
+                                tr("Cohort", "Coorte"):       tr("Validation", "Validação"),
+                                "N":                          _tv_n,
+                                tr("Events", "Eventos"):      _tv_events,
+                                tr("Event rate", "Taxa de eventos"): f"{_drift_val_rate:.1%}",
+                                tr("Heavily imputed", "Muito imputado"): f"{_drift_hi_rate:.1%} (n={_drift_hi_n})",
+                            },
+                        ])
+                        st.dataframe(_drift_summary_df, width="stretch", hide_index=True)
+
+                        _dc_extra = st.columns(3)
+                        _dc_extra[0].metric(
+                            tr("Absolute Δ event rate", "Δ absoluto taxa de eventos"),
+                            f"{_drift_abs_diff:+.1%}",
+                        )
+                        if not np.isnan(_drift_ratio):
+                            _dc_extra[1].metric(
+                                tr("Validation / Training ratio", "Razão validação / treino"),
+                                f"{_drift_ratio:.2f}×",
+                            )
+                        _dc_extra[2].metric(
+                            tr("Heavily imputed rate (validation)", "Taxa muito imputada (validação)"),
+                            f"{_drift_hi_rate:.1%}",
+                        )
+
+                        # Automatic interpretation of prevalence drift
+                        _drift_large = (
+                            not np.isnan(_drift_ratio)
+                            and (_drift_ratio < 0.5 or _drift_ratio > 1.5)
+                        )
+                        if _drift_large:
+                            st.warning(tr(
+                                "The validation cohort has a substantially different event rate "
+                                "from the training cohort. This can preserve discrimination while "
+                                "shifting absolute risk calibration.",
+                                "A coorte de validação apresenta taxa de evento substancialmente "
+                                "diferente da coorte de treino. Isso pode preservar a discriminação, "
+                                "mas deslocar a calibração absoluta do risco.",
+                            ))
+                        else:
+                            st.info(tr(
+                                "Event rates are similar between training and validation cohorts. "
+                                "Calibration drift from prevalence shift is not expected to be large.",
+                                "As taxas de eventos são similares entre as coortes de treino e "
+                                "validação. Desvio de calibração por diferença de prevalência não "
+                                "deve ser expressivo.",
+                            ))
+
+                        st.divider()
                         st.markdown(tr(
                             "**Top 10 variables with largest missingness shift:**",
                             "**Top 10 variáveis com maior mudança de missingness:**",
@@ -2735,6 +2798,122 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         "Esta é a análise principal — não confundir com recalibração exploratória abaixo.",
                     ))
 
+                    # ── C. Primary Frozen Model — AI Risk KPI cards ──────────────
+                    st.markdown(tr(
+                        "#### AI Risk — Primary Validation (Frozen Model)",
+                        "#### AI Risk — Validação Primária (Modelo Congelado)",
+                    ))
+                    st.caption(tr(
+                        "Primary results use the locked frozen model without retraining, "
+                        "recalibration, or threshold adjustment.",
+                        "Os resultados primários usam o modelo congelado travado, sem "
+                        "retreinamento, recalibração ou ajuste de limiar.",
+                    ))
+                    _ai_row = (
+                        _tv_perf[_tv_perf["Score"] == "AI Risk"].iloc[0]
+                        if not _tv_perf.empty and "AI Risk" in _tv_perf["Score"].values
+                        else None
+                    )
+                    if _ai_row is not None:
+                        _kpi_r1 = st.columns(5)
+                        _kpi_r1[0].metric("AUC", f"{_ai_row['AUC']:.3f}" if pd.notna(_ai_row.get("AUC")) else "—")
+                        _kpi_r1[1].metric("AUPRC", f"{_ai_row['AUPRC']:.3f}" if pd.notna(_ai_row.get("AUPRC")) else "—")
+                        _auprc_bl = _ai_row.get("AUPRC_baseline")
+                        _kpi_r1[2].metric(
+                            tr("AUPRC baseline", "AUPRC baseline"),
+                            f"{_auprc_bl:.3f}" if _auprc_bl is not None and pd.notna(_auprc_bl) else "—",
+                        )
+                        _kpi_r1[3].metric("Brier", f"{_ai_row['Brier']:.4f}" if pd.notna(_ai_row.get("Brier")) else "—")
+                        _kpi_r1[4].metric(
+                            tr("Calibration intercept", "Intercepto calibração"),
+                            f"{_ai_row['Calibration_Intercept']:.3f}" if pd.notna(_ai_row.get("Calibration_Intercept")) else "—",
+                        )
+                        _kpi_r2 = st.columns(5)
+                        _kpi_r2[0].metric(
+                            tr("Calibration slope", "Inclinação calibração"),
+                            f"{_ai_row['Calibration_Slope']:.3f}" if pd.notna(_ai_row.get("Calibration_Slope")) else "—",
+                        )
+                        _kpi_cil = _ai_row.get("CIL")
+                        _kpi_ici = _ai_row.get("ICI")
+                        _kpi_r2[1].metric(
+                            "CIL",
+                            f"{_kpi_cil:.3f}" if _kpi_cil is not None and pd.notna(_kpi_cil) else "—",
+                            help=tr("Calibration-in-the-Large = mean predicted − mean observed", "CIL = média predita − média observada"),
+                        )
+                        _kpi_r2[2].metric(
+                            "ICI",
+                            f"{_kpi_ici:.3f}" if _kpi_ici is not None and pd.notna(_kpi_ici) else "—",
+                            help=tr("Integrated Calibration Index via isotonic regression", "Índice Integrado de Calibração via regressão isotônica"),
+                        )
+                        _kpi_r3 = st.columns(5)
+                        _kpi_r3[0].metric(
+                            tr("Sensitivity @locked", "Sensibilidade @bloqueado"),
+                            f"{_ai_row['Sensitivity']:.3f}" if pd.notna(_ai_row.get("Sensitivity")) else "—",
+                        )
+                        _kpi_r3[1].metric(
+                            tr("Specificity @locked", "Especificidade @bloqueado"),
+                            f"{_ai_row['Specificity']:.3f}" if pd.notna(_ai_row.get("Specificity")) else "—",
+                        )
+                        _kpi_r3[2].metric(
+                            "PPV @locked",
+                            f"{_ai_row['PPV']:.3f}" if pd.notna(_ai_row.get("PPV")) else "—",
+                        )
+                        _kpi_r3[3].metric(
+                            "NPV @locked",
+                            f"{_ai_row['NPV']:.3f}" if pd.notna(_ai_row.get("NPV")) else "—",
+                        )
+                        _ai_flag_rate = _ai_row.get("Flag_Rate_pct")
+                        _kpi_r3[4].metric(
+                            tr("Flag rate @locked", "Taxa sinalização @bloqueado"),
+                            f"{float(_ai_flag_rate):.1f}%" if _ai_flag_rate is not None and pd.notna(_ai_flag_rate) else "—",
+                        )
+
+                    # ── D. Calibration Drift Warning ──────────────────────────────
+                    _cdrft_train_rate = float(_tv_meta.get("event_rate", 0.0) or 0.0)
+                    _cdrft_val_rate   = float(_tv_cohort_summary.get("event_rate", 0.0))
+                    _cdrft_conditions = []
+                    if _cdrft_train_rate > 0:
+                        _cdrft_ratio = _cdrft_val_rate / _cdrft_train_rate
+                        if _cdrft_ratio < 0.5 or _cdrft_ratio > 1.5:
+                            _cdrft_conditions.append(tr(
+                                f"Event rate ratio {_cdrft_ratio:.2f}× (validation/training)",
+                                f"Razão de taxa de eventos {_cdrft_ratio:.2f}× (validação/treino)",
+                            ))
+                    if _ai_row is not None:
+                        _cdrft_cil = _ai_row.get("CIL")
+                        if _cdrft_cil is not None and pd.notna(_cdrft_cil) and abs(float(_cdrft_cil)) > 0.05:
+                            _cdrft_conditions.append(tr(
+                                f"|CIL| = {abs(float(_cdrft_cil)):.3f} > 0.05",
+                                f"|CIL| = {abs(float(_cdrft_cil)):.3f} > 0,05",
+                            ))
+                        _ai_flag_rate_val = _ai_row.get("Flag_Rate_pct")
+                        if _ai_flag_rate_val is not None and pd.notna(_ai_flag_rate_val) and float(_ai_flag_rate_val) > 50.0:
+                            _cdrft_conditions.append(tr(
+                                f"Flag rate {float(_ai_flag_rate_val):.1f}% > 50%",
+                                f"Taxa de sinalização {float(_ai_flag_rate_val):.1f}% > 50%",
+                            ))
+                        _cdrft_int = _ai_row.get("Calibration_Intercept")
+                        if _cdrft_int is not None and pd.notna(_cdrft_int) and abs(float(_cdrft_int)) > 1.0:
+                            _cdrft_conditions.append(tr(
+                                f"|Calibration intercept| = {abs(float(_cdrft_int)):.3f} > 1.0",
+                                f"|Intercepto de calibração| = {abs(float(_cdrft_int)):.3f} > 1,0",
+                            ))
+                    if _cdrft_conditions:
+                        st.warning(
+                            tr("**Calibration drift detected.** ", "**Desvio de calibração detectado.** ")
+                            + tr(
+                                "The model preserves risk ranking but may overestimate or underestimate "
+                                "absolute risk in this validation cohort. Primary results remain "
+                                "unrecalibrated; local recalibration is exploratory. "
+                                "Triggered by: ",
+                                "O modelo preserva o ranqueamento de risco, mas pode superestimar ou "
+                                "subestimar o risco absoluto nesta coorte de validação. Os resultados "
+                                "primários permanecem sem recalibração; a recalibração local é exploratória. "
+                                "Ativado por: ",
+                            )
+                            + "; ".join(_cdrft_conditions) + "."
+                        )
+
                     if _tv_sts_availability in ("complete", "partial", "unavailable") and _tv_sts_n_eligible > 0:
                         _tv_sts_availability_note = build_sts_availability_summary(
                             _tv_sts_n_eligible,
@@ -3248,6 +3427,131 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 with _cm_cols[_ax_i]:
                                     st.plotly_chart(_fig_cm_i, width="stretch")
 
+                    # ── G. Automatic Interpretation Summary ──────────────────────
+                    st.divider()
+                    st.markdown(tr(
+                        "### Interpretation Summary",
+                        "### Resumo de Interpretação",
+                    ))
+                    if _ai_row is not None:
+                        _interp_auc    = _ai_row.get("AUC")
+                        _interp_int    = _ai_row.get("Calibration_Intercept")
+                        _interp_fr     = _ai_row.get("Flag_Rate_pct")
+                        _interp_npv    = _ai_row.get("NPV")
+                        _interp_sens   = _ai_row.get("Sensitivity")
+                        _interp_fn     = int(_ai_row.get("FN", 0) or 0)
+
+                        # Comparator AUCs for "comparable discrimination" check
+                        _interp_euro_auc = (
+                            _tv_perf.loc[_tv_perf["Score"] == "EuroSCORE II", "AUC"].values[0]
+                            if "EuroSCORE II" in _tv_perf["Score"].values else None
+                        )
+                        _interp_sts_auc = (
+                            _tv_perf.loc[_tv_perf["Score"] == "STS Score", "AUC"].values[0]
+                            if "STS Score" in _tv_perf["Score"].values else None
+                        )
+                        _interp_comparators = [
+                            v for v in [_interp_euro_auc, _interp_sts_auc]
+                            if v is not None and pd.notna(v)
+                        ]
+                        _interp_similar_auc = (
+                            all(
+                                abs(float(_interp_auc) - float(c)) <= 0.03
+                                for c in _interp_comparators
+                            )
+                            if _interp_auc is not None and pd.notna(_interp_auc) and _interp_comparators
+                            else False
+                        )
+
+                        # Build dynamic summary sentences
+                        _interp_lines_en = []
+                        _interp_lines_pt = []
+
+                        if _interp_auc is not None and pd.notna(_interp_auc):
+                            if _interp_similar_auc:
+                                _interp_lines_en.append(
+                                    "AI Risk achieved discrimination comparable to "
+                                    + ("EuroSCORE II and STS Score" if _interp_sts_auc else "EuroSCORE II")
+                                    + f" in this temporal cohort (AUC = {float(_interp_auc):.3f})."
+                                )
+                                _interp_lines_pt.append(
+                                    "O AI Risk apresentou discriminação comparável ao "
+                                    + ("EuroSCORE II e ao STS Score" if _interp_sts_auc else "EuroSCORE II")
+                                    + f" nesta coorte temporal (AUC = {float(_interp_auc):.3f})."
+                                )
+                            else:
+                                _interp_lines_en.append(
+                                    f"AI Risk AUC = {float(_interp_auc):.3f} in this temporal cohort."
+                                )
+                                _interp_lines_pt.append(
+                                    f"AUC do AI Risk = {float(_interp_auc):.3f} nesta coorte temporal."
+                                )
+
+                        _cdrft_train_rate2 = float(_tv_meta.get("event_rate", 0.0) or 0.0)
+                        _cdrft_val_rate2   = float(_tv_cohort_summary.get("event_rate", 0.0))
+                        if _cdrft_train_rate2 > 0 and abs(_cdrft_val_rate2 - _cdrft_train_rate2) / _cdrft_train_rate2 > 0.3:
+                            _interp_lines_en.append(
+                                f"The validation event rate ({_cdrft_val_rate2:.1%}) was much "
+                                f"{'lower' if _cdrft_val_rate2 < _cdrft_train_rate2 else 'higher'} "
+                                f"than the training event rate ({_cdrft_train_rate2:.1%})."
+                            )
+                            _interp_lines_pt.append(
+                                f"A taxa de eventos da validação ({_cdrft_val_rate2:.1%}) foi muito "
+                                f"{'menor' if _cdrft_val_rate2 < _cdrft_train_rate2 else 'maior'} "
+                                f"que a taxa de treino ({_cdrft_train_rate2:.1%})."
+                            )
+
+                        if _interp_int is not None and pd.notna(_interp_int):
+                            if float(_interp_int) < -0.3:
+                                _interp_lines_en.append("The frozen model overestimated absolute risk in this cohort.")
+                                _interp_lines_pt.append("O modelo congelado superestimou o risco absoluto nesta coorte.")
+                            elif float(_interp_int) > 0.3:
+                                _interp_lines_en.append("The frozen model underestimated absolute risk in this cohort.")
+                                _interp_lines_pt.append("O modelo congelado subestimou o risco absoluto nesta coorte.")
+
+                        if _interp_fr is not None and pd.notna(_interp_fr) and float(_interp_fr) > 50:
+                            _interp_lines_en.append(
+                                f"At the locked threshold, most patients were flagged "
+                                f"({float(_interp_fr):.1f}% flag rate); this is consistent with "
+                                f"a sensitivity-oriented rule-out operating point."
+                            )
+                            _interp_lines_pt.append(
+                                f"No limiar travado, a maioria dos pacientes foi sinalizada "
+                                f"({float(_interp_fr):.1f}% de taxa de sinalização); isso é consistente "
+                                f"com um ponto operacional orientado à sensibilidade/rule-out."
+                            )
+                        elif _interp_fr is not None and pd.notna(_interp_fr):
+                            _interp_lines_en.append(
+                                f"Flag rate at the locked threshold: {float(_interp_fr):.1f}% of the cohort."
+                            )
+                            _interp_lines_pt.append(
+                                f"Taxa de sinalização no limiar travado: {float(_interp_fr):.1f}% da coorte."
+                            )
+
+                        if _interp_npv is not None and pd.notna(_interp_npv):
+                            _interp_lines_en.append(
+                                f"NPV = {float(_interp_npv):.3f} at the locked threshold "
+                                f"({_interp_fn} event(s) not flagged)."
+                            )
+                            _interp_lines_pt.append(
+                                f"NPV = {float(_interp_npv):.3f} no limiar travado "
+                                f"({_interp_fn} evento(s) não sinalizado(s))."
+                            )
+
+                        _interp_lines_en.append(
+                            "In this cohort, AI Risk should be interpreted primarily as a "
+                            "ranking / rule-out tool unless locally recalibrated."
+                        )
+                        _interp_lines_pt.append(
+                            "Nesta coorte, o AI Risk deve ser interpretado principalmente como "
+                            "ferramenta de ranqueamento / rule-out, salvo recalibração local."
+                        )
+
+                        st.info(tr(
+                            "  \n".join(_interp_lines_en),
+                            "  \n".join(_interp_lines_pt),
+                        ))
+
                     # ── 9. Threshold Analysis ──
                     st.divider()
                     st.markdown(tr("### Threshold Analysis", "### Análise de Limiar"))
@@ -3259,43 +3563,137 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                         "O limiar ótimo de Youden é orientado pelos dados e **exploratório** — "
                         "não deve ser usado como limiar operacional bloqueado.",
                     ))
+                    # ── E. Compact threshold operating characteristics (AI Risk) ──
+                    _thr_ia_raw = _tv_exploratory_thresh_tables.get("ia_risk")
+                    if _thr_ia_raw is not None and not _thr_ia_raw.empty:
+                        _thr_compact_rows = []
+                        for _, _tr_row in _thr_ia_raw.iterrows():
+                            _thr_val = float(_tr_row["Threshold"])
+                            # Determine type label
+                            _is_locked = abs(_thr_val - _tv_locked_threshold) < 1e-6
+                            if _is_locked:
+                                _thr_type = tr(
+                                    f"★ Locked ({_tv_locked_threshold:.0%}) — Primary",
+                                    f"★ Bloqueado ({_tv_locked_threshold:.0%}) — Primário",
+                                )
+                            elif (
+                                "ia_risk" in _tv_youden
+                                and abs(_thr_val - _tv_youden["ia_risk"][0]) < 1e-6
+                            ):
+                                _thr_type = tr(
+                                    "Post-hoc / exploratory (Youden)",
+                                    "Pós-hoc / exploratório (Youden)",
+                                )
+                            else:
+                                _thr_type = tr("Fixed clinical", "Clínico fixo")
+                            # Event Rate Above = PPV, Event Rate Below = FN/(FN+TN)
+                            _fn_v = float(_tr_row.get("FN", 0) or 0)
+                            _tn_v = float(_tr_row.get("TN", 0) or 0)
+                            _era_below = (_fn_v / (_fn_v + _tn_v)) if (_fn_v + _tn_v) > 0 else float("nan")
+                            _thr_compact_rows.append({
+                                tr("Score", "Score"):            "AI Risk",
+                                tr("Threshold", "Limiar"):       f"{_thr_val:.0%}",
+                                tr("Type", "Tipo"):              _thr_type,
+                                tr("Sensitivity", "Sensibilidade"): f"{_tr_row.get('Sensitivity', float('nan')):.3f}",
+                                tr("Specificity", "Especificidade"): f"{_tr_row.get('Specificity', float('nan')):.3f}",
+                                "PPV":                           f"{_tr_row.get('PPV', float('nan')):.3f}",
+                                "NPV":                           f"{_tr_row.get('NPV', float('nan')):.3f}",
+                                tr("Flag Rate %", "Taxa sinaliz. %"): f"{_tr_row.get('Flag_Rate_pct', float('nan')):.1f}",
+                                tr("Event Rate Above", "Taxa eventos acima"): f"{_tr_row.get('PPV', float('nan')):.3f}",
+                                tr("Event Rate Below", "Taxa eventos abaixo"): f"{_era_below:.3f}" if not np.isnan(_era_below) else "—",
+                            })
+                        _thr_compact_df = pd.DataFrame(_thr_compact_rows)
+                        st.markdown(tr(
+                            "**Operating characteristics at key thresholds — AI Risk** "
+                            "(★ = locked primary threshold; Youden = post-hoc / exploratory)",
+                            "**Características operacionais nos limiares principais — AI Risk** "
+                            "(★ = limiar primário bloqueado; Youden = pós-hoc / exploratório)",
+                        ))
+                        st.dataframe(_thr_compact_df, width="stretch", hide_index=True)
+
+                        # Locked threshold interpretation
+                        _locked_row_df = _thr_ia_raw[
+                            (_thr_ia_raw["Threshold"] - _tv_locked_threshold).abs() < 1e-6
+                        ]
+                        if not _locked_row_df.empty:
+                            _lr = _locked_row_df.iloc[0]
+                            _lr_fn   = int(_lr.get("FN", 0) or 0)
+                            _lr_fr   = float(_lr.get("Flag_Rate_pct", 0.0) or 0.0)
+                            _lr_npv  = float(_lr.get("NPV", float("nan")))
+                            st.info(tr(
+                                f"At the locked threshold ({_tv_locked_threshold:.0%}): "
+                                f"the model missed {_lr_fn} event(s), "
+                                f"flagged {_lr_fr:.1f}% of the cohort, "
+                                f"and achieved NPV {_lr_npv:.3f}. "
+                                "This should be interpreted as a sensitivity-oriented operating point.",
+                                f"No limiar travado ({_tv_locked_threshold:.0%}): "
+                                f"o modelo deixou de capturar {_lr_fn} evento(s), "
+                                f"sinalizou {_lr_fr:.1f}% da coorte "
+                                f"e atingiu NPV {_lr_npv:.3f}. "
+                                "Isso deve ser interpretado como um ponto operacional orientado à sensibilidade.",
+                            ))
+
+                        # Full threshold table in expander
+                        with st.expander(
+                            tr(
+                                "Full threshold comparison table (all scores, TP/FP/TN/FN)",
+                                "Comparação completa de limiares (todos os scores, TP/FP/TN/FN)",
+                            ),
+                            expanded=False,
+                        ):
+                            st.caption(tr(
+                                "Complete table for all models. Youden threshold is post-hoc / exploratory "
+                                "and must not be used as the operative locked threshold.",
+                                "Tabela completa para todos os modelos. O limiar de Youden é pós-hoc / "
+                                "exploratório e não deve ser usado como limiar operacional bloqueado.",
+                            ))
+                            for _sc in _tv_score_cols:
+                                if _sc in _tv_thresh_tables:
+                                    _label = _tv_rename.get(_sc, _sc)
+                                    st.markdown(f"**{_label}**")
+                                    _tbl = _tv_thresh_tables[_sc].copy()
+                                    _tbl["Threshold"] = _tbl["Threshold"].map(lambda v: f"{v:.0%}")
+                                    _tbl_disp = _tbl.rename(columns={
+                                        "Sensitivity": tr("Sensitivity", "Sensibilidade"),
+                                        "Specificity": tr("Specificity", "Especificidade"),
+                                        "PPV": "PPV",
+                                        "NPV": "NPV",
+                                        "TP": "TP",
+                                        "FP": "FP",
+                                        "TN": "TN",
+                                        "FN": "FN",
+                                        "N_Flagged": tr("N Flagged", "N Sinalizados"),
+                                        "Positives_per_1000": tr("Per 1000", "Por 1000"),
+                                        "Flag_Rate_pct": tr("Flag Rate %", "Taxa sinalizados %"),
+                                    })
+                                    _ordered_cols = [
+                                        "Threshold",
+                                        "TP", "FP", "TN", "FN",
+                                        tr("Sensitivity", "Sensibilidade"),
+                                        tr("Specificity", "Especificidade"),
+                                        "PPV", "NPV",
+                                        tr("N Flagged", "N Sinalizados"),
+                                        tr("Per 1000", "Por 1000"),
+                                        tr("Flag Rate %", "Taxa sinalizados %"),
+                                    ]
+                                    _tbl_disp = _tbl_disp[[c for c in _ordered_cols if c in _tbl_disp.columns]]
+                                    st.dataframe(_tbl_disp, hide_index=True)
+                                    if _sc in _tv_youden:
+                                        _yt, _yj = _tv_youden[_sc]
+                                        st.caption(tr(
+                                            f"Youden's J optimum (post-hoc / exploratory): threshold = {_yt:.3f} → J = {_yj:.3f}",
+                                            f"Ótimo de Youden (pós-hoc / exploratório): limiar = {_yt:.3f} → J = {_yj:.3f}",
+                                        ))
+
                     for _sc in _tv_score_cols:
                         if _sc in _tv_thresh_tables:
                             _label = _tv_rename.get(_sc, _sc)
                             with st.expander(f"{_label} — {tr('threshold sweep', 'varredura de limiar')}", expanded=False):
-                                _tbl = _tv_thresh_tables[_sc].copy()
-                                _tbl["Threshold"] = _tbl["Threshold"].map(lambda v: f"{v:.0%}")
-                                _tbl_disp = _tbl.rename(columns={
-                                    "Sensitivity": tr("Sensitivity", "Sensibilidade"),
-                                    "Specificity": tr("Specificity", "Especificidade"),
-                                    "PPV": "PPV",
-                                    "NPV": "NPV",
-                                    "TP": "TP",
-                                    "FP": "FP",
-                                    "TN": "TN",
-                                    "FN": "FN",
-                                    "N_Flagged": tr("N Flagged", "N Sinalizados"),
-                                    "Positives_per_1000": tr("Per 1000", "Por 1000"),
-                                    "Flag_Rate_pct": tr("Flag Rate %", "Taxa sinalizados %"),
-                                })
-                                # Put TP/FP/TN/FN right after threshold for readability
-                                _ordered_cols = [
-                                    "Threshold",
-                                    "TP", "FP", "TN", "FN",
-                                    tr("Sensitivity", "Sensibilidade"),
-                                    tr("Specificity", "Especificidade"),
-                                    "PPV", "NPV",
-                                    tr("N Flagged", "N Sinalizados"),
-                                    tr("Per 1000", "Por 1000"),
-                                    tr("Flag Rate %", "Taxa sinalizados %"),
-                                ]
-                                _tbl_disp = _tbl_disp[[c for c in _ordered_cols if c in _tbl_disp.columns]]
-                                st.dataframe(_tbl_disp, hide_index=True)
                                 if _sc in _tv_youden:
                                     _yt, _yj = _tv_youden[_sc]
                                     st.info(tr(
-                                        f"Youden's J optimum (exploratory): threshold = {_yt:.3f} → J = {_yj:.3f}",
-                                        f"Ótimo de Youden (exploratório): limiar = {_yt:.3f} → J = {_yj:.3f}",
+                                        f"Youden's J optimum (post-hoc / exploratory): threshold = {_yt:.3f} → J = {_yj:.3f}",
+                                        f"Ótimo de Youden (pós-hoc / exploratório): limiar = {_yt:.3f} → J = {_yj:.3f}",
                                     ))
                                 # Sens/Spec sweep chart
                                 _full_thr_vals = np.linspace(0.01, 0.50, 100)
@@ -3378,24 +3776,119 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             ))
                             st.dataframe(_tv_common_perf, hide_index=True)
 
-                    # ── 11. Post-hoc Recalibration (exploratory) ──
+                    # ── F. Exploratory Local Recalibration ───────────────────────
                     with st.expander(
                         tr(
-                            "Post-hoc Recalibration — Exploratory analysis only",
-                            "Recalibração Pós-hoc — Apenas análise exploratória",
+                            "Exploratory Local Recalibration — not primary performance",
+                            "Recalibração Local Exploratória — não substitui a análise primária",
                         ),
-                        expanded=False,
+                        expanded=bool(_tv_exploratory_recal),
                     ):
-                        st.warning(tr(
-                            "**Exploratory only.** Recalibration is applied after-the-fact to the "
-                            "validation cohort. Results are not clinically validated and must **not** "
-                            "be used to report model performance or guide clinical decisions. "
-                            "The locked model and threshold remain unchanged.",
-                            "**Apenas exploratório.** A recalibração é aplicada post-hoc à "
-                            "coorte de validação. Os resultados não foram validados clinicamente "
-                            "e **não devem** ser usados para reportar desempenho do modelo ou "
-                            "orientar decisões clínicas. O modelo bloqueado e o limiar permanecem inalterados.",
+                        st.error(tr(
+                            "**Post-hoc recalibration is fitted on the validation cohort itself.** "
+                            "It is useful to assess transportability and local deployment needs, "
+                            "but it must **not** replace the primary frozen-model validation. "
+                            "The locked model, locked threshold, and primary predictions remain unchanged.",
+                            "**A recalibração pós-hoc é ajustada na própria coorte de validação.** "
+                            "Ela é útil para avaliar transportabilidade e necessidade de implantação local, "
+                            "mas **não deve** substituir a validação primária do modelo congelado. "
+                            "O modelo bloqueado, o limiar bloqueado e as predições primárias permanecem inalterados.",
                         ))
+
+                        # Reliability guardrail
+                        _n_events_val = int(_tv_cohort_summary.get("n_events", 0) or 0)
+                        st.caption(tr(
+                            "Recalibration reliability depends on the number of observed events. "
+                            "Flexible methods such as isotonic regression may overfit small validation cohorts.",
+                            "A confiabilidade da recalibração depende do número de eventos observados. "
+                            "Métodos flexíveis, como regressão isotônica, podem sobreajustar coortes de validação pequenas.",
+                        ))
+                        if _n_events_val < 50:
+                            st.warning(tr(
+                                f"Low event count ({_n_events_val} events). Recalibration estimates are unreliable. "
+                                "Intercept-only is the only method with reasonable stability.",
+                                f"Número reduzido de eventos ({_n_events_val} eventos). Estimativas de recalibração são pouco confiáveis. "
+                                "Apenas intercepto é o único método com estabilidade razoável.",
+                            ))
+                        elif _n_events_val < 100:
+                            st.warning(tr(
+                                f"Moderate event count ({_n_events_val} events). "
+                                "Intercept + slope is feasible; isotonic is exploratory with overfit risk.",
+                                f"Número moderado de eventos ({_n_events_val} eventos). "
+                                "Intercepto + slope é viável; isotônica é exploratória com risco de overfit.",
+                            ))
+
+                        # ── Structured table: all scores × all methods ──────────────
+                        if _tv_exploratory_recal:
+                            _rcal_table_rows = []
+                            _rcal_method_labels = {
+                                "intercept_only": tr(
+                                    "Intercept-only (slope=1)",
+                                    "Apenas intercepto (slope=1)",
+                                ),
+                                "logistic": tr(
+                                    "Intercept + slope (logistic)",
+                                    "Intercepto + slope (logístico)",
+                                ),
+                                "isotonic": tr(
+                                    "Isotonic (non-parametric)",
+                                    "Isotônica (não-paramétrica)",
+                                ),
+                            }
+                            _rcal_recommended = {
+                                "intercept_only": tr(
+                                    "First local adjustment",
+                                    "Primeiro ajuste local",
+                                ),
+                                "logistic": tr(
+                                    "Exploratory if enough events (≥100)",
+                                    "Exploratório se houver eventos suficientes (≥100)",
+                                ),
+                                "isotonic": tr(
+                                    "Exploratory only; overfit risk",
+                                    "Apenas exploratório; risco de overfit",
+                                ),
+                            }
+                            for _rsc in _tv_score_cols:
+                                _rsc_label = _tv_rename.get(_rsc, _rsc)
+                                _rcal_entry = _tv_exploratory_recal.get(_rsc, {})
+                                # Original row first
+                                _rsub_orig = _tv_data[["morte_30d", _rsc]].dropna()
+                                if len(_rsub_orig) >= 10 and _rsub_orig["morte_30d"].nunique() >= 2:
+                                    from stats_compare import calibration_intercept_slope as _cis_fn
+                                    _orig_cal = _cis_fn(
+                                        _rsub_orig["morte_30d"].values,
+                                        _rsub_orig[_rsc].values,
+                                    )
+                                    _rcal_table_rows.append({
+                                        tr("Score", "Score"):         _rsc_label,
+                                        tr("Method", "Método"):       tr("Original (primary)", "Original (primário)"),
+                                        tr("Brier Before", "Brier Antes"):  "—",
+                                        tr("Brier After", "Brier Depois"):  "—",
+                                        tr("Cal. Intercept Before", "Intercepto Cal. Antes"): f"{_orig_cal.get('Calibration intercept', float('nan')):.3f}",
+                                        tr("Cal. Intercept After", "Intercepto Cal. Depois"): "—",
+                                        tr("Cal. Slope Before", "Slope Cal. Antes"):    f"{_orig_cal.get('Calibration slope', float('nan')):.3f}",
+                                        tr("Cal. Slope After", "Slope Cal. Depois"):    "—",
+                                        tr("Recommended use", "Uso recomendado"): tr("Primary validation", "Validação primária"),
+                                    })
+                                for _mkey, _mlabel in _rcal_method_labels.items():
+                                    if _mkey in _rcal_entry:
+                                        _rd = _rcal_entry[_mkey]
+                                        _rcal_table_rows.append({
+                                            tr("Score", "Score"):         _rsc_label,
+                                            tr("Method", "Método"):       _mlabel,
+                                            tr("Brier Before", "Brier Antes"):  f"{_rd.get('brier_before', float('nan')):.4f}",
+                                            tr("Brier After", "Brier Depois"):  f"{_rd.get('brier_after', float('nan')):.4f}",
+                                            tr("Cal. Intercept Before", "Intercepto Cal. Antes"): f"{_rd.get('cal_intercept_before', float('nan')):.3f}",
+                                            tr("Cal. Intercept After", "Intercepto Cal. Depois"): f"{_rd.get('cal_intercept_after', float('nan')):.3f}",
+                                            tr("Cal. Slope Before", "Slope Cal. Antes"):    f"{_rd.get('cal_slope_before', float('nan')):.3f}",
+                                            tr("Cal. Slope After", "Slope Cal. Depois"):    f"{_rd.get('cal_slope_after', float('nan')):.3f}",
+                                            tr("Recommended use", "Uso recomendado"): _rcal_recommended.get(_mkey, ""),
+                                        })
+                            if _rcal_table_rows:
+                                st.dataframe(pd.DataFrame(_rcal_table_rows), width="stretch", hide_index=True)
+
+                        # ── Interactive: select score + method for calibration plot ──
                         _recal_score_opts = [_tv_rename.get(_sc, _sc) for _sc in _tv_score_cols]
                         _recal_score_sel = st.selectbox(
                             tr("Score to recalibrate", "Escore para recalibrar"),
@@ -3412,6 +3905,19 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                             horizontal=True,
                             key="_tv_recal_method",
                         )
+                        if "isotonic" in _recal_method.lower() or "isotônica" in _recal_method.lower():
+                            st.warning(tr(
+                                "Isotonic regression is always exploratory only. "
+                                "High overfit risk, especially if events < 200.",
+                                "Regressão isotônica é sempre apenas exploratória. "
+                                "Alto risco de overfit, especialmente se eventos < 200.",
+                            ))
+                        elif "logistic" in _recal_method.lower() or "logístico" in _recal_method.lower():
+                            if _n_events_val < 100:
+                                st.warning(tr(
+                                    f"Intercept + slope with {_n_events_val} events: unstable — prefer intercept-only.",
+                                    f"Intercepto + slope com {_n_events_val} eventos: instável — prefira apenas intercepto.",
+                                ))
                         _recal_sc_raw = next(
                             (_sc for _sc in _tv_score_cols if _tv_rename.get(_sc, _sc) == _recal_score_sel),
                             _tv_score_cols[0] if _tv_score_cols else None,
@@ -3428,25 +3934,6 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 else:
                                     _rcal = recalibrate_isotonic(_ry, _rp)
                                 _rp_new = _rcal["recalibrated_probs"]
-                                # Before/after summary table
-                                _rcal_summary = {
-                                    tr("Metric", "Métrica"): [
-                                        tr("Brier score", "Escore de Brier"),
-                                        tr("Calibration intercept", "Intercepto de calibração"),
-                                        tr("Calibration slope", "Inclinação de calibração"),
-                                    ],
-                                    tr("Before", "Antes"): [
-                                        f"{_rcal['brier_before']:.4f}",
-                                        f"{_rcal.get('cal_intercept_before', float('nan')):.3f}",
-                                        f"{_rcal.get('cal_slope_before', float('nan')):.3f}",
-                                    ],
-                                    tr("After", "Depois"): [
-                                        f"{_rcal['brier_after']:.4f}",
-                                        f"{_rcal.get('cal_intercept_after', float('nan')):.3f}",
-                                        f"{_rcal.get('cal_slope_after', float('nan')):.3f}",
-                                    ],
-                                }
-                                st.dataframe(pd.DataFrame(_rcal_summary), hide_index=True)
                                 # Before/after calibration plot
                                 _fig_rcal = go.Figure()
                                 _fig_rcal.add_shape(type="line", x0=0, y0=0, x1=1, y1=1,
@@ -3464,7 +3951,7 @@ def render(ctx: "TabContext") -> None:  # noqa: C901 — extracted verbatim; com
                                 _fig_rcal.update_layout(
                                     xaxis_title=tr("Mean predicted probability", "Probabilidade predita média"),
                                     yaxis_title=tr("Observed frequency", "Frequência observada"),
-                                    title=tr("Calibration: Before vs After Recalibration", "Calibração: Antes vs Depois da Recalibração"),
+                                    title=tr("Calibration: Before vs After Recalibration (Exploratory)", "Calibração: Antes vs Depois da Recalibração (Exploratório)"),
                                     height=350,
                                 )
                                 st.plotly_chart(_fig_rcal, width="stretch")

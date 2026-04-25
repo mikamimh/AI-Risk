@@ -717,6 +717,91 @@ def build_temporal_validation_summary(
         "",
     ]
 
+    # ── Drift Summary ─────────────────────────────────────────────────────
+    _ds_train_n    = int(metadata.get("n_patients", 0) or 0)
+    _ds_train_ev   = int(metadata.get("n_events", 0) or 0)
+    _ds_train_rate = float(metadata.get("event_rate", 0.0) or 0.0)
+    _ds_val_rate   = float(cs.get("event_rate", 0.0))
+    _ds_ratio      = _ds_val_rate / _ds_train_rate if _ds_train_rate > 0 else float("nan")
+    _ds_abs_diff   = _ds_val_rate - _ds_train_rate
+
+    lines.append(f"## {_tr('Drift Summary — Training vs Validation', 'Resumo de Drift — Treino vs Validação')}")
+    lines.append("")
+    lines.append(
+        f"| {_tr('Cohort','Coorte')} | N | {_tr('Events','Eventos')} | {_tr('Event rate','Taxa de eventos')} |"
+    )
+    lines.append("|:--|--:|--:|--:|")
+    lines.append(
+        f"| {_tr('Training','Treino')} | {_ds_train_n} | {_ds_train_ev} | {_ds_train_rate:.1%} |"
+    )
+    lines.append(
+        f"| {_tr('Validation','Validação')} | {cs.get('n_total',0)} | {cs.get('n_events',0)} | {_ds_val_rate:.1%} |"
+    )
+    lines.append("")
+    import math as _math
+    if not _math.isnan(_ds_ratio):
+        lines.append(
+            f"- {_tr('Absolute Δ event rate','Δ absoluto taxa de eventos')}: {_ds_abs_diff:+.1%}"
+        )
+        lines.append(
+            f"- {_tr('Validation/Training ratio','Razão validação/treino')}: {_ds_ratio:.2f}×"
+        )
+    lines.append("")
+
+    # Extract AI Risk row for drift + interpretation
+    _ds_ai_row = None
+    if not performance_df.empty and "Score" in performance_df.columns:
+        _ai_match = performance_df[performance_df["Score"] == "AI Risk"]
+        if not _ai_match.empty:
+            _ds_ai_row = _ai_match.iloc[0]
+
+    # ── Calibration Drift Warning ─────────────────────────────────────────
+    _ds_drift_warns = []
+    if not _math.isnan(_ds_ratio) and (_ds_ratio < 0.5 or _ds_ratio > 1.5):
+        _ds_drift_warns.append(_tr(
+            f"Event rate ratio {_ds_ratio:.2f}× (validation/training)",
+            f"Razão de taxa de eventos {_ds_ratio:.2f}× (validação/treino)",
+        ))
+    if _ds_ai_row is not None:
+        _ds_cil = _ds_ai_row.get("CIL")
+        if _ds_cil is not None and not _math.isnan(float(_ds_cil)) and abs(float(_ds_cil)) > 0.05:
+            _ds_drift_warns.append(_tr(
+                f"|CIL| = {abs(float(_ds_cil)):.3f} > 0.05",
+                f"|CIL| = {abs(float(_ds_cil)):.3f} > 0,05",
+            ))
+        _ds_fr = _ds_ai_row.get("Flag_Rate_pct")
+        if _ds_fr is not None and not _math.isnan(float(_ds_fr)) and float(_ds_fr) > 50.0:
+            _ds_drift_warns.append(_tr(
+                f"Flag rate {float(_ds_fr):.1f}% > 50%",
+                f"Taxa de sinalização {float(_ds_fr):.1f}% > 50%",
+            ))
+        _ds_cal_int = _ds_ai_row.get("Calibration_Intercept")
+        if _ds_cal_int is not None and not _math.isnan(float(_ds_cal_int)) and abs(float(_ds_cal_int)) > 1.0:
+            _ds_drift_warns.append(_tr(
+                f"|Calibration intercept| = {abs(float(_ds_cal_int)):.3f} > 1.0",
+                f"|Intercepto de calibração| = {abs(float(_ds_cal_int)):.3f} > 1,0",
+            ))
+    if _ds_drift_warns:
+        lines.append(
+            f"**{_tr('⚠ Calibration drift detected.', '⚠ Desvio de calibração detectado.')}** "
+            + _tr(
+                "The model preserves risk ranking but may overestimate or underestimate "
+                "absolute risk in this validation cohort. Primary results remain "
+                "unrecalibrated; local recalibration is exploratory. Triggered by: ",
+                "O modelo preserva o ranqueamento de risco, mas pode superestimar ou "
+                "subestimar o risco absoluto nesta coorte de validação. Os resultados "
+                "primários permanecem sem recalibração; a recalibração local é exploratória. "
+                "Ativado por: ",
+            )
+            + "; ".join(_ds_drift_warns) + "."
+        )
+        lines.append("")
+    else:
+        lines.append(
+            f"*{_tr('No major calibration drift detected from prevalence ratio.', 'Nenhum desvio de calibração expressivo detectado pela razão de prevalência.')}*"
+        )
+        lines.append("")
+
     # ── Dataset normalization summary (external CSV/Parquet only) ─────────
     if normalization_report is not None:
         _nr = normalization_report
@@ -959,6 +1044,98 @@ def build_temporal_validation_summary(
             lines.append("")
             lines.extend(tbl_cc_b)
             lines.append("")
+
+    # ── Interpretation Summary ────────────────────────────────────────────
+    lines.append(f"## {_tr('Interpretation Summary', 'Resumo de Interpretação')}")
+    lines.append("")
+    _interp_parts_en = []
+    _interp_parts_pt = []
+
+    if _ds_ai_row is not None:
+        _i_auc = _ds_ai_row.get("AUC")
+        if _i_auc is not None and not _math.isnan(float(_i_auc)):
+            # Compare with EuroSCORE II / STS
+            _i_comparators = []
+            for _c_name in ("EuroSCORE II", "STS Score"):
+                _cm = performance_df[performance_df["Score"] == _c_name]
+                if not _cm.empty:
+                    _cv = _cm.iloc[0].get("AUC")
+                    if _cv is not None and not _math.isnan(float(_cv)):
+                        _i_comparators.append(_cv)
+            _i_similar = (
+                all(abs(float(_i_auc) - float(c)) <= 0.03 for c in _i_comparators)
+                if _i_comparators else False
+            )
+            if _i_similar:
+                _i_comps_en = "EuroSCORE II and STS Score" if len(_i_comparators) > 1 else "EuroSCORE II"
+                _i_comps_pt = "EuroSCORE II e STS Score" if len(_i_comparators) > 1 else "EuroSCORE II"
+                _interp_parts_en.append(
+                    f"AI Risk achieved discrimination comparable to {_i_comps_en} "
+                    f"in this temporal cohort (AUC = {float(_i_auc):.3f})."
+                )
+                _interp_parts_pt.append(
+                    f"O AI Risk apresentou discriminação comparável ao {_i_comps_pt} "
+                    f"nesta coorte temporal (AUC = {float(_i_auc):.3f})."
+                )
+            else:
+                _interp_parts_en.append(f"AI Risk AUC = {float(_i_auc):.3f} in this temporal cohort.")
+                _interp_parts_pt.append(f"AUC do AI Risk = {float(_i_auc):.3f} nesta coorte temporal.")
+
+    if not _math.isnan(_ds_ratio) and abs(_ds_val_rate - _ds_train_rate) / max(_ds_train_rate, 1e-9) > 0.3:
+        _dir_en = "lower" if _ds_val_rate < _ds_train_rate else "higher"
+        _dir_pt = "menor" if _ds_val_rate < _ds_train_rate else "maior"
+        _interp_parts_en.append(
+            f"The validation event rate ({_ds_val_rate:.1%}) was much {_dir_en} than "
+            f"the training event rate ({_ds_train_rate:.1%})."
+        )
+        _interp_parts_pt.append(
+            f"A taxa de eventos da validação ({_ds_val_rate:.1%}) foi muito {_dir_pt} "
+            f"que a taxa de treino ({_ds_train_rate:.1%})."
+        )
+
+    if _ds_ai_row is not None:
+        _i_int = _ds_ai_row.get("Calibration_Intercept")
+        if _i_int is not None and not _math.isnan(float(_i_int)):
+            if float(_i_int) < -0.3:
+                _interp_parts_en.append("The frozen model overestimated absolute risk in this cohort.")
+                _interp_parts_pt.append("O modelo congelado superestimou o risco absoluto nesta coorte.")
+            elif float(_i_int) > 0.3:
+                _interp_parts_en.append("The frozen model underestimated absolute risk in this cohort.")
+                _interp_parts_pt.append("O modelo congelado subestimou o risco absoluto nesta coorte.")
+        _i_fr = _ds_ai_row.get("Flag_Rate_pct")
+        _i_npv = _ds_ai_row.get("NPV")
+        _i_fn = int(_ds_ai_row.get("FN", 0) or 0)
+        if _i_fr is not None and not _math.isnan(float(_i_fr)) and float(_i_fr) > 50:
+            _interp_parts_en.append(
+                f"At the locked threshold ({threshold:.0%}), most patients were flagged "
+                f"({float(_i_fr):.1f}% flag rate); this indicates a sensitivity-oriented rule-out point."
+            )
+            _interp_parts_pt.append(
+                f"No limiar travado ({threshold:.0%}), a maioria dos pacientes foi sinalizada "
+                f"({float(_i_fr):.1f}% de taxa de sinalização); isso indica um ponto operacional orientado à sensibilidade."
+            )
+        if _i_npv is not None and not _math.isnan(float(_i_npv)):
+            _interp_parts_en.append(
+                f"NPV = {float(_i_npv):.3f} at the locked threshold "
+                f"({_i_fn} event(s) not flagged)."
+            )
+            _interp_parts_pt.append(
+                f"NPV = {float(_i_npv):.3f} no limiar travado "
+                f"({_i_fn} evento(s) não sinalizado(s))."
+            )
+
+    _interp_parts_en.append(
+        "In this cohort, AI Risk should be interpreted primarily as a ranking / rule-out "
+        "tool unless locally recalibrated."
+    )
+    _interp_parts_pt.append(
+        "Nesta coorte, o AI Risk deve ser interpretado principalmente como ferramenta de "
+        "ranqueamento / rule-out, salvo recalibração local."
+    )
+
+    _interp_text = " ".join(_interp_parts_en if language == "English" else _interp_parts_pt)
+    lines.append(_interp_text)
+    lines.append("")
 
     lines.append("---")
     lines.append(
