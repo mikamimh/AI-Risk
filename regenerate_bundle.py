@@ -12,14 +12,19 @@ O que este script faz:
 
 Mudancas metodologicas ja incorporadas neste baseline:
   - NEVER_FEATURE_COLUMNS (leakage temporal + pós-op + scores comparadores + metadados)
+  - EXCLUDED_ETHICAL_COLUMNS: Race removida do modelo preditivo AI Risk (v16)
+    Justificativa: coorte severamente desbalanceada (435 White, 16 African American,
+    3 Asian; 0 eventos nos grupos nao-White), gerando estimativas TargetEncoder
+    instáveis e risco ético sem benefício de desempenho (ablação: ΔAUC +0.0042).
+    Race continua disponível para STS Score, auditoria, descrição de coorte e
+    análises de fairness/subgrupos.
   - procedure_group removido de treino/inferencia (ablação confirmou: atrapalha)
   - BLANK_MEANS_NONE_COLUMNS (Previous surgery, HF, Arrhythmia Remote, Aortic Stenosis)
   - normalize_previous_surgery_value ativo no path flat e master
   - Filtro de 95% missingness (validado empiricamente: PHT Aortic rank 4/61)
-  - 61 features ativas
 
-Baseline de referencia anterior (bundle v12, CSV flat path):
-  RandomForest: AUC=0.7454, AUPRC=0.3400, Brier=0.1149  Youden=0.0936
+Baseline de referencia anterior (bundle v15, 62 features, com Race):
+  RandomForest: AUC=0.7474, AUPRC=0.3303, Brier=0.1155  Youden=0.127
 """
 import sys
 import warnings
@@ -45,15 +50,15 @@ XLSX      = "local_data/Dataset_2025.xlsx"
 BUNDLE    = AppConfig.MODEL_CACHE_FILE        # ia_risk_bundle.joblib
 THRESHOLD = 0.08
 
-# Numeros de referencia (bundle v12, treinado do CSV flat, sem garantia de semantica)
-V12_REF = {
-    "auc":           0.7454,
-    "auprc":         0.3400,
-    "brier":         0.1149,
-    "youden_thresh": 0.0936,
-    "n_features":    61,
-    "model_version": "2026-03-29-v12-calibrated-oof",
-    "source_type":   "flat (CSV)",
+# Numeros de referencia (bundle v15, 62 features, com Race)
+V15_REF = {
+    "auc":           0.7474,
+    "auprc":         0.3303,
+    "brier":         0.1155,
+    "youden_thresh": 0.127,
+    "n_features":    62,
+    "model_version": "2026-04-24-v15-sts-scope-refinement",
+    "source_type":   "master (XLSX)",
 }
 
 
@@ -78,7 +83,7 @@ def compute_full_metrics(y, proba, youden_thresh):
 
 def run():
     print("=" * 70)
-    print("REGENERACAO DO BUNDLE AI RISK — baseline v13")
+    print("REGENERACAO DO BUNDLE AI RISK — baseline v16 (Race excluída)")
     print(f"MODEL_VERSION: {AppConfig.MODEL_VERSION}")
     print("=" * 70)
 
@@ -131,6 +136,7 @@ def run():
     assert "morte_30d" not in fc, "morte_30d NAO deve estar em features!"
     assert "sts_score" not in fc, "sts_score NAO deve estar em features!"
     assert "EuroSCORE II" not in fc, "EuroSCORE II NAO deve estar em features!"
+    assert "Race" not in fc, "Race NAO deve estar em features! (EXCLUDED_ETHICAL_COLUMNS)"
     assert nf == [], f"Never-feature interceptado: {nf}"
     print("  Pre-validacoes: OK")
 
@@ -171,21 +177,21 @@ def run():
     print(f"  @8%  Sens:{m['sens_8']:.3f} Spec:{m['spec_8']:.3f} PPV:{m['ppv_8']:.3f} NPV:{m['npv_8']:.3f}")
     print(f"  Youden t:{m['youden_thresh']:.3f} Sens:{m['sens_y']:.3f} Spec:{m['spec_y']:.3f} PPV:{m['ppv_y']:.3f} NPV:{m['npv_y']:.3f}")
 
-    # ── Comparativo v12 vs v13 ────────────────────────────────────────────────
-    print("\n[4] Comparativo baseline v12 vs v13:")
+    # ── Comparativo v15 vs v16 ────────────────────────────────────────────────
+    print("\n[4] Comparativo baseline v15 (com Race) vs v16 (sem Race):")
     keys = ["auc", "auprc", "brier"]
     labels = ["AUC", "AUPRC", "Brier"]
-    ref = V12_REF
-    print(f"  {'Metric':<16} {'v12 (CSV)':>12} {'v13 (XLSX)':>12} {'D':>8}")
-    print("  " + "-" * 50)
+    ref = V15_REF
+    print(f"  {'Metric':<16} {'v15 (c/Race)':>14} {'v16 (s/Race)':>14} {'D':>8}")
+    print("  " + "-" * 55)
     for k, lab in zip(keys, labels):
         d = m[k] - ref[k]
-        print(f"  {lab:<16} {ref[k]:>12.4f} {m[k]:>12.4f} {d:>+8.4f}")
-    print(f"  {'Cal intercept':<16} {'---':>12} {m['cal_intercept']:>12.4f} {'---':>8}")
-    print(f"  {'Cal slope':<16} {'---':>12} {m['cal_slope']:>12.4f} {'---':>8}")
-    print(f"  {'Youden thresh':<16} {ref['youden_thresh']:>12.4f} {m['youden_thresh']:>12.4f} {m['youden_thresh']-ref['youden_thresh']:>+8.4f}")
-    print(f"  {'N features':<16} {ref['n_features']:>12} {len(fc):>12} {len(fc)-ref['n_features']:>+8}")
-    print(f"  {'Source':<16} {ref['source_type']:>12} {'master(XLSX)':>12}")
+        print(f"  {lab:<16} {ref[k]:>14.4f} {m[k]:>14.4f} {d:>+8.4f}")
+    print(f"  {'Cal intercept':<16} {'---':>14} {m['cal_intercept']:>14.4f} {'---':>8}")
+    print(f"  {'Cal slope':<16} {'---':>14} {m['cal_slope']:>14.4f} {'---':>8}")
+    print(f"  {'Youden thresh':<16} {ref['youden_thresh']:>14.4f} {m['youden_thresh']:>14.4f} {m['youden_thresh']-ref['youden_thresh']:>+8.4f}")
+    print(f"  {'N features':<16} {ref['n_features']:>14} {len(fc):>14} {len(fc)-ref['n_features']:>+8}")
+    print(f"  {'Source':<16} {ref['source_type']:>14} {'master(XLSX)':>14}")
 
     # ── Construcao e salvamento do bundle ─────────────────────────────────────
     print("\n[5] Construindo e salvando bundle...")
@@ -225,12 +231,14 @@ def run():
     assert len(r_fc) == len(fc), f"feature_columns count mismatch: {len(r_fc)} vs {len(fc)}"
     assert "procedure_group" not in r_fc, "procedure_group vazou para features!"
     assert "morte_30d" not in r_fc, "morte_30d vazou para features!"
+    assert "Race" not in r_fc, "Race vazou para features! (EXCLUDED_ETHICAL_COLUMNS)"
     assert r_arts.get("best_model_name") == best, "best_model mismatch!"
     print("  Assinatura: OK")
     print("  Features count: OK")
     print("  Leakage check: OK")
+    print("  Race exclusion: OK")
     print("  Best model: OK")
-    print("\nBundle v13 salvo e validado com sucesso.")
+    print("\nBundle v16 salvo e validado com sucesso.")
 
     return m, fc
 

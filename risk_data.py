@@ -888,11 +888,21 @@ EXCLUDED_METADATA_COLUMNS: frozenset = frozenset({
     "classe_sts",
 })
 
+# Race/ethnicity is retained in the analytical dataset for STS Score mapping,
+# cohort description, audit, and fairness/subgroup analyses, but excluded from
+# the AI Risk predictive feature set.  At n=454 the cohort is severely
+# imbalanced (435 White, 16 African American, 3 Asian; 0 events in non-White
+# groups), producing statistically unstable TargetEncoder estimates and
+# introducing methodological/ethical risk without performance benefit
+# (ablation: ΔAUC +0.0042, ΔBrier −0.0006 without Race).
+EXCLUDED_ETHICAL_COLUMNS: frozenset = frozenset({"Race"})
+
 NEVER_FEATURE_COLUMNS: frozenset = (
     EXCLUDED_OUTCOME_COLUMNS
     | EXCLUDED_POSTOPERATIVE_COLUMNS
     | EXCLUDED_COMPARATOR_SCORE_COLUMNS
     | EXCLUDED_METADATA_COLUMNS
+    | EXCLUDED_ETHICAL_COLUMNS
 )
 
 

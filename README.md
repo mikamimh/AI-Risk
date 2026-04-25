@@ -93,33 +93,28 @@ The Data Quality tab offers a consolidated XLSX download ("Audit Package") with 
 - Valve severity variables: OrdinalEncoder with clinical order (None < Trivial < Mild < Moderate < Severe) — "None" means no disease, not missing data
 - Preoperative NYHA: encoded via TargetEncoder (not ordinal). A controlled ablation showed ordinal encoding (I < II < III < IV) degraded AUC by 0.007 and sensitivity @8% by 0.044 — TargetEncoder captures the non-linear mortality jump from NYHA III to IV more accurately than a linear integer mapping.
 - Other categorical variables: mode imputation + TargetEncoder (smooth="auto")
+- **Race/ethnicity is not a predictive feature** (v16 onwards): Race is collected and retained in the analytical dataset for STS Score input mapping, cohort description, fairness/subgroup analyses, and audit exports — but is explicitly excluded from the AI Risk predictive model via `EXCLUDED_ETHICAL_COLUMNS`. The exclusion is justified on both statistical and ethical grounds: the cohort is severely imbalanced (435 White, 16 African American, 3 Asian; 0 events in any non-White group), so TargetEncoder estimates for minority groups are entirely driven by the global shrinkage prior rather than observed data, making the encoding statistically meaningless. A controlled ablation confirmed slight performance improvement without Race (ΔAUC +0.0042, ΔBrier −0.0006). Race remains available downstream in individual prediction forms, batch exports, and subgroup analyses, but the model probability is computed without it.
 
 The same inference core (`ai_risk_inference.py`) is used by all three scoring contexts — individual prediction, batch new-patient prediction, and temporal validation — so the probability computed is identical regardless of how a patient reaches the model.
 
-### Official baseline — v15 (2026-04-24)
+### Official baseline — v16 (2026-04-24)
 
-**Bundle version:** `2026-04-24-v15-sts-scope-refinement` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 62
+**Bundle version:** `2026-04-24-v16-race-excluded` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 61
 
 | Model | AUC | AUPRC | Brier | BSS |
 |:--|--:|--:|--:|--:|
-| **RandomForest** *(selected)* | **0.7474** | **0.3303** | **0.1155** | **+0.093** |
-| LogisticRegression | 0.7343 | 0.3154 | 0.1249 | +0.014 |
-| StackingEnsemble | 0.7243 | 0.2976 | 0.1358 | −0.067 |
-| LightGBM | 0.7184 | 0.3213 | 0.1187 | +0.042 |
-| XGBoost | 0.7049 | 0.2855 | 0.1194 | +0.037 |
-| CatBoost | 0.6972 | 0.2940 | 0.1224 | +0.013 |
+| **RandomForest** *(selected)* | **0.7516** | **0.3362** | **0.1148** | **+0.100** |
+| LightGBM | 0.7467 | 0.3623 | 0.1143 | +0.104 |
+| LogisticRegression | 0.7285 | 0.2842 | 0.1281 | −0.005 |
+| StackingEnsemble | 0.7262 | 0.2866 | 0.1346 | −0.056 |
+| XGBoost | 0.7161 | 0.3273 | 0.1172 | +0.081 |
+| CatBoost | 0.6929 | 0.2919 | 0.1233 | +0.033 |
 
-**RandomForest calibration:** intercept = −0.006, slope = 0.999 · **@8% threshold:** Sensitivity 0.941, Specificity 0.367, PPV 0.208, NPV 0.972
+**RandomForest calibration:** intercept = 0.002, slope = 1.018 · **@8% threshold:** Sensitivity 0.926, Specificity 0.360, PPV 0.203, NPV 0.965
 
-**Triple cohort (STS-evaluable, refined):** n=334, 45 events (prevalence 13.5%)
+**Triple cohort (STS-evaluable, refined):** comparison metrics are pending re-run with the v16 bundle on the Comparison tab (STS and EuroSCORE II metrics are unchanged; AI Risk triple-cohort metrics will update after a new comparison run).
 
-| Score | AUC | AUPRC | Brier | BSS | Intercept | Slope | ICI |
-|:--|--:|--:|--:|--:|--:|--:|--:|
-| STS | 0.802 | 0.415 | 0.1212 | **−0.040** | 2.53 | 1.12 | 0.114 |
-| EuroSCORE II | 0.776 | 0.484 | 0.1029 | +0.088 | 1.69 | 1.43 | 0.061 |
-| AI Risk | 0.762 | 0.343 | 0.1044 | +0.093 | 0.07 | 1.09 | 0.033 |
-
-**What changed from v14 (2026-04-23):** STS scope refinement — `STS_UNSUPPORTED_SURGERY_KEYWORDS` expanded from 12 to 31 terms to catch 25 combined procedures previously marked `supported` despite containing out-of-scope components (e.g. CABG + ASD closure, MVR + TV Repair, CABG + Pacemaker implantation). Triple cohort reduced 366 → 334. NRI/IDI bootstrap p-value: removed `1e-10` clip, added `p_lower_bound` when p = 0 (shows `< 1/n_boot`). Brier Skill Score (BSS) added to all evaluation tables and exports. NRI/IDI direction convention documented in all markdown/PDF/XLSX exports.
+**What changed from v15 (2026-04-24):** Race/ethnicity removed from AI Risk predictive features (`EXCLUDED_ETHICAL_COLUMNS`). Race is retained in the analytical dataset for STS Score input mapping, cohort description, fairness/subgroup analyses, and audit exports. Ablation confirmed marginal performance improvement (ΔAUC +0.0042, ΔBrier −0.0007). Features: 62 → 61. Model version: `v15-sts-scope-refinement` → `v16-race-excluded`.
 
 **Key observations on refined cohort:**
 - AI Risk ↔ STS AUC difference is no longer statistically significant (DeLong p = 0.077, bootstrap p = 0.088). The previous significance in v14 (p = 0.014) was inflated by the 25 contaminated cases.
