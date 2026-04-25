@@ -97,9 +97,9 @@ The Data Quality tab offers a consolidated XLSX download ("Audit Package") with 
 
 The same inference core (`ai_risk_inference.py`) is used by all three scoring contexts — individual prediction, batch new-patient prediction, and temporal validation — so the probability computed is identical regardless of how a patient reaches the model.
 
-### Official baseline — v16 (2026-04-24)
+### Official baseline — v17 (2026-04-25)
 
-**Bundle version:** `2026-04-24-v16-race-excluded` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 61
+**Bundle version:** `2026-04-25-v17-sens90-threshold` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 61
 
 | Model | AUC | AUPRC | Brier | BSS |
 |:--|--:|--:|--:|--:|
@@ -110,11 +110,44 @@ The same inference core (`ai_risk_inference.py`) is used by all three scoring co
 | XGBoost | 0.7161 | 0.3273 | 0.1172 | +0.081 |
 | CatBoost | 0.6929 | 0.2919 | 0.1233 | +0.033 |
 
-**RandomForest calibration:** intercept = 0.002, slope = 1.018 · **@8% threshold:** Sensitivity 0.926, Specificity 0.360, PPV 0.203, NPV 0.965
+**RandomForest calibration (OOF):** intercept = 0.0022, slope = 1.018, CIL = 0.003, ICI = 0.027
 
-**Triple cohort (STS-evaluable, refined):** comparison metrics are pending re-run with the v16 bundle on the Comparison tab (STS and EuroSCORE II metrics are unchanged; AI Risk triple-cohort metrics will update after a new comparison run).
+**Primary operational threshold — sensitivity-constrained 90% policy:**
 
-**What changed from v15 (2026-04-24):** Race/ethnicity removed from AI Risk predictive features (`EXCLUDED_ETHICAL_COLUMNS`). Race is retained in the analytical dataset for STS Score input mapping, cohort description, fairness/subgroup analyses, and audit exports. Ablation confirmed marginal performance improvement (ΔAUC +0.0042, ΔBrier −0.0007). Features: 62 → 61. Model version: `v15-sts-scope-refinement` → `v16-race-excluded`.
+| Metric | Value |
+|:--|--:|
+| Policy | `sensitivity_constrained_90` |
+| Selected threshold | **8.50%** (derived from OOF training predictions) |
+| Target sensitivity | ≥90% |
+| OOF Sensitivity | **91.2%** |
+| OOF Specificity | 39.1% |
+| OOF PPV | 20.9% |
+| OOF NPV | **96.2%** |
+| OOF Flag rate | 65.4% (297/454) |
+| TP / FP / TN / FN | 62 / 235 / 151 / 6 |
+
+**Fixed 8% (historical comparator):** Sensitivity 92.6%, Specificity 36.0%, PPV 20.3%, NPV 96.5%
+
+**Youden (exploratory):** threshold 15.2%, Sensitivity 69.1%, Specificity 71.8%
+
+**What changed from v16 (2026-04-24):** The primary operational threshold is now derived from training OOF predictions using the sensitivity-constrained 90% policy. This is a methodological change in how the threshold is set — not a change to the model, features, or calibration. The fixed 8% is retained as a historical/fixed comparator. Youden is retained as exploratory. Discrimination and calibration metrics are identical to v16 (same model, same data, same training pipeline). Model version: `v16-race-excluded` → `v17-sens90-threshold`.
+
+<details>
+<summary>v16 baseline (2026-04-24) — superseded</summary>
+
+**Bundle:** `2026-04-24-v16-race-excluded` · n=454, 68 events · 61 features
+
+| Model | AUC | AUPRC | Brier |
+|:--|--:|--:|--:|
+| **RandomForest** *(selected)* | **0.7516** | **0.3362** | **0.1148** |
+| LightGBM | 0.7467 | 0.3623 | 0.1143 |
+| LogisticRegression | 0.7285 | 0.2842 | 0.1281 |
+
+RF calibration: intercept = 0.002, slope = 1.018 · Youden threshold: 0.152 · @8%: Sensitivity 0.926, Specificity 0.360, PPV 0.203, NPV 0.965
+
+Primary threshold in v16: legacy fixed 8% (threshold_policy not yet present).
+
+</details>
 
 **Key observations on refined cohort:**
 - AI Risk ↔ STS AUC difference is no longer statistically significant (DeLong p = 0.077, bootstrap p = 0.088). The previous significance in v14 (p = 0.014) was inflated by the 25 contaminated cases.
