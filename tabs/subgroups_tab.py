@@ -17,7 +17,7 @@ import pandas as pd
 import streamlit as st
 
 from bundle_io import bundle_signature as _bundle_signature
-from model_metadata import statistical_summary_to_pdf
+from export_helpers import statistical_summary_to_pdf
 from subgroups import (
     evaluate_subgroup,
     lvef_group as _lvef_group_impl,
