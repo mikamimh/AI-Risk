@@ -417,7 +417,8 @@ class TrainedArtifacts:
     """Per-model optimal threshold (Youden's J) from OOF predictions."""
     best_youden_threshold: float | None = None
     """Youden threshold for the best model.  Stored for optional use as
-    an alternative decision threshold (the default remains 8 %)."""
+    an alternative decision threshold (the default is derived from
+    threshold_policy, or 8% legacy fallback for bundles without it)."""
     training_manifest: Optional[Dict[str, Any]] = None
     """Provenance record written at training time: dataset hash, row count,
     event count, feature list, CV strategy, seed, and OOF metrics."""
@@ -462,13 +463,13 @@ def _select_best_model(
     checked against explicit guardrails. A model is eligible for
     automatic selection only if it passes **all**:
 
-    Guardrail A — Coverage at the clinical threshold
+    Guardrail A — Coverage at the historical 8% usability floor
         ``(oof_cal < usability_floor).mean() > 0``
         At least one patient must be classifiable as low-risk at the
-        default 8% cutoff. Catches upward-compressed distributions
+        legacy 8% coverage floor. Catches upward-compressed distributions
         (e.g. a stacked meta-learner whose output is bounded above 8%)
         and Platt-calibrated models whose lower asymptote is above the
-        clinical threshold.
+        historical usability floor.
 
     Guardrail B — Discrimination + probabilistic sanity
         Three robust checks that work for both Platt- and isotonic-
@@ -678,20 +679,20 @@ def _build_candidates() -> Dict[str, object]:
     # learner instead sees only 3 inputs — the base models' positive-class
     # probabilities, each in [0, 1] — and inheriting C=0.1 crushes its
     # coefficients so heavily that sigmoid(intercept + coef.p) is bounded
-    # to roughly [0.13, 0.38], making every prediction exceed the 8%
-    # clinical threshold.  C=1.0 (sklearn default) gives the meta-learner
-    # enough dynamic range to emit probabilities that span the decision
-    # boundary.
+    # to roughly [0.13, 0.38], making every prediction exceed the
+    # historical 8% usability floor.  C=1.0 (sklearn default) gives the
+    # meta-learner enough dynamic range to emit probabilities that span
+    # the decision boundary.
     #
     # passthrough=True: the meta-learner also sees the preprocessed raw
     # features in addition to the 3 base probabilities.  Without
     # passthrough the 3-way consensus of (raw LR, raw RF, raw XGB)
-    # produced a legitimate ensemble floor around 0.087 — above the 8%
-    # clinical threshold — because no patient had all three base models
-    # simultaneously predicting very low risk.  Passthrough gives the
-    # meta-LR enough feature signal to dip below 8% for patients whose
-    # preoperative feature pattern is genuinely low-risk, restoring
-    # coverage below the clinical threshold.
+    # produced a legitimate ensemble floor around 0.087 — above the
+    # historical 8% usability floor — because no patient had all three
+    # base models simultaneously predicting very low risk.  Passthrough
+    # gives the meta-LR enough feature signal to dip below 8% for
+    # patients whose preoperative feature pattern is genuinely low-risk,
+    # restoring coverage below the legacy 8% coverage guardrail.
     candidates["StackingEnsemble"] = StackingClassifier(
         estimators=stack_base,
         final_estimator=LogisticRegression(
@@ -723,11 +724,21 @@ def train_and_select_model(
 
     Strategy:
         1. Cross-validate each model to get out-of-fold (OOF) predictions.
-           For tree-based models, calibration (Platt scaling) is applied
-           *inside* each fold so that calibrated OOF predictions are honest.
+           For tree-based models, calibration is applied inside each fold
+           (Platt/sigmoid for RandomForest, isotonic for boosting models)
+           so that calibrated OOF predictions are honest.
         2. Compute leaderboard metrics on calibrated OOF probabilities.
-        3. Fit final model on ALL data with Platt calibration for trees.
-        4. Select best model by AUC (desc), AUPRC (desc) tiebreaker.
+        3. Select the best model by AUC (desc) + AUPRC (desc), after
+           applying clinical-usability guardrails (A: coverage below the
+           historical 8% usability floor; B1-B3: AUC floor, Brier skill,
+           dynamic range; C: calibration slope [0.40, 2.50]) and a
+           calibration-aware tiebreaker (when ΔAUC < 0.01, prefer slope
+           closest to 1.0).
+        4. Fit the final model on ALL data with the same calibration
+           strategy used in OOF evaluation.
+        5. Derive the primary threshold_policy (sensitivity-constrained
+           90% rule) from the best model's calibrated OOF predictions and
+           store it in the returned TrainedArtifacts.
 
     The leaderboard and the final model use the same calibration strategy,
     so comparative metrics reflect what the deployed model actually outputs.
@@ -768,10 +779,11 @@ def train_and_select_model(
     # inner CV = min(3, fold_pos, fold_neg), ensemble=False.  Rationale:
     # linear Platt has an intrinsic lower asymptote of sigmoid(intercept)
     # which on this ~15%-prevalence cohort lands around 0.09 — above the
-    # 8 % clinical threshold.  That floor crushed the three boosting
-    # models' raw distributions (which spanned nearly to zero) onto a
-    # calibrated minimum of ~0.089-0.112, eliminating coverage below
-    # 8 %.  Isotonic regression is non-parametric and monotonic without
+    # historical 8% usability floor.  That floor crushed the three
+    # boosting models' raw distributions (which spanned nearly to zero)
+    # onto a calibrated minimum of ~0.089-0.112, eliminating coverage
+    # below 8%.  Isotonic regression is non-parametric and monotonic
+    # without
     # a lower asymptote, so low raw scores map to low calibrated scores.
     # Combined with ensemble=False (one isotonic on concatenated inner-CV
     # raw scores instead of averaging K per-fold fits), the calibrator
@@ -888,8 +900,8 @@ def train_and_select_model(
                     # calibrators.  The averaged mode (default
                     # ensemble=True) produced lower-asymptote artefacts
                     # for the boosting models (~0.09-0.11), pushing
-                    # their calibrated minimum above the 8% clinical
-                    # threshold despite raw distributions spanning
+                    # their calibrated minimum above the historical 8%
+                    # usability floor despite raw distributions spanning
                     # nearly to zero.  With ensemble=False, the final
                     # calibrated score is calibrator(f(x)) where f is a
                     # single base model fit on all training data and
@@ -982,8 +994,8 @@ def train_and_select_model(
         .reset_index(drop=True)
     )
     # Clinical-usability filter: reject models that either (A) have no
-    # coverage below the 8% clinical threshold, or (B) show a grossly
-    # pathological calibration slope/intercept on OOF.  See docstring of
+    # coverage below the historical 8% usability floor, or (B) show a
+    # grossly pathological calibration slope/intercept on OOF.  See docstring of
     # _select_best_model for the exact bounds and rationale.
     best_name = _select_best_model(
         leaderboard, oof_predictions=oof_pred_cal, y=y
