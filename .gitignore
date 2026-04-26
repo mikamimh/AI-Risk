@@ -1,44 +1,184 @@
-# Arquivos que o Python cria automaticamente enquanto roda
+# ============================================================
+# AI-Risk — arquivos locais, sensíveis ou gerados
+# ============================================================
+
+
+# ------------------------------------------------------------
+# Python: bytecode, caches e testes
+# ------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*$py.class
+
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
 
-# Caches internos do app AI-Risk
-.ia_risk_cache/
-catboost_info/
 
-# Pastas de trabalho que não devem ir para o repo
-local_data/
-exports/
-temp/
-
-# Arquivos de dados (ficam só na sua máquina, nunca sobem)
-*.csv
-*.xlsx
-*.xls
-*.parquet
-
-# Modelos treinados e arquivos binários
-*.joblib
-*.pkl
-
-# Ambientes virtuais de Python (isolam as dependências)
+# ------------------------------------------------------------
+# Ambientes virtuais
+# ------------------------------------------------------------
 .venv/
 .venv*/
 venv/
 env/
+ENV/
 
-# Binário compilado do Windows e arquivos intermediários do PyInstaller
+
+# ------------------------------------------------------------
+# Caches internos do app AI-Risk e bibliotecas de ML
+# ------------------------------------------------------------
+.ia_risk_cache/
+catboost_info/
+.cache/
+cache/
+
+
+# ------------------------------------------------------------
+# Pastas locais de trabalho
+# ------------------------------------------------------------
+local_data/
+data/
+datasets/
+exports/
+reports/
+output/
+outputs/
+results/
+temp/
+tmp/
+
+
+# ------------------------------------------------------------
+# Dados clínicos e bases locais
+# Nunca versionar bases reais de pacientes
+# ------------------------------------------------------------
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.xlsm
+*.parquet
+*.feather
+*.sqlite
+*.sqlite3
+*.db
+*.duckdb
+
+
+# ------------------------------------------------------------
+# Modelos treinados, bundles e objetos serializados
+# ------------------------------------------------------------
+*.joblib
+*.pkl
+*.pickle
+*.sav
+*.onnx
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.model
+
+models/
+bundles/
+artifacts/
+checkpoints/
+
+
+# ------------------------------------------------------------
+# STS/cache/auditoria gerados em runtime
+# ------------------------------------------------------------
+sts_cache/
+.sts_cache/
+execution_logs/
+audit_logs/
+
+*_audit.csv
+*_execution_log.csv
+*_eligibility_log.csv
+*_sts_accounting.csv
+*_endpoint_health*.json
+
+
+# ------------------------------------------------------------
+# Relatórios, imagens e pacotes gerados
+# ------------------------------------------------------------
+*.pdf
+*.zip
+*.html
+
+# Atenção:
+# Não ignorar imagens globais se elas forem parte do app/docs.
+# Se quiser ignorar apenas imagens geradas, use pastas específicas:
+figures/generated/
+exports/figures/
+reports/figures/
+
+
+# ------------------------------------------------------------
+# Build / empacotamento / PyInstaller
+# ------------------------------------------------------------
 AI Risk.exe
 *.exe
+*.msi
+*.spec
 build/
 dist/
+*.egg-info/
+.eggs/
 
-# Arquivos que o sistema operacional cria sozinho (ignorar)
-.DS_Store
-Thumbs.db
 
-# Arquivos de configuração local com dados sensíveis
+# ------------------------------------------------------------
+# Streamlit: segredos locais
+# Manter .streamlit/config.toml se for configuração pública do app.
+# ------------------------------------------------------------
 .streamlit/secrets.toml
+.streamlit/secrets/
+
+
+# ------------------------------------------------------------
+# Claude: configurações locais
+# ------------------------------------------------------------
 .claude/settings.local.json
 .claude/settings.json
+
+
+# ------------------------------------------------------------
+# Variáveis de ambiente e credenciais
+# ------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+
+# ------------------------------------------------------------
+# Sistema operacional
+# ------------------------------------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+
+# ------------------------------------------------------------
+# Editores / IDE
+# ------------------------------------------------------------
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+.idea/
+*.swp
+*.swo
+*~
