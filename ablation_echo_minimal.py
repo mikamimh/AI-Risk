@@ -798,7 +798,7 @@ def run_ablation(
         )
         print(f"  Baseline features : {len(baseline_features)}")
         print(f"  Echo-minimal features: {len(echo_minimal_features)}")
-        print(f"  Removed features  : {len(removed_features)} → {removed_features}")
+        print(f"  Removed features  : {len(removed_features)} -> {removed_features}")
 
     # Build the estimator (RandomForest with sigmoid calibration — matches production)
     original_seed = AppConfig.RANDOM_SEED
@@ -899,7 +899,7 @@ def run_ablation(
                                             n_boot=n_boot, seed=seed)
         if verbose:
             print(
-                f"    ΔAUC(base−min)={boot_auc.get('delta_auc', float('nan')):.4f} "
+                f"    dAUC(base-min)={boot_auc.get('delta_auc', float('nan')):.4f} "
                 f"[{boot_auc.get('ci_low', float('nan')):.4f}, "
                 f"{boot_auc.get('ci_high', float('nan')):.4f}]  "
                 f"p={boot_auc.get('p', float('nan')):.3f}"
