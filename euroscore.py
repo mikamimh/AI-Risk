@@ -165,6 +165,30 @@ def _recent_mi_from_coronary(value: object) -> bool:
     return "stemi" in s or "non-stemi" in s or "nstemi" in s
 
 
+# Tokens in "Previous surgery" that mean NO previous cardiac surgery.
+# "none" is the canonical absence value produced by
+# risk_data.normalize_previous_surgery_value (blank / "No" -> "None").
+_NO_PREVIOUS_SURGERY_TOKENS = frozenset({
+    "", "nan", "none", "no", "nao", "não", "nenhuma", "-", "--", "unknown",
+})
+
+
+def _has_previous_cardiac_surgery(value: object) -> bool:
+    """Return True if a "Previous surgery" value indicates prior cardiac surgery.
+
+    Returns False for NaN / Python ``None``, the empty string and the absence
+    tokens ``"none"``, ``"no"``, ``"nao"``, ``"não"``, ``"nenhuma"``, ``"-"``,
+    ``"--"`` and ``"unknown"`` (case-insensitive, surrounding whitespace
+    ignored). Any other text (e.g. ``"CABG"``, ``"AVR"``, ``"Yes"``) returns True.
+
+    ``"unknown"`` is deliberately treated as absence, preserving the previous
+    conservative behaviour (missing data defaults to low risk).
+    """
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return False
+    return str(value).strip().lower() not in _NO_PREVIOUS_SURGERY_TOKENS
+
+
 def _creatinine_clearance_category(cc: float, dialysis: bool) -> str:
     if dialysis:
         return "dialysis"
@@ -231,8 +255,7 @@ def euroscore_from_row(row: pd.Series) -> float:
     cpd = _yes(row.get("Chronic Lung Disease", np.nan))
     poor_mobility = _yes(row.get("Poor mobility", np.nan))
 
-    prev_surg = row.get("Previous surgery")
-    redo = pd.notna(prev_surg) and str(prev_surg).strip().lower() not in {"", "nan", "unknown", "no"}
+    redo = _has_previous_cardiac_surgery(row.get("Previous surgery"))
 
     dialysis = _yes(row.get("Dialysis"))
     cc = parse_number(row.get("Cr clearance, ml/min *"))

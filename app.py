@@ -1980,10 +1980,10 @@ best_model_name = artifacts.best_model_name
 
 # Bundles saved by regenerate_bundle.py store only prepared.data (no live
 # calculator output).  Ensure computed score columns are present so the rest
-# of the app can access them unconditionally.  The app's _compute_bundle path
-# always adds these, so this guard is a no-op for in-app trained bundles.
-if "euroscore_calc" not in base_df.columns:
-    base_df["euroscore_calc"] = base_df.apply(euroscore_from_row, axis=1)
+# of the app can access them unconditionally.
+# EuroSCORE II is always recomputed (deterministic, ~20 ms for n≈450) so that
+# bundles saved before a euroscore.py fix never serve stale values.
+base_df["euroscore_calc"] = base_df.apply(euroscore_from_row, axis=1)
 if "euroscore_sheet_clean" not in base_df.columns:
     base_df["euroscore_sheet_clean"] = pd.to_numeric(
         base_df.get("euroscore_sheet"), errors="coerce"
