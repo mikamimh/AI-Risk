@@ -452,12 +452,157 @@ def shap_beeswarm_figure(summary: Dict[str, Any], max_display: int = 15) -> Tupl
         return _fig_bytes(fig)
 
 
+def risk_bands_figure(bands: pd.DataFrame, labels: Optional[Dict[str, str]] = None) -> Tuple[bytes, bytes]:
+    """Grouped bars per method: observed mortality vs mean predicted risk by band (in %)."""
+    import matplotlib
+    matplotlib.use("Agg", force=False)
+    import matplotlib.pyplot as plt  # noqa: PLC0415
+
+    lab = {"observed": "Mortalidade observada", "predicted": "Risco previsto médio",
+           "band": "Faixa de risco prevista", "pct": "%"}
+    lab.update(labels or {})
+    methods = list(dict.fromkeys(bands["metodo"]))
+    with matplotlib.rc_context(_FONT_RC):
+        fig, axes = plt.subplots(1, len(methods), figsize=(3.2 * len(methods), 3.4), sharey=True, squeeze=False)
+        for ax, method in zip(axes[0], methods):
+            g = bands[bands["metodo"] == method]
+            x = np.arange(len(g))
+            w = 0.38
+            ax.bar(x - w / 2, g["mortalidade_observada"].fillna(0) * 100, w, color="#b2182b", label=lab["observed"])
+            ax.bar(x + w / 2, g["risco_previsto_medio"].fillna(0) * 100, w, color=_BAR_COLOR, label=lab["predicted"])
+            ax.set_xticks(x)
+            ax.set_xticklabels(g["faixa"])
+            ax.set_xlabel(lab["band"])
+            ax.text(0.02, 0.98, method, transform=ax.transAxes, ha="left", va="top", fontsize=10, fontweight="bold")
+        axes[0][0].set_ylabel(lab["pct"])
+        handles, hl = axes[0][0].get_legend_handles_labels()
+        fig.legend(handles, hl, loc="lower center", ncol=2, frameon=False, bbox_to_anchor=(0.5, -0.04))
+        fig.tight_layout(rect=(0, 0.06, 1, 1))
+        return _fig_bytes(fig)
+
+
 # ---------------------------------------------------------------------------
-# Orchestration
+# Compute blocks (single source of truth for the UI and the ZIP)
+# ---------------------------------------------------------------------------
+
+A1_COLUMNS = ["rank", "feature", "feature_raw", "mean_abs_shap", "spearman_value_vs_shap"]
+
+# Rows of the B2 summary shown in the UI (subset of B2_threshold_bootstrap_summary.csv).
+B2_DISPLAY_METRICS = [
+    "limiar_armazenado", "limiar_original", "t_b_mediana", "t_b_p2_5", "t_b_p97_5",
+    "flag_rate_original", "flag_rate_boot_mediana", "flag_rate_boot_p2_5", "flag_rate_boot_p97_5",
+    "sensibilidade_aparente", "sensibilidade_corrigida_media_teste", "sensibilidade_corrigida_harrell",
+    "especificidade_aparente", "especificidade_corrigida_media_teste",
+    "prop_reamostragens_sens_original_abaixo_alvo",
+    "eventos", "fn_max_permitido", "fn_observado",
+    "obito_definidor_rank_ascendente", "obito_definidor_prob_prevista",
+]
+
+
+def shap_supported(pipe) -> bool:
+    try:
+        import shap  # noqa: F401, PLC0415
+    except ImportError:
+        return False
+    return pipe is not None and hasattr(pipe.named_steps["model"], "feature_importances_")
+
+
+def compute_shap_block(pipe, X: pd.DataFrame, top_n: int = 15, random_state: int = 42) -> Dict[str, Any]:
+    """Block A: SHAP summary, A1 table and A2/A3 figures (PNG + SVG bytes)."""
+    from explainability import shap_global_summary  # noqa: PLC0415
+
+    summ = shap_global_summary(pipe, X, top_n=top_n, random_state=random_state)
+    a1 = summ["table"][A1_COLUMNS].reset_index(drop=True)
+    bar_png, bar_svg = shap_bar_figure(summ["table"])
+    bee_png, bee_svg = shap_beeswarm_figure(summ, top_n)
+    return {
+        "a1": a1,
+        "bar_png": bar_png, "bar_svg": bar_svg,
+        "beeswarm_png": bee_png, "beeswarm_svg": bee_svg,
+        "explained_output": summ["explained_output"],
+        "explained_estimator": summ["explained_estimator"],
+        "final_output_calibrated": summ["final_output_calibrated"],
+        "calibration_method": summ["calibration_method"],
+        "expected_value": summ["expected_value"],
+        "n": int(summ["X_proc"].shape[0]),
+        "n_features": int(summ["X_proc"].shape[1]),
+    }
+
+
+def shap_direction_display(a1: pd.DataFrame) -> pd.DataFrame:
+    """A1 for display: rank, feature, mean_abs_shap, direction arrow + Spearman value."""
+    def _arrow(r: float) -> str:
+        if not np.isfinite(r):
+            return "–"
+        sym = "↑" if r > 0 else ("↓" if r < 0 else "·")
+        return f"{sym} {r:+.3f}"
+
+    return pd.DataFrame({
+        "rank": a1["rank"].to_numpy(),
+        "feature": a1["feature"].to_numpy(),
+        "mean_abs_shap": a1["mean_abs_shap"].to_numpy(),
+        "direction": [_arrow(float(v)) for v in a1["spearman_value_vs_shap"]],
+    })
+
+
+def compute_threshold_policy(
+    df: pd.DataFrame,
+    stored_threshold: float,
+    targets: Iterable[float] = SENSITIVITY_TARGETS,
+) -> Dict[str, Any]:
+    """Blocks B1, B3, B4 (cheap) plus the cohort arrays they were computed on."""
+    y_dev, p_dev = development_oof_arrays(df)
+    triple = build_triple_cohort(df)
+    y_tri = triple[OUTCOME_COL].astype(int).to_numpy()
+    p_tri = triple[AI_RISK_COL].astype(float).to_numpy()
+    return {
+        "y_dev": y_dev, "p_dev": p_dev,
+        "triple": triple, "n_triple": int(len(triple)),
+        "B1": sensitivity_targets_table(y_dev, p_dev, y_tri, p_tri, targets=tuple(targets)),
+        "B3": risk_bands_table(triple),
+        "B4": ruleout_table(y_dev, p_dev, y_tri, p_tri, stored_threshold),
+    }
+
+
+def compute_bootstrap_block(
+    y: np.ndarray, p: np.ndarray, stored_threshold: float, n_boot: int = 2000, seed: int = 42,
+) -> Dict[str, Any]:
+    """Block B2: bootstrap summary, draws, info dict and histogram (PNG + SVG bytes)."""
+    summary, draws, info = threshold_bootstrap(
+        y, p, target=0.90, n_boot=n_boot, seed=seed, stored_threshold=stored_threshold,
+    )
+    png, svg = threshold_bootstrap_figure(draws, stored_threshold)
+    return {"summary": summary, "draws": draws, "info": info, "fig_png": png, "fig_svg": svg}
+
+
+def b2_display_summary(summary: pd.DataFrame) -> pd.DataFrame:
+    """Subset of the B2 summary shown in the UI (same rows/values as the CSV)."""
+    s = summary.set_index("metrica")
+    keep = [m for m in B2_DISPLAY_METRICS if m in s.index]
+    return s.loc[keep].reset_index()
+
+
+def oof_hash(y: np.ndarray, p: np.ndarray) -> str:
+    """Stable hash of (y, p) used as a cache key for the bootstrap."""
+    import hashlib  # noqa: PLC0415
+
+    h = hashlib.sha256()
+    h.update(np.ascontiguousarray(np.asarray(y, dtype=np.int64)).tobytes())
+    h.update(np.ascontiguousarray(np.asarray(p, dtype=np.float64)).tobytes())
+    return h.hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Orchestration (file writing)
 # ---------------------------------------------------------------------------
 
 def _csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def read_export_csv(data: bytes) -> pd.DataFrame:
+    """Inverse of the CSV writer used for the ZIP (for consistency checks)."""
+    return pd.read_csv(BytesIO(data), encoding="utf-8-sig", float_precision="round_trip")
 
 
 def _json_default(o):
@@ -484,17 +629,21 @@ def build_dissertation_exports(
     shap_top_n: int = 15,
     shap_random_state: int = 42,
     targets: Iterable[float] = SENSITIVITY_TARGETS,
+    shap_block: Optional[Dict[str, Any]] = None,
+    bootstrap_block: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, bytes]:
     """Compute every export and return ``{filename: bytes}`` (incl. metadata.json).
 
-    Block A is skipped (and recorded in metadata) when ``pipe``/``X`` is not
-    given or the model is not tree-based.
+    ``shap_block`` / ``bootstrap_block`` accept results already computed by
+    :func:`compute_shap_block` / :func:`compute_bootstrap_block` (e.g. cached
+    by the UI) so the ZIP reuses exactly what is on screen.  Block A is
+    skipped (and recorded in metadata) when no block is given and
+    ``pipe``/``X`` is unavailable or the model is not tree-based.
     """
+    targets = tuple(targets)
     files: Dict[str, bytes] = {}
-    y_dev, p_dev = development_oof_arrays(df)
-    triple = build_triple_cohort(df)
-    y_tri = triple[OUTCOME_COL].astype(int).to_numpy()
-    p_tri = triple[AI_RISK_COL].astype(float).to_numpy()
+    pol = compute_threshold_policy(df, stored_threshold, targets)
+    y_dev, p_dev = pol["y_dev"], pol["p_dev"]
 
     meta: Dict[str, Any] = {
         "gerado_em": datetime.now().isoformat(timespec="seconds"),
@@ -505,9 +654,10 @@ def build_dissertation_exports(
         "bundle_training_source": (bundle_info or {}).get("training_source"),
         "limiar_armazenado": float(stored_threshold),
         "coorte_desenvolvimento": {"n": int(len(y_dev)), "eventos": int(y_dev.sum())},
-        "coorte_tripla": {"n": int(len(y_tri)), "eventos": int(y_tri.sum())},
+        "coorte_tripla": {"n": pol["n_triple"], "eventos": int(pol["triple"][OUTCOME_COL].sum())},
         "seeds": {"bootstrap": int(seed), "shap": int(shap_random_state)},
         "bootstrap_B": int(n_boot),
+        "oof_hash": oof_hash(y_dev, p_dev),
         "alvos_sensibilidade": [float(t) for t in targets],
         "faixas_risco_cortes": list(NRI_CUTOFFS),
         "fonte_predicoes": "df['ia_risk_oof'] = artifacts.oof_predictions[modelo] (OOF calibrado)",
@@ -518,45 +668,36 @@ def build_dissertation_exports(
         import shap  # noqa: PLC0415
         meta["shap_version"] = shap.__version__
     except ImportError:
-        shap = None
         meta["shap_version"] = None
-    if shap is not None and pipe is not None and X is not None and hasattr(pipe.named_steps["model"], "feature_importances_"):
-        from explainability import shap_global_summary  # noqa: PLC0415
-
-        summ = shap_global_summary(pipe, X, top_n=shap_top_n, random_state=shap_random_state)
-        tbl = summ["table"][["rank", "feature", "feature_raw", "mean_abs_shap", "spearman_value_vs_shap"]]
-        files["A1_shap_global_top15.csv"] = _csv_bytes(tbl)
-        files["A2_fig_shap_bar.png"], files["A2_fig_shap_bar.svg"] = shap_bar_figure(summ["table"])
-        files["A3_fig_shap_beeswarm.png"], files["A3_fig_shap_beeswarm.svg"] = shap_beeswarm_figure(summ, shap_top_n)
+    if shap_block is None and X is not None and shap_supported(pipe):
+        shap_block = compute_shap_block(pipe, X, top_n=shap_top_n, random_state=shap_random_state)
+    if shap_block is not None:
+        files["A1_shap_global_top15.csv"] = _csv_bytes(shap_block["a1"])
+        files["A2_fig_shap_bar.png"] = shap_block["bar_png"]
+        files["A2_fig_shap_bar.svg"] = shap_block["bar_svg"]
+        files["A3_fig_shap_beeswarm.png"] = shap_block["beeswarm_png"]
+        files["A3_fig_shap_beeswarm.svg"] = shap_block["beeswarm_svg"]
         meta["shap"] = {
-            "explained_output": summ["explained_output"],
-            "explained_estimator": summ["explained_estimator"],
-            "final_output_calibrated": summ["final_output_calibrated"],
-            "calibration_method": summ["calibration_method"],
-            "expected_value": summ["expected_value"],
-            "n": int(summ["X_proc"].shape[0]),
-            "n_features_processadas": int(summ["X_proc"].shape[1]),
+            k: shap_block[k] for k in (
+                "explained_output", "explained_estimator", "final_output_calibrated",
+                "calibration_method", "expected_value", "n",
+            )
         }
+        meta["shap"]["n_features_processadas"] = shap_block["n_features"]
     else:
         meta["shap"] = {"status": "skipped"}
 
     # ── Block B ───────────────────────────────────────────────────────────
-    files["B1_sensitivity_targets.csv"] = _csv_bytes(
-        sensitivity_targets_table(y_dev, p_dev, y_tri, p_tri, targets=tuple(targets))
-    )
-    b2_summary, b2_draws, b2_info = threshold_bootstrap(
-        y_dev, p_dev, target=0.90, n_boot=n_boot, seed=seed, stored_threshold=stored_threshold,
-    )
-    files["B2_threshold_bootstrap_summary.csv"] = _csv_bytes(b2_summary)
-    files["B2_threshold_bootstrap_draws.csv"] = _csv_bytes(b2_draws)
-    files["B2_fig_threshold_bootstrap.png"], files["B2_fig_threshold_bootstrap.svg"] = (
-        threshold_bootstrap_figure(b2_draws, stored_threshold)
-    )
-    meta["B2_limiar_original_rederivado"] = b2_info["limiar_original"]
-    files["B3_risk_bands_triple.csv"] = _csv_bytes(risk_bands_table(triple))
-    files["B4_ruleout_primary_threshold.csv"] = _csv_bytes(
-        ruleout_table(y_dev, p_dev, y_tri, p_tri, stored_threshold)
-    )
+    if bootstrap_block is None:
+        bootstrap_block = compute_bootstrap_block(y_dev, p_dev, stored_threshold, n_boot=n_boot, seed=seed)
+    files["B1_sensitivity_targets.csv"] = _csv_bytes(pol["B1"])
+    files["B2_threshold_bootstrap_summary.csv"] = _csv_bytes(bootstrap_block["summary"])
+    files["B2_threshold_bootstrap_draws.csv"] = _csv_bytes(bootstrap_block["draws"])
+    files["B2_fig_threshold_bootstrap.png"] = bootstrap_block["fig_png"]
+    files["B2_fig_threshold_bootstrap.svg"] = bootstrap_block["fig_svg"]
+    meta["B2_limiar_original_rederivado"] = bootstrap_block["info"]["limiar_original"]
+    files["B3_risk_bands_triple.csv"] = _csv_bytes(pol["B3"])
+    files["B4_ruleout_primary_threshold.csv"] = _csv_bytes(pol["B4"])
 
     files["metadata.json"] = json.dumps(meta, indent=2, ensure_ascii=False, default=_json_default).encode("utf-8")
     return files

@@ -23,6 +23,7 @@ from euroscore import COEF as EURO_COEF, EURO_CONST
 from modeling import clean_features
 from ai_risk_inference import _safe_select_features
 from risk_data import MISSINGNESS_INDICATOR_COLUMNS
+from dissertation_exports import compute_shap_block, shap_direction_display, shap_supported
 
 if TYPE_CHECKING:
     from tabs import TabContext
@@ -135,49 +136,19 @@ def _cached_shap_global(
 
 
 @st.cache_data(show_spinner=False)
-def _cached_shap_beeswarm(
+def _cached_shap_block(
     xlsx_path: str,
     model_name: str,
-    top_n: int,
+    model_version: str,
     _pipe,
     _X: pd.DataFrame,
-):
-    """Generate SHAP beeswarm plot (summary_plot) for tree-based models."""
-    try:
-        import shap as _shap
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return None
+) -> dict:
+    """Block A of the dissertation export (A1 table + A2/A3 figures), cached.
 
-    estimator = _pipe.named_steps["model"]
-    if not hasattr(estimator, "feature_importances_"):
-        return None
-
-    prep = _pipe.named_steps["prep"]
-    X_proc = prep.transform(_X)
-    feat_names = [_feat_display_name(n) for n in prep.get_feature_names_out()]
-
-    explainer = _shap.TreeExplainer(estimator)
-    import warnings as _warnings
-    with _warnings.catch_warnings():
-        _warnings.filterwarnings("ignore", category=UserWarning, module="shap")
-        shap_values = explainer.shap_values(X_proc)
-    if isinstance(shap_values, list):
-        shap_values = shap_values[1]
-    elif shap_values.ndim == 3:
-        shap_values = shap_values[:, :, 1]
-
-    fig = plt.figure(figsize=(10, 8))
-    _shap.summary_plot(
-        shap_values,
-        X_proc,
-        feature_names=feat_names,
-        plot_type="dot",
-        show=False,
-        max_display=top_n,
-    )
-    plt.tight_layout()
-    return fig
+    Single source of truth: the same compute_shap_block output feeds this
+    tab and the dissertation ZIP.
+    """
+    return compute_shap_block(_pipe, _X, top_n=15, random_state=42)
 
 
 @st.cache_data(show_spinner=False)
@@ -793,61 +764,61 @@ def render(ctx: "TabContext") -> None:
     )
     st.dataframe(perm_table, width="stretch", column_config=model_table_column_config("importance", tr))
 
-    st.markdown(tr("**SHAP global importance (selected model)**", "**Importância global SHAP (modelo selecionado)**"))
-    _shap_model_estimator = artifacts.fitted_models[forced_model].named_steps["model"]
-    if not hasattr(_shap_model_estimator, "feature_importances_"):
+    st.markdown(tr("**Interpretability (SHAP)**", "**Interpretabilidade (SHAP)**"))
+    _shap_pipe = artifacts.fitted_models[forced_model]
+    shap_global_df = pd.DataFrame()
+    if not shap_supported(_shap_pipe):
         st.info(
             tr(
-                "SHAP global visualization is available only for tree-based models (RandomForest, XGBoost, LightGBM, CatBoost). The currently selected model does not expose tree structure.",
-                "A visualização global SHAP está disponível apenas para modelos baseados em árvore (RandomForest, XGBoost, LightGBM, CatBoost). O modelo selecionado não expõe estrutura de árvore.",
+                "SHAP global visualization is available only for tree-based models (RandomForest, XGBoost, LightGBM, CatBoost) with the shap package installed. The currently selected model does not expose tree structure.",
+                "A visualização global SHAP está disponível apenas para modelos baseados em árvore (RandomForest, XGBoost, LightGBM, CatBoost) com o pacote shap instalado. O modelo selecionado não expõe estrutura de árvore.",
             )
         )
     else:
-        st.caption(
-            tr(
-                "Mean |SHAP| ranks each variable by the average magnitude of its contribution to the predicted risk. Direction is the Spearman correlation between the variable's (preprocessed) value and its SHAP value: positive means higher values push predicted risk up, negative means they push it down, near zero means a non-monotonic or negligible effect. The signed mean SHAP is not shown because it is close to zero by construction. Computed with TreeExplainer on the full fitted dataset; values decompose the uncalibrated base-model probability (before post-hoc calibration), whose ranking and direction are preserved by the monotone calibrator.",
-                "SHAP médio |absoluto| ordena cada variável pela magnitude média de sua contribuição ao risco previsto. A direção é a correlação de Spearman entre o valor (pré-processado) da variável e o seu SHAP: positiva indica que valores mais altos aumentam o risco previsto, negativa que o reduzem, e próxima de zero indica efeito não monotônico ou desprezível. O SHAP médio com sinal não é exibido porque fica próximo de zero por construção. Calculado com TreeExplainer na base ajustada completa; os valores decompõem a probabilidade do modelo-base não calibrada (antes da calibração pós-hoc), cuja ordenação e direção são preservadas pelo calibrador monotônico.",
-            )
-        )
         with st.spinner(tr("Computing SHAP global importance…", "Calculando importância global SHAP…")):
-            shap_global_df = _cached_shap_global(
-                xlsx_path,
-                forced_model,
-                20,
-                artifacts.fitted_models[forced_model],
-                X_perm,
+            _shap_block = _cached_shap_block(xlsx_path, forced_model, ctx.model_version, _shap_pipe, X_perm)
+        _explained = _shap_block["explained_output"]
+        _cal_method = _shap_block["calibration_method"]
+        if _explained == "uncalibrated_rf_probability" and _shap_block["final_output_calibrated"]:
+            _explained_txt = tr(
+                f"SHAP explains the {_shap_block['explained_estimator']} probability **before** the post-hoc {_cal_method} calibration (`explained_output = {_explained}`). The calibrator is monotone, so the importance ranking and the direction of effect are preserved; magnitudes are on the uncalibrated probability scale.",
+                f"O SHAP explica a probabilidade do {_shap_block['explained_estimator']} **antes** da calibração {_cal_method} pós-hoc (`explained_output = {_explained}`). O calibrador é monotônico, então a ordem de importância e a direção do efeito são preservadas; as magnitudes estão na escala da probabilidade não calibrada.",
             )
-        if shap_global_df.empty:
-            st.info(tr("SHAP global importance could not be computed.", "Importância global SHAP não pôde ser calculada."))
         else:
-            shap_global_df.columns = [
-                tr("Feature", "Variável"),
-                tr("Mean |SHAP|", "SHAP médio |absoluto|"),
-                tr("Direction (Spearman value × SHAP)", "Direção (Spearman valor × SHAP)"),
-            ]
-            st.dataframe(shap_global_df, width="stretch")
-
-        # --- SHAP Beeswarm Plot ---
-        st.markdown(tr("**SHAP Beeswarm plot**", "**Gráfico Beeswarm SHAP**"))
+            _explained_txt = tr(
+                f"SHAP explains the {_shap_block['explained_estimator']} output probability (`explained_output = {_explained}`); no post-hoc calibrator is applied on top.",
+                f"O SHAP explica a probabilidade de saída do {_shap_block['explained_estimator']} (`explained_output = {_explained}`); nenhum calibrador pós-hoc é aplicado por cima.",
+            )
         st.caption(
-            tr(
-                "Each dot is one patient-feature pair. Position on x-axis shows the SHAP value (impact on prediction). Color shows the feature value (red = high, blue = low). This reveals both importance and direction of each variable's effect.",
-                "Cada ponto é um par paciente-variável. A posição no eixo x mostra o valor SHAP (impacto na predição). A cor indica o valor da variável (vermelho = alto, azul = baixo). Isso revela importância e direção do efeito de cada variável.",
+            _explained_txt + " " + tr(
+                "Direction = Spearman correlation between the variable's (preprocessed) value and its SHAP value (↑ higher values raise predicted risk, ↓ lower it). The analysis is descriptive of the model, not causal. Values are identical to the dissertation export (A1–A3).",
+                "Direção = correlação de Spearman entre o valor (pré-processado) da variável e o seu SHAP (↑ valores mais altos aumentam o risco previsto, ↓ reduzem). A análise descreve o modelo e não é causal. Valores idênticos aos da exportação para dissertação (A1–A3).",
             )
         )
-        with st.spinner(tr("Generating beeswarm plot…", "Gerando gráfico beeswarm…")):
-            beeswarm_fig = _cached_shap_beeswarm(
-                xlsx_path,
-                forced_model,
-                15,
-                artifacts.fitted_models[forced_model],
-                X_perm,
-            )
-        if beeswarm_fig is not None:
-            st.pyplot(beeswarm_fig)
-            _chart_download_buttons(shap_global_df, _fig_to_png_bytes(beeswarm_fig), "shap_beeswarm")
-        else:
-            st.info(tr("Beeswarm plot could not be generated.", "Gráfico beeswarm não pôde ser gerado."))
+        shap_global_df = shap_direction_display(_shap_block["a1"])
+        st.dataframe(
+            shap_global_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "rank": st.column_config.NumberColumn(tr("Rank", "Posição"), format="%d"),
+                "feature": st.column_config.TextColumn(tr("Feature", "Variável")),
+                "mean_abs_shap": st.column_config.NumberColumn(tr("Mean |SHAP|", "|SHAP| médio"), format="%.4f"),
+                "direction": st.column_config.TextColumn(tr("Direction (Spearman value × SHAP)", "Direção (Spearman valor × SHAP)")),
+            },
+        )
+        _shap_c1, _shap_c2 = st.columns(2)
+        with _shap_c1:
+            st.markdown(tr("*Mean |SHAP| — top 15 (A2)*", "*|SHAP| médio — top 15 (A2)*"))
+            st.image(_shap_block["bar_png"], width="stretch")
+        with _shap_c2:
+            st.markdown(tr("*Beeswarm — top 15 (A3)*", "*Beeswarm — top 15 (A3)*"))
+            st.image(_shap_block["beeswarm_png"], width="stretch")
+            st.caption(tr(
+                "Each dot is one patient; x = SHAP value, colour = feature value (red = high, blue = low).",
+                "Cada ponto é um paciente; x = valor SHAP, cor = valor da variável (vermelho = alto, azul = baixo).",
+            ))
+        _chart_download_buttons(_shap_block["a1"], _shap_block["beeswarm_png"], "shap_beeswarm")
 
         # --- SHAP Dependence Plot ---
         st.markdown(tr("**SHAP Feature dependence**", "**Dependência de variável SHAP**"))
@@ -857,7 +828,7 @@ def render(ctx: "TabContext") -> None:
                 "Mostra como o valor de uma variável individual afeta a predição do modelo. Cada ponto é um paciente; o eixo y mostra a contribuição SHAP daquela variável ao risco previsto.",
             )
         )
-        _shap_dep_features = shap_global_df[tr("Feature", "Variável")].tolist() if not shap_global_df.empty else []
+        _shap_dep_features = shap_global_df["feature"].tolist() if not shap_global_df.empty else []
         if _shap_dep_features:
             selected_feature = st.selectbox(
                 tr("Select feature for dependence plot", "Selecione variável para gráfico de dependência"),
