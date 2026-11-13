@@ -38,6 +38,7 @@ from stats_compare import (
     THRESHOLD_ROLE_HISTORICAL_COMPARATOR,
     THRESHOLD_ROLE_EXPLORATORY,
 )
+from dissertation_exports import build_dissertation_export_zip, build_triple_cohort
 from export_helpers import (
     build_comparison_full_package,
     build_comparison_summary_pdf,
@@ -585,7 +586,7 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     if not metrics_all.empty:
         metrics_all["Score"] = metrics_all["Score"].replace(_score_rename)
 
-    triple = df[["morte_30d", "ia_risk_oof", "euroscore_calc", "sts_score"]].dropna()
+    triple = build_triple_cohort(df)
     st.markdown(tr("**Primary head-to-head table**", "**Tabela principal head-to-head**"))
     st.caption(tr(
         f"Matched triple cohort: n = {len(triple)}. Each score is evaluated in exactly the same patients. "
@@ -1657,3 +1658,45 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
                 "dl_stat_md",
                 lambda: _build_stat_summary_export().encode("utf-8"),
             )
+
+    # ── Dissertation exports (SHAP + threshold-policy analyses) ──────────
+    st.divider()
+    st.markdown(tr("#### Dissertation exports", "#### Exportações para dissertação"))
+    st.caption(tr(
+        "ZIP with SHAP interpretability (top 15, bar and beeswarm figures) and threshold-policy analyses "
+        "(sensitivity targets 80/85/90%, outcome-stratified bootstrap of the Sens-90% threshold with B = 2000, "
+        "risk bands <5% / 5–15% / >15% in the triple cohort, rule-out profile at the stored threshold) plus metadata.json. "
+        "Derived analysis only — the model, bundle and stored threshold are unchanged. Takes about a minute.",
+        "ZIP com interpretabilidade SHAP (top 15, figuras de barras e beeswarm) e análises da política de limiar "
+        "(alvos de sensibilidade 80/85/90%, bootstrap estratificado por desfecho do limiar Sens-90% com B = 2000, "
+        "faixas de risco <5% / 5–15% / >15% na coorte tripla, perfil de exclusão no limiar armazenado) e metadata.json. "
+        "Apenas análise derivada — modelo, bundle e limiar armazenado não são alterados. Leva cerca de um minuto.",
+    ))
+
+    def _build_dissertation_zip() -> bytes:
+        from ai_risk_inference import _safe_select_features
+        from modeling import clean_features
+
+        _pipe = artifacts.fitted_models[forced_model]
+        _X = clean_features(_safe_select_features(ctx.prepared.data, artifacts.feature_columns))
+        _bi = dict(ctx.bundle_info or {})
+        _bi.setdefault("bundle_schema_version", getattr(artifacts, "bundle_schema_version", None))
+        return build_dissertation_export_zip(
+            df,
+            float(_default_threshold),
+            _pipe,
+            _X,
+            model_name=forced_model,
+            model_version=MODEL_VERSION,
+            bundle_info=_bi,
+            n_boot=2000,
+            seed=42,
+        )
+
+    _lazy_export_button(
+        tr("Export analyses for dissertation", "Exportar análises para dissertação"),
+        f"{_export_base}_dissertacao.zip",
+        "application/zip",
+        "dl_dissertation_zip",
+        _build_dissertation_zip,
+    )

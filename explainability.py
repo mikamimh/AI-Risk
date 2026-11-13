@@ -318,3 +318,151 @@ def show_explainability_ui(explainer: ModelExplainer, X_test: pd.DataFrame, y_te
             top_features = explainer.top_features_for_sample(X_test, idx, top_n=7)
             st.write("**Top Contributing Features:**")
             st.dataframe(top_features, width="stretch")
+
+
+# ---------------------------------------------------------------------------
+# Global SHAP summary (TreeExplainer on the preprocessed design matrix)
+# ---------------------------------------------------------------------------
+
+_FEAT_PREFIXES = (
+    "cat__onehot__",
+    "cat__target_enc__",
+    "cat__ordinal__",
+    "cat__",
+    "num__",
+    "valve__",
+    "ord__",
+)
+
+EXPLAINED_OUTPUT_UNCALIBRATED = "uncalibrated_rf_probability"
+
+
+def _feat_display_name(name: str) -> str:
+    """Strip sklearn ColumnTransformer prefixes from a preprocessor output name.
+
+    The underlying column name is returned unchanged (no translation): the
+    dataset column names are the display names used throughout the app.
+    """
+    s = str(name)
+    for prefix in _FEAT_PREFIXES:
+        if s.startswith(prefix):
+            return s[len(prefix):]
+    return s
+
+
+def _final_output_calibration(pipe) -> Tuple[bool, str]:
+    """Return (is_calibrated, method) for the deployed probability of ``pipe``.
+
+    ``modeling.ClippedPipeline`` keeps the outer estimator in ``_pipeline``;
+    when that is a fitted ``CalibratedClassifierCV`` the clinical output is
+    calibrated, otherwise the base model probability is the clinical output.
+    """
+    outer = pipe.__dict__.get("_pipeline", pipe) if hasattr(pipe, "__dict__") else pipe
+    cal_list = getattr(outer, "calibrated_classifiers_", None)
+    if cal_list:
+        return True, str(getattr(outer, "method", "unknown"))
+    return False, "none"
+
+
+def _spearman_safe(x: np.ndarray, y: np.ndarray) -> float:
+    from scipy.stats import spearmanr  # noqa: PLC0415
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < 3 or np.nanstd(x[ok]) == 0 or np.nanstd(y[ok]) == 0:
+        return float("nan")
+    rho = spearmanr(x[ok], y[ok]).statistic
+    return float(rho) if np.isfinite(rho) else float("nan")
+
+
+def shap_global_summary(pipe, X: pd.DataFrame, top_n: int = 15, random_state: int = 42) -> dict:
+    """Global SHAP importance with a sign-aware direction measure.
+
+    What is explained
+    -----------------
+    ``shap.TreeExplainer`` is applied to ``pipe.named_steps["model"]`` over
+    ``pipe.named_steps["prep"].transform(X)``.  For the bundled tree models,
+    ``modeling.ClippedPipeline`` wraps a ``CalibratedClassifierCV(ensemble=False)``
+    and ``named_steps`` resolves to ``calibrated_classifiers_[0].estimator``:
+    the base pipeline refit on the full cohort, *before* the post-hoc
+    calibrator.  The SHAP values therefore decompose the **uncalibrated**
+    tree-ensemble probability (for a RandomForest: the mean of the trees'
+    leaf class frequencies), not the calibrated clinical probability.
+    ``explained_output`` is always ``"uncalibrated_rf_probability"`` on this
+    path; ``final_output_calibrated`` / ``calibration_method`` report whether
+    the deployed probability adds a calibrator on top.  Sigmoid (Platt) and
+    isotonic maps are monotone non-decreasing, so feature rankings and the
+    direction of effect carry over to the calibrated output, but the SHAP
+    magnitudes are on the uncalibrated probability scale.
+
+    Direction
+    ---------
+    The signed mean SHAP is ~0 by construction (SHAP values are centred on
+    the expected value), so it does not indicate direction.  Direction is
+    given by ``spearman_value_vs_shap``: the Spearman correlation between a
+    feature's preprocessed value and its SHAP value across patients
+    (> 0: higher value → higher predicted risk).
+
+    Args:
+        pipe: fitted pipeline exposing ``named_steps["prep"]`` and ``["model"]``.
+        X: raw feature DataFrame (same columns used at fit time).
+        top_n: number of rows kept in ``table``.
+        random_state: seeds the global NumPy RNG used by ``shap.summary_plot``
+            jitter when plotting from the returned matrices (TreeExplainer
+            itself is deterministic).
+
+    Returns:
+        dict with ``table`` (top_n rows: feature, feature_raw, mean_abs_shap,
+        rank, spearman_value_vs_shap), ``table_full`` (all features),
+        ``shap_values`` (n × p), ``X_proc`` (n × p dense), ``feature_names``,
+        ``expected_value``, ``explained_output``, ``explained_estimator``,
+        ``final_output_calibrated``, ``calibration_method``, ``random_state``.
+    """
+    shap = _import_shap()
+    estimator = pipe.named_steps["model"]
+    prep = pipe.named_steps["prep"]
+    X_proc = prep.transform(X)
+    if hasattr(X_proc, "toarray"):
+        X_proc = X_proc.toarray()
+    X_proc = np.asarray(X_proc, dtype=float)
+    raw_names = [str(n) for n in prep.get_feature_names_out()]
+    names = [_feat_display_name(n) for n in raw_names]
+
+    explainer = shap.TreeExplainer(estimator)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, module="shap")
+        sv = explainer.shap_values(X_proc)
+    if isinstance(sv, list):
+        sv = sv[1]
+    sv = np.asarray(sv)
+    if sv.ndim == 3:
+        sv = sv[:, :, 1]
+    ev = explainer.expected_value
+    if isinstance(ev, (list, np.ndarray)) and np.ndim(ev) > 0:
+        ev = np.asarray(ev).ravel()[-1]
+
+    mean_abs = np.abs(sv).mean(axis=0)
+    rho = np.array([_spearman_safe(X_proc[:, j], sv[:, j]) for j in range(sv.shape[1])])
+    full = pd.DataFrame({
+        "feature": names,
+        "feature_raw": raw_names,
+        "mean_abs_shap": mean_abs,
+        "spearman_value_vs_shap": rho,
+    }).sort_values("mean_abs_shap", ascending=False, kind="mergesort").reset_index(drop=True)
+    full.insert(3, "rank", np.arange(1, len(full) + 1))
+
+    is_cal, cal_method = _final_output_calibration(pipe)
+    return {
+        "table": full.head(top_n).reset_index(drop=True),
+        "table_full": full,
+        "shap_values": sv,
+        "X_proc": X_proc,
+        "feature_names": names,
+        "expected_value": float(ev),
+        "explained_output": EXPLAINED_OUTPUT_UNCALIBRATED,
+        "explained_estimator": type(estimator).__name__,
+        "final_output_calibrated": bool(is_cal),
+        "calibration_method": cal_method,
+        "random_state": int(random_state),
+    }

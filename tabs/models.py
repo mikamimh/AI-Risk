@@ -107,9 +107,15 @@ def _cached_shap_global(
     _pipe,
     _X: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Compute global SHAP importance using TreeExplainer on preprocessed features."""
+    """Global SHAP importance (TreeExplainer) via ``explainability.shap_global_summary``.
+
+    Columns: Feature, Mean |SHAP|, Spearman (value × SHAP).  The signed mean
+    SHAP is not reported: it is ~0 by construction and does not indicate
+    direction.  Values decompose the *uncalibrated* base-model probability
+    (see ``shap_global_summary`` docstring).
+    """
     try:
-        import shap as _shap
+        import shap as _shap  # noqa: F401
     except ImportError:
         return pd.DataFrame()
 
@@ -117,28 +123,15 @@ def _cached_shap_global(
     if not hasattr(estimator, "feature_importances_"):
         return pd.DataFrame()
 
-    prep = _pipe.named_steps["prep"]
-    X_proc = prep.transform(_X)
-    feat_names = [_feat_display_name(n) for n in prep.get_feature_names_out()]
+    from explainability import shap_global_summary
 
-    explainer = _shap.TreeExplainer(estimator)
-    import warnings as _warnings
-    with _warnings.catch_warnings():
-        _warnings.filterwarnings("ignore", category=UserWarning, module="shap")
-        shap_values = explainer.shap_values(X_proc)
-    if isinstance(shap_values, list):
-        shap_values = shap_values[1]
-    elif shap_values.ndim == 3:
-        shap_values = shap_values[:, :, 1]
-
-    mean_abs = np.abs(shap_values).mean(axis=0)
-    mean_dir = shap_values.mean(axis=0)
-    df_imp = pd.DataFrame({
-        "Feature": feat_names,
-        "Mean |SHAP|": mean_abs,
-        "Mean SHAP": mean_dir,
-    }).sort_values("Mean |SHAP|", ascending=False).head(top_n).reset_index(drop=True)
-    return df_imp
+    res = shap_global_summary(_pipe, _X, top_n=top_n)
+    tbl = res["table"]
+    return pd.DataFrame({
+        "Feature": tbl["feature"].values,
+        "Mean |SHAP|": tbl["mean_abs_shap"].values,
+        "Spearman (value × SHAP)": tbl["spearman_value_vs_shap"].values,
+    })
 
 
 @st.cache_data(show_spinner=False)
@@ -812,8 +805,8 @@ def render(ctx: "TabContext") -> None:
     else:
         st.caption(
             tr(
-                "Unlike permutation importance (which only shows magnitude), SHAP values also show direction: positive mean SHAP pushes predicted risk up, negative pushes it down. Computed on the full fitted dataset using TreeExplainer.",
-                "Ao contrário da importância por permutação (que mostra apenas magnitude), os valores SHAP também mostram direção: SHAP médio positivo aumenta o risco previsto, negativo reduz. Calculado na base ajustada completa com TreeExplainer.",
+                "Mean |SHAP| ranks each variable by the average magnitude of its contribution to the predicted risk. Direction is the Spearman correlation between the variable's (preprocessed) value and its SHAP value: positive means higher values push predicted risk up, negative means they push it down, near zero means a non-monotonic or negligible effect. The signed mean SHAP is not shown because it is close to zero by construction. Computed with TreeExplainer on the full fitted dataset; values decompose the uncalibrated base-model probability (before post-hoc calibration), whose ranking and direction are preserved by the monotone calibrator.",
+                "SHAP médio |absoluto| ordena cada variável pela magnitude média de sua contribuição ao risco previsto. A direção é a correlação de Spearman entre o valor (pré-processado) da variável e o seu SHAP: positiva indica que valores mais altos aumentam o risco previsto, negativa que o reduzem, e próxima de zero indica efeito não monotônico ou desprezível. O SHAP médio com sinal não é exibido porque fica próximo de zero por construção. Calculado com TreeExplainer na base ajustada completa; os valores decompõem a probabilidade do modelo-base não calibrada (antes da calibração pós-hoc), cuja ordenação e direção são preservadas pelo calibrador monotônico.",
             )
         )
         with st.spinner(tr("Computing SHAP global importance…", "Calculando importância global SHAP…")):
@@ -830,7 +823,7 @@ def render(ctx: "TabContext") -> None:
             shap_global_df.columns = [
                 tr("Feature", "Variável"),
                 tr("Mean |SHAP|", "SHAP médio |absoluto|"),
-                tr("Mean SHAP (direction)", "SHAP médio (direção)"),
+                tr("Direction (Spearman value × SHAP)", "Direção (Spearman valor × SHAP)"),
             ]
             st.dataframe(shap_global_df, width="stretch")
 
