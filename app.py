@@ -878,18 +878,19 @@ EuroSCORE II is calculated using the **published logistic equation** with 18 ris
 |:--|:--|:--|
 | Age | `Age (years)` | Continuous, with non-linear transform |
 | Sex | `Sex` | Female = 1 |
-| Renal function | `Cr clearance, ml/min *`, `Dialysis` | Categories: normal, moderate, severe, dialysis |
+| Renal function | `Cr clearance, ml/min *` (Cockcroft-Gault), `Dialysis` | Categories: normal (>85), 50–85, ≤50 ml/min, dialysis (dialysis takes precedence) |
 | Extracardiac arteriopathy | `PVD` | PVD used as proxy |
-| Poor mobility | Not available | Set to False for all patients (limitation) |
-| Previous cardiac surgery | `Previous cardiac surgery` | Binary |
-| Active endocarditis | `Active endocarditis` | "Possible" is treated as positive |
+| Poor mobility | `Poor mobility` | Not captured in the registry (No for all training patients); entered manually in the Prediction form |
+| Previous cardiac surgery | `Previous surgery` | Positive for any text other than absence tokens (None, No, Não, Nenhuma, -, blank, unknown) |
+| Active endocarditis | `IE` | "Yes", "Possible" and "Active" are treated as positive |
 | Critical preoperative state | `Critical preoperative state` | Binary |
-| Diabetes on insulin | `Diabetes`, `Insulin` | Both must be positive |
-| NYHA class | `NYHA` | Classes I–IV |
-| CCS class 4 angina | `CCS 4` | Binary |
-| LVEF | `LVEF, %` | Categories: good (>50%), moderate (31–50%), poor (21–30%), very poor (≤20%) |
-| Pulmonary hypertension | `PSAP` | Categories: no (≤30), moderate (31–55), severe (>55 mmHg) |
-| Urgency | `Urgency` | Elective, urgent, emergency, salvage |
+| Diabetes on insulin | `Diabetes` | Positive when `Diabetes` = "Insulin" |
+| NYHA class | `Preoperative NYHA` | Classes I–IV |
+| CCS class 4 angina | `CCS4` | Binary |
+| Recent MI | `Coronary Symptom` | Positive for STEMI / NSTEMI |
+| LVEF | `Pré-LVEF, %` | Categories: good (>50%), moderate (31–50%), poor (21–30%), very poor (≤20%) |
+| Pulmonary hypertension | `PSAP` | Categories: no (≤30), moderate (31–54), severe (≥55 mmHg) |
+| Urgency | `Surgical Priority` | Elective, urgent, emergency, salvage |
 | Procedure weight | `Surgery` | Derived from procedure list: isolated CABG = 0, 1 major procedure = 1, 2+ = 2, 3+ = 3 |
 | Thoracic aorta surgery | `Surgery` | Only for explicit aneurysm/dissection/root procedures |
 
@@ -904,18 +905,19 @@ O EuroSCORE II é calculado usando a **equação logística publicada** com 18 f
 |:--|:--|:--|
 | Idade | `Age (years)` | Contínua, com transformação não-linear |
 | Sexo | `Sex` | Feminino = 1 |
-| Função renal | `Cr clearance, ml/min *`, `Dialysis` | Categorias: normal, moderada, grave, diálise |
+| Função renal | `Cr clearance, ml/min *` (Cockcroft-Gault), `Dialysis` | Categorias: normal (>85), 50–85, ≤50 ml/min, diálise (diálise tem precedência) |
 | Arteriopatia extracardíaca | `PVD` | PVD usado como proxy |
-| Mobilidade reduzida | Não disponível | Definido como False para todos (limitação) |
-| Cirurgia cardíaca prévia | `Previous cardiac surgery` | Binário |
-| Endocardite ativa | `Active endocarditis` | "Possible" é tratado como positivo |
+| Mobilidade reduzida | `Poor mobility` | Não registrada na base (Não para todos os pacientes de treino); informada manualmente no formulário de Predição |
+| Cirurgia cardíaca prévia | `Previous surgery` | Positiva para qualquer texto exceto tokens de ausência (None, No, Não, Nenhuma, -, vazio, unknown) |
+| Endocardite ativa | `IE` | "Yes", "Possible" e "Active" são tratados como positivos |
 | Estado crítico pré-operatório | `Critical preoperative state` | Binário |
-| Diabetes com insulina | `Diabetes`, `Insulin` | Ambos devem ser positivos |
-| Classe NYHA | `NYHA` | Classes I–IV |
-| Angina CCS classe 4 | `CCS 4` | Binário |
-| FEVE | `LVEF, %` | Categorias: boa (>50%), moderada (31–50%), ruim (21–30%), muito ruim (≤20%) |
-| Hipertensão pulmonar | `PSAP` | Categorias: não (≤30), moderada (31–55), grave (>55 mmHg) |
-| Urgência | `Urgency` | Eletiva, urgente, emergência, salvamento |
+| Diabetes com insulina | `Diabetes` | Positivo quando `Diabetes` = "Insulin" |
+| Classe NYHA | `Preoperative NYHA` | Classes I–IV |
+| Angina CCS classe 4 | `CCS4` | Binário |
+| IAM recente | `Coronary Symptom` | Positivo para STEMI / NSTEMI |
+| FEVE | `Pré-LVEF, %` | Categorias: boa (>50%), moderada (31–50%), ruim (21–30%), muito ruim (≤20%) |
+| Hipertensão pulmonar | `PSAP` | Categorias: não (≤30), moderada (31–54), grave (≥55 mmHg) |
+| Urgência | `Surgical Priority` | Eletiva, urgente, emergência, salvamento |
 | Peso do procedimento | `Surgery` | Derivado da lista: CRM isolada = 0, 1 procedimento maior = 1, 2+ = 2, 3+ = 3 |
 | Cirurgia de aorta torácica | `Surgery` | Apenas para aneurisma/dissecção/raiz aórtica explícitos |
 

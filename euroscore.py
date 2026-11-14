@@ -5,7 +5,7 @@ This module implements the published EuroSCORE II formula for predicting
 the 27 logistic regression coefficients published by Nashef et al. (2012).
 
 References:
-    Nashef et al. European heart journal. 2012;33(16):1925-1933
+    Nashef SAM, et al. EuroSCORE II. Eur J Cardiothorac Surg. 2012;41(4):734-744
 
 Example:
     >>> from euroscore import euroscore_from_row
@@ -224,8 +224,10 @@ def euroscore_from_row(row: pd.Series) -> float:
 
     Notes:
         - Missing values (NaN) treated conservatively (default to low risk)
-        - Poor mobility only positive if CCS4 is also positive
-        - LVEF checked in two columns (Pré-LVEF first, fallback to LVEF)
+        - Poor mobility read from the "Poor mobility" column (not captured in
+          the training registry, so absent for those patients)
+        - LVEF read from "Pré-LVEF, %" only (missing -> "good" category)
+        - PSAP >= 55 mmHg is classified as severe (55 itself is severe)
         - Procedure weight derived from comma-separated surgery list
         - Thoracic aorta surgery identified only for explicit aortic procedures
 
