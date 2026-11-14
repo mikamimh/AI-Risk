@@ -8,7 +8,7 @@ The training source can be a canonical multi-sheet workbook/database, a flat CSV
 
 ## What this app does
 
-The system reads structured clinical data from hospital electronic records, builds an analytical dataset with one row per surgery, and calculates three risk scores for predicting 30-day or in-hospital mortality:
+The system reads structured clinical data from hospital electronic records, builds an analytical dataset with one row per surgery, and calculates three risk scores for predicting 30-day mortality:
 
 | Score | Method | Source |
 |:--|:--|:--|
@@ -17,6 +17,8 @@ The system reads structured clinical data from hospital electronic records, buil
 | **STS Score** | STS Adult Cardiac Surgery Risk Calculator (Predicted Risk of Mortality) | Obtained via automated queries to the official web calculator |
 
 The app then compares the three scores statistically and provides explainability tools for research and clinical discussion. The current model is developed on a local single-center cohort; external generalizability is not assumed and should be evaluated with the Temporal Validation workflow before broader interpretation.
+
+**Outcome definition.** The outcome (`morte_30d`) is death within 30 days of surgery, derived from the `Death` field by `risk_data.map_death_30d`. Deaths after postoperative day 30 count as survival (event = 0), **even when they occur during the index hospitalisation**. See "Accepted `Death` / `morte_30d` column values" under "Expected data structure" for the exact value mapping.
 
 ### Important: this is a research tool
 
@@ -31,10 +33,10 @@ The app is organised visually as ten tabs in the following order:
 | 1 | **Overview** | Organised in five fixed snapshot blocks: **Cohort Snapshot** (n, event rate, surgery profile), **Model Snapshot** (model, version, threshold, calibration method), **Performance Snapshot** (leaderboard with calibrated OOF metrics and per-model Youden thresholds), **Operational Snapshot** (score availability), **Audit Snapshot** (eligibility flow and execution report) |
 | 2 | **Prediction** | Single-patient scoring: AI Risk, EuroSCORE II, and STS Score for one case with per-variable contributions; individual patient report export (Markdown / PDF / XLSX / CSV) covering scores, input completeness, clinical interpretation, risk factors, and methodological notes |
 | 3 | **Batch** | Two workflows in one tab. **Research Export** exports the active research cohort with app-calculated AI Risk, EuroSCORE II, STS Score, classes, and OOF predictions (CSV/XLSX). **Batch Prediction** accepts new patient files, reports compatibility KPIs, computes AI Risk + EuroSCORE II and optional STS Score, shows a short preview plus full table in an expander, and exports CSV/XLSX/Markdown/PDF. |
-| 4 | **Comparison** | Head-to-head statistical comparison of AI Risk, EuroSCORE II, and STS Score. Layout: **Operational threshold** → **Main Result — Matched Triple Cohort** → **Calibration at a Glance** → **Threshold Comparison** → probability distributions/diagnostics → **Overall Comparison — Available Data** → **Supplementary Pairwise Comparisons** → **Supplementary Clinical Utility** (NRI/IDI with 95% CI and p-value) → **Interpretation & Export**. |
+| 4 | **Comparison** | Head-to-head statistical comparison of AI Risk, EuroSCORE II, and STS Score. Layout: **Operational threshold** → **Main Result — Matched Triple Cohort** → **Calibration at a Glance** → **Threshold Comparison** → probability distributions/diagnostics → **Overall Comparison — Available Data** → **Supplementary Pairwise Comparisons** → **Supplementary Clinical Utility** (NRI/IDI with 95% CI and p-value) → **Interpretation & Export**. An **Operational threshold policy** section shows the dissertation analyses B1–B4 (rule-out profile at the primary threshold, cost of the sensitivity target, on-demand bootstrap threshold stability, risk bands) and offers the **Export analyses for dissertation** ZIP (see "Export surfaces"). |
 | 5 | **Temporal Validation** | Apply the frozen trained model to an independently uploaded cohort. Layout: **Locked Model** → **Cohort Integrity** (upload, chronological check, normalization) → **Drift Summary** (training vs validation comparison, auto-interpretation, calibration drift warning) → **AI Risk — Primary Validation** (KPI cards: AUC, AUPRC, Brier, calibration intercept/slope, CIL, ICI, sensitivity, NPV, flag rate) → **Discrimination & Calibration table** → **Pairwise comparison** → **Risk categories** → **Interactive Graphs** → **Interpretation Summary** → **Threshold Analysis** (compact operating characteristics table with bundle-stored primary threshold highlighted, Youden labeled post-hoc; full TP/FP/TN/FN table in expander) → **Exploratory Local Recalibration** (structured all-methods table, guardrails) → case-level predictions → exports. |
 | 6 | **Data Quality** | Exception-oriented quality panel: top metrics, issues block when missingness/readiness warnings exist, score availability, validation readiness, detailed tables inside expanders, and a consolidated **Audit Package (XLSX)** download with 14 sheets covering the full data governance chain. |
-| 7 | **Models** | Plain-language guide to how each candidate algorithm works — how it behaves, its strengths and limitations, and when it typically fails. Also includes selected-model predictor/explainability views. |
+| 7 | **Models** | Plain-language guide to how each candidate algorithm works — how it behaves, its strengths and limitations, and when it typically fails. Also includes selected-model predictor/explainability views, including the global SHAP summary (top-15 table with direction, bar and beeswarm plots) used in dissertation blocks A1–A3. |
 | 8 | **Subgroups** | Performance stratified by clinically relevant subgroups with controls, best-subgroup insight, compact table, full table expander, caution flags for small n/events, and CSV/PDF/XLSX exports. |
 | 9 | **Guide** | Methodological notes, variable mapping, EuroSCORE II approximations; Methods text download (.txt). |
 | 10 | **Dictionary** | Live data dictionary generated from the current ingestion code. Shows source/app variables, aliases, missing/blank rules, derived fields, active model usage, and exports CSV plus an XLSX workbook with `Dicionario`, `Aliases_CSV`, and `Regras_de_Leitura`. |
@@ -52,6 +54,22 @@ Exports are intentionally grouped by use case:
 - **Temporal Validation** exports `ai_risk_temporal_{version}_{date}_summary.xlsx`, `_predictions.csv`, `_report.pdf`, and `_report.md`. The summary workbook includes cohort summary, performance (with CIL, ICI, AUPRC baseline, calibration CI, flag rate), pairwise comparison, risk categories, calibration, case-level predictions, common-cohort results when applicable, normalization summary when applicable, and exploratory recalibration/threshold sheets when available. The PDF/Markdown report includes a Drift Summary (training vs validation), Calibration Drift Warning (when conditions are met), primary performance tables, and an Interpretation Summary.
 - **Subgroups** exports the current subgroup panel as CSV, a summary PDF, and a lazy-built consolidated XLSX (`subgroup_all_panels.xlsx`) with README, summary, compact subgroup metrics, full subgroup metrics, and caution flags.
 - **Dictionary** exports CSV plus `data_dictionary.xlsx` with the live `Dicionario`, accepted flat-file aliases, and current reading rules.
+- **Comparison — Export analyses for dissertation** builds a ZIP with the SHAP interpretability (block A) and operational threshold-policy analyses (block B) used in the dissertation. It is generated by `dissertation_exports.py`, which is pure logic (no Streamlit) and never modifies the model, the bundle, the stored threshold policy, or existing metrics. Development-cohort analyses use the selected model's calibrated OOF predictions (`ia_risk_oof`); triple-cohort analyses use patients with AI Risk, EuroSCORE II and STS Score all available (`build_triple_cohort`, shared with the Comparison tab). The ZIP contains:
+
+  | File | Contents |
+  |:--|:--|
+  | `A1_shap_global_top15.csv` | Global SHAP ranking (top 15 features by mean \|SHAP\|), with direction of effect given by the Spearman correlation between each feature's value and its SHAP value (`spearman_value_vs_shap`) |
+  | `A2_fig_shap_bar.{png,svg}` | Bar plot of mean \|SHAP\| for the top 15 features |
+  | `A3_fig_shap_beeswarm.{png,svg}` | SHAP beeswarm plot for the top 15 features (deterministic seed) |
+  | `B1_sensitivity_targets.csv` | Cost of the sensitivity target: thresholds derived on development OOF for targets of 80%, 85% and 90%, with sensitivity, specificity, PPV, NPV and flag rate in the development cohort and, with the threshold locked, in the triple cohort |
+  | `B2_threshold_bootstrap_summary.csv`, `B2_threshold_bootstrap_draws.csv`, `B2_fig_threshold_bootstrap.{png,svg}` | Threshold stability: outcome-stratified bootstrap (B = 2000, seed 42) of the sensitivity-constrained 90% threshold — median and 95% percentile interval of the re-derived threshold and flag rate, optimism-corrected sensitivity/specificity (mean test performance on the original sample, and Harrell's correction), and the death that defines the threshold |
+  | `B3_risk_bands_triple.csv` | Risk bands <5%, 5–15% and >15% (the same cut-offs as the NRI; exactly 15% falls in the intermediate band) for each score in the triple cohort: n, % of cohort, deaths, observed mortality, mean predicted risk |
+  | `B4_ruleout_primary_threshold.csv` | Rule-out profile at the stored primary threshold, in the development and triple cohorts: n and deaths below/above the threshold, mortality below (with Wilson 95% CI) and above, flag rate |
+  | `metadata.json` | Provenance: model version, cohorts, seeds, bootstrap B, OOF hash, and the re-derived threshold |
+
+  **SHAP caveat:** SHAP values explain the **RandomForest before calibration** (`explained_output = "uncalibrated_rf_probability"`). The sigmoid calibrator is monotonic, so ranking and direction of effect carry over to the calibrated clinical probability, but SHAP magnitudes are on the uncalibrated probability scale.
+
+  The Models and Comparison tabs and the ZIP use the **same calculation source** (`dissertation_exports.py`); `tests/test_dissertation_ui_consistency.py` checks that what the UI shows matches the exported files.
 
 Large exports in Comparison, Temporal Validation, and Subgroups are generated lazily: the first click prepares the file and replaces the same visual slot with the download button. Cached export bytes are invalidated when the relevant model/source/threshold context changes.
 
@@ -100,6 +118,16 @@ The same inference core (`ai_risk_inference.py`) is used by all three scoring co
 ### Official baseline — v17 (2026-04-25)
 
 **Bundle version:** `2026-04-25-v17-sens90-threshold` · **Cohort:** n=454, 68 events (15.0%) · **Features:** 61
+
+**Training setup (from the bundle's training manifest):** StratifiedGroupKFold, k = 5, seed 42; selected model RandomForest with sigmoid (Platt) calibration.
+
+**Automatic model selection criteria** (`modeling._select_best_model`) — a candidate is eligible for automatic selection only if its calibrated OOF predictions satisfy all of:
+- AUC ≥ 0.60;
+- Brier score below the prevalence reference, prevalence × (1 − prevalence);
+- dynamic range p99 − p01 ≥ 0.15;
+- calibration slope between 0.40 and 2.50;
+- at least one patient with predicted risk below 8% (historical usability floor);
+- among eligible models whose AUC is within 0.01 of the best, the one with calibration slope closest to 1 wins.
 
 | Model | AUC | AUPRC | Brier | BSS |
 |:--|--:|--:|--:|--:|
@@ -193,9 +221,15 @@ RF calibration: intercept = 0.034, slope = 1.013 · Youden threshold: 0.094 · @
 
 ### EuroSCORE II
 
-- Calculated locally using the published logistic regression formula with 18 risk factors and 27 coefficients
-- Reference: Nashef et al., *Eur J Cardiothorac Surg*, 2012
-- Variables mapped from the available dataset; some approximations are documented in the Guide tab
+- Calculated locally (`euroscore.euroscore_from_row`) using the published logistic equation of Nashef et al. (*Eur J Cardiothorac Surg* 2012;41:734–744) — 18 risk factors, 27 coefficients, constant −5.324537 — recomputed every time a bundle is loaded, so values never come from a stale cache
+- Variables are mapped from the available dataset with these approximations (also documented in the Guide tab):
+  - **Extracardiac arteriopathy** — approximated by peripheral vascular disease (`PVD`)
+  - **Poor mobility** (severely impaired mobility) — not captured in the registry; considered absent for every patient in the training dataset
+  - **Pulmonary hypertension** — from `PSAP` using the published EuroSCORE II categories (≤ 30 mmHg not elevated, 31–55 mmHg moderate, > 55 mmHg severe); missing PSAP is treated as not elevated
+  - **Renal impairment** — creatinine clearance by Cockcroft-Gault (`Cr clearance, ml/min *`; > 85, 51–85, ≤ 50 ml/min), with dialysis taking precedence
+  - **Previous cardiac surgery** — positive for any `Previous surgery` text other than absence tokens (`None`, `No`, `Não`, `Nenhuma`, `-`, blank, `unknown`)
+  - Missing values default to the low-risk category
+- **Agreement with the value recorded in Dataset_2025** (app-computed `euroscore_calc` vs registry `euroscore_sheet_clean`, all 454 surgeries): Spearman ρ = 0.97; mean difference (app − registry) 0.07 percentage points; Bland–Altman limits of agreement −3.9 to 4.0 percentage points; absolute difference < 0.5 percentage point in 92% of surgeries. The per-patient values can be exported with `scripts/export_euroscore_app.py`.
 
 ### STS Score (STS Predicted Risk of Mortality)
 
@@ -364,10 +398,10 @@ Because XLSX preserves symbols more faithfully, training metrics may differ slig
 
 | Value(s) | Interpretation |
 |:--|:--|
-| `Operative`, `Death` | event = 1 (operative/in-hospital death) |
+| `Operative`, `Death` | event = 1 (operative death, day 0; or death recorded without timing) |
 | `0` | event = 1 (death on day of surgery) |
 | `1` … `30` | event = 1 (death within 30 days) |
-| `31`, `> 30`, `>30` | event = 0 (death beyond 30-day window) |
+| `31`, `> 30`, `>30` | event = 0 (death beyond 30-day window — counted as survival even if in-hospital) |
 | `-`, `--` | event = 0 (survivor, standard encoding) |
 | `Yes`, `yes`, `Y`, `y`, `True`, `true`, `Sim`, `sim` | event = 1 (boolean fallback) |
 | `No`, `no`, `N`, `n`, `False`, `false`, `Não`, `Nao`, `nao` | event = 0 (boolean fallback) |
@@ -449,7 +483,9 @@ The normalization summary is surfaced in:
 | `tabs/` | Extracted Streamlit tab modules for Batch & Export, Comparison, and Temporal Validation; each receives shared state through `TabContext` |
 | `subgroups.py` | Subgroup assignment (surgery type, LVEF, renal function) and per-subgroup metrics |
 | `report_text.py` | Manuscript-ready Methods and Results text builders |
-| `explainability.py` | SHAP-based model explainability |
+| `explainability.py` | SHAP-based model explainability, including the global SHAP summary (`shap_global_summary`) with Spearman-based direction of effect |
+| `dissertation_exports.py` | Dissertation analyses (pure logic, no Streamlit): SHAP blocks A1–A3 and threshold-policy blocks B1–B4; single calculation source for the Models/Comparison tab views and the dissertation export ZIP |
+| `scripts/export_euroscore_app.py` | Exports, per patient, the EuroSCORE II exactly as the app computes it (to `local_data/export_euroscore_app.csv`, never committed) and prints the AUC of `euroscore_calc` in the triple cohort |
 | `stats_compare.py` | Statistical evaluation and model comparison |
 | `model_metadata.py` | Model versioning, audit trail, individual reports; re-exports from export_helpers and temporal_validation |
 | `export_helpers.py` | Statistical and report export helpers. Builds Comparison Summary PDF, Full PDF, Full Package ZIP, structured comparison XLSX with optional DCA/overall/all-pairs/threshold/figure-data sheets, Markdown/CSV/PDF report conversions, and PNG figure exports. Used by Comparison, Prediction, Batch, and Temporal Validation downloads. |
@@ -603,6 +639,10 @@ The primary operational threshold is now defined by a **clinical policy**, not a
 3. The largest threshold with sensitivity ≥ 90% is selected; ties are broken by highest threshold value.
 4. The selected threshold, target sensitivity, and classification metrics are stored in the bundle's `threshold_policy` field.
 5. When the bundle is loaded by the app, `threshold_policy["selected_threshold"]` is used as the default operational threshold.
+
+**Which death defines the threshold:** with 68 events in the v17 training cohort, sensitivity ≥ 90% allows at most 6 false negatives. The selected threshold (8.50%) therefore equals the predicted probability of the **7th death in ascending order of predicted risk**; the 6 deaths with lower predicted risk are the false negatives.
+
+**Stability (dissertation block B2):** in 2,000 outcome-stratified bootstrap resamples (seed 42) in which the threshold is re-derived with the same rule, the 95% percentile interval of the threshold is **7.5% to 10.7%** (median 8.5%). Optimism-corrected sensitivity — the mean sensitivity of each bootstrap threshold applied to the original sample — is 0.905, against an apparent 0.912. The analysis is available on demand in the Comparison tab and in the dissertation export ZIP.
 
 **Fallback for legacy bundles:** bundles generated before this policy was introduced do not carry `threshold_policy`. The app falls back to the fixed **8%** for those bundles and displays a "legacy fixed 8% fallback" label in the Overview and Temporal Validation panels. Retraining generates a bundle with the new policy.
 

@@ -38,6 +38,19 @@ from stats_compare import (
     THRESHOLD_ROLE_HISTORICAL_COMPARATOR,
     THRESHOLD_ROLE_EXPLORATORY,
 )
+from dissertation_exports import (
+    COHORT_DEV,
+    COHORT_TRIPLE,
+    TRIPLE_COLUMNS,
+    b2_display_summary,
+    build_dissertation_export_zip,
+    build_triple_cohort,
+    compute_bootstrap_block,
+    compute_threshold_policy,
+    oof_hash,
+    risk_bands_figure,
+    shap_supported,
+)
 from export_helpers import (
     build_comparison_full_package,
     build_comparison_summary_pdf,
@@ -442,6 +455,30 @@ def _cached_csv_from_markdown(md_text: str) -> bytes:
     return statistical_summary_to_csv(md_text).encode("utf-8")
 
 
+@st.cache_data(show_spinner=False)
+def _cached_threshold_policy(bundle_key: str, stored_threshold: float, score_df: pd.DataFrame) -> dict:
+    """Blocks B1/B3/B4 of the dissertation export (same function as the ZIP)."""
+    return compute_threshold_policy(score_df, stored_threshold)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _cached_bootstrap_block(
+    bundle_key: str, oof_key: str, n_boot: int, seed: int, stored_threshold: float, _y, _p,
+) -> dict:
+    """Block B2 (B = n_boot outcome-stratified bootstrap), keyed on bundle version,
+    OOF hash, B and seed; the arrays themselves are not hashed."""
+    return compute_bootstrap_block(_y, _p, stored_threshold, n_boot=n_boot, seed=seed)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_risk_bands_png(bands: pd.DataFrame, language: str) -> bytes:
+    labels = None
+    if language == "English":
+        labels = {"observed": "Observed mortality", "predicted": "Mean predicted risk",
+                  "band": "Predicted risk band"}
+    return risk_bands_figure(bands, labels)[0]
+
+
 def render(ctx: TabContext) -> None:  # noqa: C901 – extracted verbatim, complexity preserved
     """Render the Statistical Comparison tab (tab index 2)."""
     tr = ctx.tr
@@ -585,7 +622,7 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
     if not metrics_all.empty:
         metrics_all["Score"] = metrics_all["Score"].replace(_score_rename)
 
-    triple = df[["morte_30d", "ia_risk_oof", "euroscore_calc", "sts_score"]].dropna()
+    triple = build_triple_cohort(df)
     st.markdown(tr("**Primary head-to-head table**", "**Tabela principal head-to-head**"))
     st.caption(tr(
         f"Matched triple cohort: n = {len(triple)}. Each score is evaluated in exactly the same patients. "
@@ -1657,3 +1694,243 @@ A análise principal é a comparação tripla (head-to-head), em que AI Risk, Eu
                 "dl_stat_md",
                 lambda: _build_stat_summary_export().encode("utf-8"),
             )
+
+    # ── Operational threshold policy (single source with dissertation export) ──
+    st.divider()
+    st.markdown(tr("### Operational threshold policy", "### Política de limiar operacional"))
+    _is_pt = language != "English"
+
+    def _num(x: float, d: int) -> str:
+        s = f"{x:.{d}f}"
+        return s.replace(".", ",") if _is_pt else s
+
+    def _pct(x, d: int = 1) -> str:
+        try:
+            x = float(x)
+        except (TypeError, ValueError):
+            return "–"
+        return "–" if not np.isfinite(x) else f"{_num(x * 100, d)}%"
+
+    def _m3(x) -> str:
+        try:
+            x = float(x)
+        except (TypeError, ValueError):
+            return "–"
+        return "–" if not np.isfinite(x) else _num(x, 3)
+
+    _stored_thr = float(_default_threshold)
+    _bi = dict(ctx.bundle_info or {})
+    _bundle_key = f"{MODEL_VERSION}|{_bi.get('saved_at', '')}|{forced_model}"
+    _policy = _cached_threshold_policy(
+        _bundle_key, _stored_thr, df.reindex(columns=TRIPLE_COLUMNS),
+    )
+    _y_dev, _p_dev = _policy["y_dev"], _policy["p_dev"]
+    _oof_key = oof_hash(_y_dev, _p_dev)
+    _n_boot, _seed = 2000, 42
+    _b2_flag = f"_b2_requested::{_bundle_key}::{_oof_key}::{_n_boot}::{_seed}::{_stored_thr:.10f}"
+    _has_triple = _policy["n_triple"] > 0
+    _no_triple_msg = tr(
+        "Triple cohort unavailable: no patients have AI Risk, EuroSCORE II and STS Score simultaneously "
+        "(STS Score not computed or not available in this session).",
+        "Coorte tripla indisponível: nenhum paciente tem AI Risk, EuroSCORE II e STS Score simultaneamente "
+        "(STS Score não calculado ou indisponível nesta sessão).",
+    )
+    _cohort_label = {
+        COHORT_DEV: tr(f"Development (OOF, n = {len(_y_dev)})", f"Desenvolvimento (OOF, n = {len(_y_dev)})"),
+        COHORT_TRIPLE: tr(f"Triple cohort (n = {_policy['n_triple']})", f"Coorte tripla (n = {_policy['n_triple']})"),
+    }
+
+    # Export button (top of section) — reuses the cached blocks shown below.
+    def _build_dissertation_zip() -> bytes:
+        from ai_risk_inference import _safe_select_features
+        from modeling import clean_features
+        from tabs.models import _cached_shap_block
+
+        _pipe = artifacts.fitted_models[forced_model]
+        _X = clean_features(_safe_select_features(ctx.prepared.data, artifacts.feature_columns))
+        _shap_blk = (
+            _cached_shap_block(ctx.xlsx_path, forced_model, MODEL_VERSION, _pipe, _X)
+            if shap_supported(_pipe) else None
+        )
+        _boot_blk = _cached_bootstrap_block(_bundle_key, _oof_key, _n_boot, _seed, _stored_thr, _y_dev, _p_dev)
+        st.session_state[_b2_flag] = True
+        _bi_meta = dict(_bi)
+        _bi_meta.setdefault("bundle_schema_version", getattr(artifacts, "bundle_schema_version", None))
+        return build_dissertation_export_zip(
+            df,
+            _stored_thr,
+            _pipe,
+            _X,
+            model_name=forced_model,
+            model_version=MODEL_VERSION,
+            bundle_info=_bi_meta,
+            n_boot=_n_boot,
+            seed=_seed,
+            shap_block=_shap_blk,
+            bootstrap_block=_boot_blk,
+        )
+
+    _lazy_export_button(
+        tr("Export analyses for dissertation", "Exportar análises para dissertação"),
+        f"{_export_base}_dissertacao.zip",
+        "application/zip",
+        "dl_dissertation_zip",
+        _build_dissertation_zip,
+    )
+    st.caption(tr(
+        "The values shown are identical to those in the ZIP (SHAP A1–A3 in the Models tab; B1–B4 below). "
+        "Derived analysis only — the model, bundle and stored threshold are unchanged.",
+        "Os valores exibidos são idênticos aos do ZIP (SHAP A1–A3 na aba Modelos; B1–B4 abaixo). "
+        "Apenas análise derivada — modelo, bundle e limiar armazenado não são alterados.",
+    ))
+
+    # a) Rule-out profile at the primary threshold (B4)
+    with st.expander(
+        tr(f"a) Profile at the primary threshold ({_pct(_stored_thr)}) — B4",
+           f"a) Perfil no limiar primário ({_pct(_stored_thr)}) — B4"),
+        expanded=True,
+    ):
+        _b4 = _policy["B4"]
+        for _, _r in _b4.iterrows():
+            st.markdown(f"**{_cohort_label[_r['coorte']]}**")
+            if _r["coorte"] == COHORT_TRIPLE and not _has_triple:
+                st.info(_no_triple_msg)
+                continue
+            _c = st.columns(4)
+            _c[0].metric(
+                tr("Flag rate", "Taxa de sinalização"), _pct(_r["flag_rate"]),
+                help=tr(f"{int(_r['n_acima'])} of {int(_r['n'])} patients at or above the threshold.",
+                        f"{int(_r['n_acima'])} de {int(_r['n'])} pacientes no limiar ou acima."),
+            )
+            _c[1].metric(
+                tr("Mortality above threshold", "Mortalidade acima do limiar"), _pct(_r["mortalidade_acima"]),
+                help=tr(f"{int(_r['obitos_acima'])} deaths / {int(_r['n_acima'])} flagged.",
+                        f"{int(_r['obitos_acima'])} óbitos / {int(_r['n_acima'])} sinalizados."),
+            )
+            _c[2].metric(
+                tr("Mortality below threshold", "Mortalidade abaixo do limiar"), _pct(_r["mortalidade_abaixo"]),
+                help=tr(
+                    f"{int(_r['obitos_abaixo'])} deaths / {int(_r['n_abaixo'])}. Wilson 95% CI: "
+                    f"{_pct(_r['mortalidade_abaixo_ic95_inf'])} – {_pct(_r['mortalidade_abaixo_ic95_sup'])}.",
+                    f"{int(_r['obitos_abaixo'])} óbitos / {int(_r['n_abaixo'])}. IC95% de Wilson: "
+                    f"{_pct(_r['mortalidade_abaixo_ic95_inf'])} – {_pct(_r['mortalidade_abaixo_ic95_sup'])}.",
+                ),
+            )
+            _c[3].metric(tr("n below threshold", "n abaixo do limiar"), f"{int(_r['n_abaixo'])}")
+
+    # b) Cost of the sensitivity target (B1)
+    with st.expander(tr("b) Cost of the sensitivity target — B1", "b) Custo do alvo de sensibilidade — B1"), expanded=False):
+        st.caption(tr(
+            "Threshold derived on the development OOF predictions for each sensitivity target, then applied locked to AI Risk in the triple cohort.",
+            "Limiar derivado nas predições OOF de desenvolvimento para cada alvo de sensibilidade e aplicado travado ao AI Risk na coorte tripla.",
+        ))
+        _b1 = _policy["B1"]
+        _cohort_opts = [COHORT_DEV, COHORT_TRIPLE]
+        _b1_cohort = st.radio(
+            tr("Cohort", "Coorte"), _cohort_opts, format_func=lambda c: _cohort_label[c],
+            horizontal=True, key="b1_cohort",
+        )
+        if _b1_cohort == COHORT_TRIPLE and not _has_triple:
+            st.info(_no_triple_msg)
+        else:
+            _g = _b1[_b1["coorte"] == _b1_cohort]
+            st.dataframe(
+                pd.DataFrame({
+                    tr("Sensitivity target", "Alvo de sensibilidade"): [_pct(v, 0) for v in _g["alvo_sensibilidade"]],
+                    tr("Threshold", "Limiar"): [_pct(v) for v in _g["limiar"]],
+                    tr("Sensitivity", "Sensibilidade"): [_m3(v) for v in _g["sensibilidade"]],
+                    tr("Specificity", "Especificidade"): [_m3(v) for v in _g["especificidade"]],
+                    tr("PPV", "VPP"): [_m3(v) for v in _g["VPP"]],
+                    tr("NPV", "VPN"): [_m3(v) for v in _g["VPN"]],
+                    tr("Flag rate", "Taxa de sinalização"): [_pct(v) for v in _g["flag_rate"]],
+                }),
+                width="stretch",
+                hide_index=True,
+            )
+            _chart = pd.DataFrame({
+                tr("Flag rate (%)", "Taxa de sinalização (%)"): (_g["flag_rate"].to_numpy() * 100),
+                tr("Specificity (%)", "Especificidade (%)"): (_g["especificidade"].to_numpy() * 100),
+            }, index=[_pct(v, 0) for v in _g["alvo_sensibilidade"]])
+            _chart.index.name = tr("Sensitivity target", "Alvo de sensibilidade")
+            st.line_chart(_chart, height=260)
+
+    # c) Threshold stability (B2)
+    with st.expander(tr("c) Threshold stability (bootstrap) — B2", "c) Estabilidade do limiar (bootstrap) — B2"), expanded=False):
+        st.caption(tr(
+            f"B = {_n_boot} outcome-stratified resamples of the development OOF predictions (seed = {_seed}). "
+            "In each resample the Sens-90% policy is re-derived (t_b) and t_b is applied to the original sample "
+            "(optimism-corrected estimate).",
+            f"B = {_n_boot} reamostragens estratificadas por desfecho das predições OOF de desenvolvimento (seed = {_seed}). "
+            "Em cada reamostragem a política Sens-90% é re-derivada (t_b) e t_b é aplicado à amostra original "
+            "(estimativa corrigida para otimismo).",
+        ))
+        if not st.session_state.get(_b2_flag):
+            if st.button(tr("Compute threshold stability", "Calcular estabilidade do limiar"), key="b2_compute"):
+                st.session_state[_b2_flag] = True
+        if st.session_state.get(_b2_flag):
+            with st.spinner(tr("Running bootstrap (B = 2000)…", "Executando bootstrap (B = 2000)…")):
+                _b2 = _cached_bootstrap_block(_bundle_key, _oof_key, _n_boot, _seed, _stored_thr, _y_dev, _p_dev)
+            _b2_disp = b2_display_summary(_b2["summary"])
+            _labels = {
+                "limiar_armazenado": (tr("Stored threshold", "Limiar armazenado"), "pct"),
+                "limiar_original": (tr("Threshold re-derived on original sample", "Limiar re-derivado na amostra original"), "pct"),
+                "t_b_mediana": (tr("Bootstrap threshold — median", "Limiar bootstrap — mediana"), "pct"),
+                "t_b_p2_5": (tr("Bootstrap threshold — 2.5th percentile", "Limiar bootstrap — percentil 2,5"), "pct"),
+                "t_b_p97_5": (tr("Bootstrap threshold — 97.5th percentile", "Limiar bootstrap — percentil 97,5"), "pct"),
+                "flag_rate_original": (tr("Flag rate — original sample", "Taxa de sinalização — amostra original"), "pct"),
+                "flag_rate_boot_mediana": (tr("Flag rate — bootstrap median", "Taxa de sinalização — mediana bootstrap"), "pct"),
+                "flag_rate_boot_p2_5": (tr("Flag rate — 2.5th percentile", "Taxa de sinalização — percentil 2,5"), "pct"),
+                "flag_rate_boot_p97_5": (tr("Flag rate — 97.5th percentile", "Taxa de sinalização — percentil 97,5"), "pct"),
+                "sensibilidade_aparente": (tr("Sensitivity — apparent", "Sensibilidade — aparente"), "m3"),
+                "sensibilidade_corrigida_media_teste": (tr("Sensitivity — optimism-corrected (mean of t_b on original)", "Sensibilidade — corrigida para otimismo (média de t_b na original)"), "m3"),
+                "sensibilidade_corrigida_harrell": (tr("Sensitivity — Harrell optimism correction", "Sensibilidade — correção de otimismo de Harrell"), "m3"),
+                "especificidade_aparente": (tr("Specificity — apparent", "Especificidade — aparente"), "m3"),
+                "especificidade_corrigida_media_teste": (tr("Specificity — optimism-corrected", "Especificidade — corrigida para otimismo"), "m3"),
+                "prop_reamostragens_sens_original_abaixo_alvo": (tr("Resamples with sensitivity < 90% on original sample", "Reamostragens com sensibilidade < 90% na amostra original"), "pct"),
+                "eventos": (tr("Events (deaths)", "Eventos (óbitos)"), "int"),
+                "fn_max_permitido": (tr("Maximum false negatives allowed", "Falsos negativos máximos permitidos"), "int"),
+                "fn_observado": (tr("False negatives at the threshold", "Falsos negativos no limiar"), "int"),
+                "obito_definidor_rank_ascendente": (tr("Defining death — ascending rank among deaths", "Óbito definidor — rank ascendente entre os óbitos"), "int"),
+                "obito_definidor_prob_prevista": (tr("Defining death — predicted probability", "Óbito definidor — probabilidade prevista"), "pct"),
+            }
+            _fmt = {"pct": _pct, "m3": _m3, "int": lambda v: f"{int(float(v))}"}
+            _c1, _c2 = st.columns([1.1, 1])
+            with _c1:
+                st.image(_b2["fig_png"], width="stretch")
+            with _c2:
+                st.dataframe(
+                    pd.DataFrame({
+                        tr("Metric", "Métrica"): [_labels.get(m, (m, ""))[0] for m in _b2_disp["metrica"]],
+                        tr("Value", "Valor"): [
+                            _fmt[_labels.get(m, (m, "m3"))[1]](v) for m, v in zip(_b2_disp["metrica"], _b2_disp["valor"])
+                        ],
+                    }),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    # d) Risk bands in the triple cohort (B3)
+    with st.expander(tr("d) Risk bands in the triple cohort — B3", "d) Faixas de risco na coorte tripla — B3"), expanded=False):
+        if not _has_triple:
+            st.info(_no_triple_msg)
+        else:
+            _b3 = _policy["B3"]
+            st.dataframe(
+                pd.DataFrame({
+                    tr("Method", "Método"): _b3["metodo"],
+                    tr("Band", "Faixa"): _b3["faixa"],
+                    "n": _b3["n"],
+                    tr("% of cohort", "% da coorte"): [_pct(v / 100) for v in _b3["pct_coorte"]],
+                    tr("Deaths", "Óbitos"): _b3["obitos"],
+                    tr("Observed mortality", "Mortalidade observada"): [_pct(v) for v in _b3["mortalidade_observada"]],
+                    tr("Mean predicted risk", "Risco previsto médio"): [_pct(v) for v in _b3["risco_previsto_medio"]],
+                }),
+                width="stretch",
+                hide_index=True,
+            )
+            _b3_png = _cached_risk_bands_png(_b3, language)
+            st.image(_b3_png, width="stretch")
+            st.caption(tr(
+                "5% and 15% cut-offs, the same used in the reclassification analysis (NRI).",
+                "Cortes de 5% e 15%, os mesmos usados na análise de reclassificação (NRI).",
+            ))

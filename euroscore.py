@@ -5,7 +5,7 @@ This module implements the published EuroSCORE II formula for predicting
 the 27 logistic regression coefficients published by Nashef et al. (2012).
 
 References:
-    Nashef et al. European heart journal. 2012;33(16):1925-1933
+    Nashef SAM, et al. EuroSCORE II. Eur J Cardiothorac Surg. 2012;41(4):734-744
 
 Example:
     >>> from euroscore import euroscore_from_row
@@ -125,9 +125,16 @@ def _lv_category(lvef: float) -> str:
 
 
 def _pap_category(psap: float) -> str:
+    """EuroSCORE II pulmonary hypertension category from systolic PA pressure.
+
+    Published definition (Nashef et al. 2012): moderate 31–55 mmHg, severe
+    > 55 mmHg — so exactly 55 mmHg is moderate.  The category key "ge_55"
+    (and coefficient ``pap_ge_55``) is kept for backward compatibility; it
+    means "> 55 mmHg".
+    """
     if np.isnan(psap):
         return "normal"
-    if psap >= 55:
+    if psap > 55:
         return "ge_55"
     if psap >= 31:
         return "31_55"
@@ -165,6 +172,30 @@ def _recent_mi_from_coronary(value: object) -> bool:
     return "stemi" in s or "non-stemi" in s or "nstemi" in s
 
 
+# Tokens in "Previous surgery" that mean NO previous cardiac surgery.
+# "none" is the canonical absence value produced by
+# risk_data.normalize_previous_surgery_value (blank / "No" -> "None").
+_NO_PREVIOUS_SURGERY_TOKENS = frozenset({
+    "", "nan", "none", "no", "nao", "não", "nenhuma", "-", "--", "unknown",
+})
+
+
+def _has_previous_cardiac_surgery(value: object) -> bool:
+    """Return True if a "Previous surgery" value indicates prior cardiac surgery.
+
+    Returns False for NaN / Python ``None``, the empty string and the absence
+    tokens ``"none"``, ``"no"``, ``"nao"``, ``"não"``, ``"nenhuma"``, ``"-"``,
+    ``"--"`` and ``"unknown"`` (case-insensitive, surrounding whitespace
+    ignored). Any other text (e.g. ``"CABG"``, ``"AVR"``, ``"Yes"``) returns True.
+
+    ``"unknown"`` is deliberately treated as absence, preserving the previous
+    conservative behaviour (missing data defaults to low risk).
+    """
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return False
+    return str(value).strip().lower() not in _NO_PREVIOUS_SURGERY_TOKENS
+
+
 def _creatinine_clearance_category(cc: float, dialysis: bool) -> str:
     if dialysis:
         return "dialysis"
@@ -200,8 +231,10 @@ def euroscore_from_row(row: pd.Series) -> float:
 
     Notes:
         - Missing values (NaN) treated conservatively (default to low risk)
-        - Poor mobility only positive if CCS4 is also positive
-        - LVEF checked in two columns (Pré-LVEF first, fallback to LVEF)
+        - Poor mobility read from the "Poor mobility" column (not captured in
+          the training registry, so absent for those patients)
+        - LVEF read from "Pré-LVEF, %" only (missing -> "good" category)
+        - PSAP 31–55 mmHg is moderate and > 55 mmHg severe (published cut-offs)
         - Procedure weight derived from comma-separated surgery list
         - Thoracic aorta surgery identified only for explicit aortic procedures
 
@@ -231,8 +264,7 @@ def euroscore_from_row(row: pd.Series) -> float:
     cpd = _yes(row.get("Chronic Lung Disease", np.nan))
     poor_mobility = _yes(row.get("Poor mobility", np.nan))
 
-    prev_surg = row.get("Previous surgery")
-    redo = pd.notna(prev_surg) and str(prev_surg).strip().lower() not in {"", "nan", "unknown", "no"}
+    redo = _has_previous_cardiac_surgery(row.get("Previous surgery"))
 
     dialysis = _yes(row.get("Dialysis"))
     cc = parse_number(row.get("Cr clearance, ml/min *"))
