@@ -889,7 +889,7 @@ EuroSCORE II is calculated using the **published logistic equation** with 18 ris
 | CCS class 4 angina | `CCS4` | Binary |
 | Recent MI | `Coronary Symptom` | Positive for STEMI / NSTEMI |
 | LVEF | `Pré-LVEF, %` | Categories: good (>50%), moderate (31–50%), poor (21–30%), very poor (≤20%) |
-| Pulmonary hypertension | `PSAP` | Categories: no (≤30), moderate (31–54), severe (≥55 mmHg) |
+| Pulmonary hypertension | `PSAP` | Categories: no (≤30), moderate (31–55), severe (>55 mmHg) |
 | Urgency | `Surgical Priority` | Elective, urgent, emergency, salvage |
 | Procedure weight | `Surgery` | Derived from procedure list: isolated CABG = 0, 1 major procedure = 1, 2+ = 2, 3+ = 3 |
 | Thoracic aorta surgery | `Surgery` | Only for explicit aneurysm/dissection/root procedures |
@@ -916,7 +916,7 @@ O EuroSCORE II é calculado usando a **equação logística publicada** com 18 f
 | Angina CCS classe 4 | `CCS4` | Binário |
 | IAM recente | `Coronary Symptom` | Positivo para STEMI / NSTEMI |
 | FEVE | `Pré-LVEF, %` | Categorias: boa (>50%), moderada (31–50%), ruim (21–30%), muito ruim (≤20%) |
-| Hipertensão pulmonar | `PSAP` | Categorias: não (≤30), moderada (31–54), grave (≥55 mmHg) |
+| Hipertensão pulmonar | `PSAP` | Categorias: não (≤30), moderada (31–55), grave (>55 mmHg) |
 | Urgência | `Surgical Priority` | Eletiva, urgente, emergência, salvamento |
 | Peso do procedimento | `Surgery` | Derivado da lista: CRM isolada = 0, 1 procedimento maior = 1, 2+ = 2, 3+ = 3 |
 | Cirurgia de aorta torácica | `Surgery` | Apenas para aneurisma/dissecção/raiz aórtica explícitos |

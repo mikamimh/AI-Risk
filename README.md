@@ -225,7 +225,7 @@ RF calibration: intercept = 0.034, slope = 1.013 · Youden threshold: 0.094 · @
 - Variables are mapped from the available dataset with these approximations (also documented in the Guide tab):
   - **Extracardiac arteriopathy** — approximated by peripheral vascular disease (`PVD`)
   - **Poor mobility** (severely impaired mobility) — not captured in the registry; considered absent for every patient in the training dataset
-  - **Pulmonary hypertension** — from `PSAP` using the EuroSCORE II categories as implemented in `euroscore._pap_category` (≤ 30 mmHg not elevated, 31–54 mmHg moderate, ≥ 55 mmHg severe — note that a PSAP of exactly 55 mmHg is classified as severe, whereas the published definition places 55 in the moderate band); missing PSAP is treated as not elevated
+  - **Pulmonary hypertension** — from `PSAP` using the published EuroSCORE II categories (≤ 30 mmHg not elevated, 31–55 mmHg moderate, > 55 mmHg severe); missing PSAP is treated as not elevated
   - **Renal impairment** — creatinine clearance by Cockcroft-Gault (`Cr clearance, ml/min *`; > 85, 51–85, ≤ 50 ml/min), with dialysis taking precedence
   - **Previous cardiac surgery** — positive for any `Previous surgery` text other than absence tokens (`None`, `No`, `Não`, `Nenhuma`, `-`, blank, `unknown`)
   - Missing values default to the low-risk category

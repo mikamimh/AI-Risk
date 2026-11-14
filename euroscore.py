@@ -125,9 +125,16 @@ def _lv_category(lvef: float) -> str:
 
 
 def _pap_category(psap: float) -> str:
+    """EuroSCORE II pulmonary hypertension category from systolic PA pressure.
+
+    Published definition (Nashef et al. 2012): moderate 31–55 mmHg, severe
+    > 55 mmHg — so exactly 55 mmHg is moderate.  The category key "ge_55"
+    (and coefficient ``pap_ge_55``) is kept for backward compatibility; it
+    means "> 55 mmHg".
+    """
     if np.isnan(psap):
         return "normal"
-    if psap >= 55:
+    if psap > 55:
         return "ge_55"
     if psap >= 31:
         return "31_55"
@@ -227,7 +234,7 @@ def euroscore_from_row(row: pd.Series) -> float:
         - Poor mobility read from the "Poor mobility" column (not captured in
           the training registry, so absent for those patients)
         - LVEF read from "Pré-LVEF, %" only (missing -> "good" category)
-        - PSAP >= 55 mmHg is classified as severe (55 itself is severe)
+        - PSAP 31–55 mmHg is moderate and > 55 mmHg severe (published cut-offs)
         - Procedure weight derived from comma-separated surgery list
         - Thoracic aorta surgery identified only for explicit aortic procedures
 
